@@ -78,6 +78,12 @@ curl -X POST localhost:8000/jobs -H 'content-type: application/json' \
      -d '{"subject": "cat facts", "providers": {"keywords": "manual"}}'
 ```
 
+Then walk a video through both approval gates from the terminal:
+
+```bash
+python3 scripts/poc.py "3 surprising facts about octopuses"
+```
+
 Put your own footage in `library/clips/` (any `.mp4`, `.mov`, `.webm`, `.mkv`). Filenames that
 contain a scene's keyword are matched first.
 
@@ -185,8 +191,9 @@ MoneyPrinterTurbo request logic.
 **Not run yet:** `docker compose up`, a real render, and live LLM or ElevenLabs calls.
 Things to check on first run:
 
-1. MoneyPrinterTurbo may limit which folders it reads local clips from. If it refuses `/data/clips`,
-   mount the library inside its project folder and update `CLIPS_DIR_IN_MPT` in `docker-compose.yml`.
+1. Clips must be at least 480 pixels on their shorter side, or MoneyPrinterTurbo skips them.
+   (MoneyPrinterTurbo only reads local clips from `storage/local_videos`; `docker-compose.yml`
+   already mounts `library/clips` there.)
 2. Per-scene audio previews assume MoneyPrinterTurbo serves audio at `/tasks/<id>/audio.mp3`.
 3. Only run one pipeline process per `data/` folder.
 

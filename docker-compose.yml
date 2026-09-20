@@ -5,11 +5,15 @@ services:
     build:
       context: ./vendor/MoneyPrinterTurbo
       dockerfile: Dockerfile
+      args:                       # upstream defaults to Chinese mirrors; use the standard ones
+        DOCKER_BUILD_MIRROR: default
+        PIP_USE_OFFICIAL: "1"
     command: ["python3", "main.py"]
     ports: ["127.0.0.1:8080:8080"]
     volumes:
       - ./config/mpt-config.toml:/MoneyPrinterTurbo/config.toml:ro
-      - ./library/clips:/data/clips:ro
+      # MoneyPrinterTurbo only reads local clips from this exact folder (a safety rule in its code)
+      - ./library/clips:/MoneyPrinterTurbo/storage/local_videos
     extra_hosts: ["host.docker.internal:host-gateway"]   # reach Ollama running on the host
     restart: unless-stopped
 
@@ -20,7 +24,7 @@ services:
     environment:
       MPT_BASE_URL: http://mpt:8080
       CLIPS_DIR_HOST: /app/library/clips     # where the pipeline sees the library
-      CLIPS_DIR_IN_MPT: /data/clips          # where MoneyPrinterTurbo sees the same folder
+      CLIPS_DIR_IN_MPT: /MoneyPrinterTurbo/storage/local_videos  # where MoneyPrinterTurbo sees the same folder
     volumes:
       - ./data:/app/data
       - ./library/clips:/app/library/clips
