@@ -54,6 +54,13 @@ class SourcingStage:
         if not queries:
             raise SourcingError("no approved keywords to search for")
         out = SourcingResult(queries=queries)
+        # How many times each (source, search) was already run: "search again" asks for the next page
+        # of results instead of the same first page, so it brings new items instead of repeats.
+        prior: dict[str, int] = {}
+        for n in job.source_notes:
+            if n.get("source") and n.get("query") and not n.get("error") and not n.get("skipped_source"):
+                key = f"{n['source']}|{n['query']}"
+                prior[key] = prior.get(key, 0) + 1
         problems = 0
         for name in job.providers.sources:
             adapter = self.adapters.get(name)
@@ -65,7 +72,7 @@ class SourcingStage:
             (src_dir / "files").mkdir(parents=True, exist_ok=True)
             known = [a for a in job.assets if a.source == name]
             sctx = SourceContext(
-                project_dir=ctx.project_dir, dir=src_dir, subject=job.subject, settings={**ctx.settings, "job_options": job.providers.options},
+                project_dir=ctx.project_dir, dir=src_dir, subject=job.subject, settings={**ctx.settings, "job_options": job.providers.options, "prior_searches": prior},
                 http=LoggedHttp(src_dir, name, user_agent=self.user_agent, transport=self.transport),
                 known_urls={a.source_url for a in known} | {r.url for r in job.references if r.source == name},
                 known_hashes={a.sha256 for a in job.assets if a.sha256},
@@ -169,9 +176,9 @@ def write_sources_md(job: Job, project_dir: Path) -> Path:
     searched = [n for n in notes if "query" in n and not n.get("skipped_source")]
     if searched:
         lines += ["## What was searched", "",
-                  "| Source | Search | Found | Kept | Not kept | Problem |", "|---|---|---|---|---|---|"]
+                  "| Source | Search | Results page | Found | Kept | Not kept | Problem |", "|---|---|---|---|---|---|---|"]
         for n in searched:
-            lines.append(f"| {cell(n.get('source'))} | {cell(n.get('query'))} | {n.get('found', 0)} | {n.get('kept', 0)} | "
+            lines.append(f"| {cell(n.get('source'))} | {cell(n.get('query'))} | {n.get('page', 1)} | {n.get('found', 0)} | {n.get('kept', 0)} | "
                          f"{len(n.get('skipped') or [])} | {cell(n.get('error'))} |")
         lines.append("")
     unavailable = [n for n in notes if n.get("skipped_source") or (n.get("error") and "query" not in n)]

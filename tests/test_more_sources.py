@@ -284,6 +284,41 @@ class PhotosDoNotCrowdOutVideosTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual({a.kind for a in res.assets}, {"image"})
 
 
+class SearchAgainGivesNewResultsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_second_round_asks_for_the_next_page_and_skips_repeats(self):
+        pages_asked = []
+
+        def h(req):
+            if req.url.path == "/api/":
+                page = int(req.url.params.get("page", "1"))
+                pages_asked.append(page)
+                ids = [1, 2] if page == 1 else [2, 3]            # id 2 comes back again on page 2
+                return httpx.Response(200, json={"hits": [
+                    {"id": i, "tags": f"octopus {i}", "user": "A", "pageURL": f"https://pixabay.com/p/{i}",
+                     "largeImageURL": f"https://cdn.pixabay.com/{i}.jpg", "imageWidth": 1280, "imageHeight": 1920} for i in ids]})
+            return httpx.Response(200, content=BYTES + str(req.url).encode())
+        with tempfile.TemporaryDirectory() as d:
+            src = PixabaySource(per_query=4, videos_per_query=0, api_key="k")
+            ctx = make_ctx(Path(d), "pixabay", h)
+            first = await src.fetch(["octopus"], ctx)
+            self.assertEqual(len(first.assets), 2)
+            self.assertEqual(first.trace[0]["page"], 1)
+            # Round two: the pipeline reports one earlier search and the URLs already held.
+            ctx2 = make_ctx_existing(ctx, {"prior_searches": {"pixabay|octopus": 1}},
+                                     known_urls={a.source_url for a in first.assets},
+                                     known_hashes={a.sha256 for a in first.assets})
+            second = await src.fetch(["octopus"], ctx2)
+            self.assertEqual(pages_asked, [1, 2])
+            self.assertEqual(second.trace[0]["page"], 2)
+            self.assertEqual([a.title for a in second.assets], ["octopus 3"])          # only the new one
+            self.assertTrue(any("already in this project" in s["reason"] for s in second.trace[0]["skipped"]))
+
+
+def make_ctx_existing(ctx: SourceContext, settings: dict, known_urls: set, known_hashes: set) -> SourceContext:
+    return SourceContext(project_dir=ctx.project_dir, dir=ctx.dir, http=ctx.http, settings=settings,
+                         known_urls=known_urls, known_hashes=known_hashes)
+
+
 class PositionHintTests(unittest.IsolatedAsyncioTestCase):
     async def test_hints_place_clips(self):
         def asset(name, hint):

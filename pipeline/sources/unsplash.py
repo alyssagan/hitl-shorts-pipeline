@@ -33,7 +33,7 @@ class UnsplashSource(HttpSource):
             raise SourceUnavailable("UNSPLASH_ACCESS_KEY is not set")
         ctx.http.headers["Authorization"] = f"Client-ID {self.key()}"
         data = await ctx.http.get_json(SEARCH, params={
-            "query": query, "per_page": self.per_query, "orientation": "portrait"},
+            "query": query, "per_page": self.per_query, "orientation": "portrait", "page": ctx.page},
             purpose=f"search Unsplash for '{query}'")
         out: list[Candidate] = []
         for p in data.get("results", []):

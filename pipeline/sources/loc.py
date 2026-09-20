@@ -34,7 +34,7 @@ class LibraryOfCongressSource(HttpSource):
 
     async def search(self, query: str, ctx: SourceContext) -> list[Candidate]:
         data = await ctx.http.get_json(SEARCH, params={
-            "q": query, "fo": "json", "c": self.per_query * 3, "fa": "online-format:image"},
+            "q": query, "fo": "json", "c": self.per_query * 3, "fa": "online-format:image", "sp": ctx.page},
             purpose=f"search Library of Congress for '{query}'")
         out: list[Candidate] = []
         for r in data.get("results", []):

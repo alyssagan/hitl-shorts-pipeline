@@ -35,8 +35,8 @@ class NasaSource(HttpSource):
         self.videos = videos
 
     async def search(self, query: str, ctx: SourceContext) -> list[Candidate]:
-        media = "image,video" if self.videos else "image"
-        data = await ctx.http.get_json(SEARCH, params={"q": query, "media_type": media},
+        media = "image,video" if self.videos and self.videos_per_query > 0 else "image"
+        data = await ctx.http.get_json(SEARCH, params={"q": query, "media_type": media, "page": ctx.page},
                                        purpose=f"search NASA library for '{query}'")
         out: list[Candidate] = []
         for item in (data.get("collection", {}).get("items") or [])[: self.per_query * 2]:

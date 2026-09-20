@@ -21,6 +21,7 @@ class CommonsSource(HttpSource):
         data = await ctx.http.get_json(API, params={
             "action": "query", "generator": "search", "gsrnamespace": 6,
             "gsrsearch": f"{query} filetype:bitmap", "gsrlimit": max(self.per_query * 3, 10),
+            "gsroffset": (ctx.page - 1) * max(self.per_query * 3, 10),
             "prop": "imageinfo", "iiprop": "url|size|mime|extmetadata|user",
             "iiurlwidth": 1280, "iiextmetadatafilter": META_KEYS, "format": "json"},
             purpose=f"search Wikimedia Commons for images matching '{query}'")

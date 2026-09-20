@@ -52,7 +52,7 @@ class InternetArchiveSource(HttpSource):
         data = await ctx.http.get_json(SEARCH, params={
             "q": f"({clean}) AND mediatype:(movies OR image)",
             "fl[]": ["identifier", "title", "creator", "licenseurl", "mediatype"],
-            "rows": self.per_query * 6, "output": "json"},
+            "rows": self.per_query * 6, "page": ctx.page, "output": "json"},
             purpose=f"search Internet Archive for '{query}'")
         out: list[Candidate] = []
         for doc in data.get("response", {}).get("docs", []):

@@ -29,7 +29,7 @@ class SmithsonianSource(HttpSource):
         if not self.key():
             raise SourceUnavailable("SMITHSONIAN_API_KEY is not set")
         data = await ctx.http.get_json(SEARCH, params={
-            "api_key": self.key(), "q": f'{query} AND online_media_type:"Images"', "rows": self.per_query * 3},
+            "api_key": self.key(), "q": f'{query} AND online_media_type:"Images"', "rows": self.per_query * 3, "start": (ctx.page - 1) * self.per_query * 3},
             purpose=f"search Smithsonian Open Access for '{query}'")
         out: list[Candidate] = []
         for row in data.get("response", {}).get("rows", []):

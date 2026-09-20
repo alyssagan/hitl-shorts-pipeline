@@ -157,6 +157,7 @@ class SourceContext:
     settings: dict[str, Any] = field(default_factory=dict)
     known_urls: set[str] = field(default_factory=set)      # files already in the project
     known_hashes: set[str] = field(default_factory=set)
+    page: int = 1                  # which page of results to ask for: 2 on the second "search again", and so on
 
 
 @dataclass
@@ -216,7 +217,8 @@ class HttpSource:
         seen_urls = set(ctx.known_urls)
         seen_hashes = set(ctx.known_hashes)
         for q in queries:
-            note: dict[str, Any] = {"source": self.name, "query": q, "found": 0, "kept": 0, "skipped": []}
+            ctx.page = 1 + int((ctx.settings.get("prior_searches") or {}).get(f"{self.name}|{q}", 0))
+            note: dict[str, Any] = {"source": self.name, "query": q, "page": ctx.page, "found": 0, "kept": 0, "skipped": []}
             try:
                 cands = await self.search(q, ctx)
             except SourceUnavailable:

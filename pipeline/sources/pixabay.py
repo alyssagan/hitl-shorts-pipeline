@@ -37,7 +37,7 @@ class PixabaySource(HttpSource):
         out: list[Candidate] = []
         photos = await ctx.http.get_json(PHOTOS, params={
             "key": self.key(), "q": q, "image_type": "photo", "orientation": "vertical",
-            "per_page": max(3, self.per_query), "safesearch": "true"},
+            "per_page": max(3, self.per_query), "safesearch": "true", "page": ctx.page},
             purpose=f"search Pixabay photos for '{query}'")
         for p in photos.get("hits", []):
             url = p.get("largeImageURL") or p.get("webformatURL")
@@ -51,9 +51,9 @@ class PixabaySource(HttpSource):
                 attribution=f"Image by {who} from Pixabay ({p.get('pageURL', '')})",
                 width=p.get("imageWidth"), height=p.get("imageHeight"),
                 meta={"pixabay_id": p.get("id"), "tags": p.get("tags", "")}))
-        if self.videos:
+        if self.videos and self.videos_per_query > 0:
             vids = await ctx.http.get_json(VIDEOS, params={
-                "key": self.key(), "q": q, "per_page": max(3, self.videos_per_query + 1), "safesearch": "true"},
+                "key": self.key(), "q": q, "per_page": max(3, self.videos_per_query + 1), "safesearch": "true", "page": ctx.page},
                 purpose=f"search Pixabay videos for '{query}'")
             for v in vids.get("hits", []):
                 sizes = [s for s in (v.get("videos") or {}).values() if isinstance(s, dict) and s.get("url")]

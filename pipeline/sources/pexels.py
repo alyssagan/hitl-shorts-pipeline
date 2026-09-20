@@ -40,7 +40,7 @@ class PexelsSource(HttpSource):
         ctx.http.headers["Authorization"] = self.key()
         out: list[Candidate] = []
         photos = await ctx.http.get_json(PHOTOS, params={
-            "query": query, "per_page": self.per_query, "orientation": "portrait"},
+            "query": query, "per_page": self.per_query, "orientation": "portrait", "page": ctx.page},
             purpose=f"search Pexels photos for '{query}'")
         for p in photos.get("photos", []):
             who = p.get("photographer", "unknown")
@@ -53,9 +53,9 @@ class PexelsSource(HttpSource):
                 width=p.get("width"), height=p.get("height"),
                 meta={"pexels_id": p.get("id"), "photographer_url": p.get("photographer_url", ""),
                       "avg_color": p.get("avg_color", "")}))
-        if self.videos:
+        if self.videos and self.videos_per_query > 0:
             vids = await ctx.http.get_json(VIDEOS, params={
-                "query": query, "per_page": max(1, self.videos_per_query + 1), "orientation": "portrait"},
+                "query": query, "per_page": max(1, self.videos_per_query + 1), "orientation": "portrait", "page": ctx.page},
                 purpose=f"search Pexels videos for '{query}'")
             for v in vids.get("videos", []):
                 files = [f for f in v.get("video_files", []) if f.get("file_type") == "video/mp4" and f.get("link")]
