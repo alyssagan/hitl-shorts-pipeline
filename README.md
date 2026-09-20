@@ -199,7 +199,7 @@ projects/cute-cats-294eb679f060/
 - `manifest.json`: every kept file with its source URL, license, author, hash, the machine's risk flags, and your decision.
 - `decisions.jsonl`: who decided what, when, why, and by what logic. Actors are `human` (your name), `ai` (model recorded), or `machine` (a rule, with its version).
 
-How risk is judged, rule by rule: [docs/VETTING.md](docs/VETTING.md). Adding another scraping source: [docs/ADD_A_SOURCE.md](docs/ADD_A_SOURCE.md). Trade-offs we chose on purpose and may improve: [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md).
+How risk is judged, rule by rule: [docs/VETTING.md](docs/VETTING.md). Adding another scraping source: [docs/ADD_A_SOURCE.md](docs/ADD_A_SOURCE.md). Trade-offs we chose on purpose and may improve: [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md). Voices, models and sources to try, with results: [docs/OPTIONS_TO_TRY.md](docs/OPTIONS_TO_TRY.md).
 
 ## Adding your own provider
 

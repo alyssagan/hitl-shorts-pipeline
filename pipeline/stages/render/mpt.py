@@ -50,9 +50,10 @@ class MptRenderStage:
             "video_concat_mode": "sequential",
             "video_clip_duration": self.clip_seconds,
             "video_language": self.language,
-            "voice_name": self.voice_name,
             "video_materials": [{"provider": "local", "url": self._to_mpt_path(c), "duration": 0} for c in clips],
         }
+        if self.voice_name:          # an empty voice_name would override MoneyPrinterTurbo's default and break TTS
+            params["voice_name"] = self.voice_name
         task_id = await self.client.create_video(params)
         job.log("note", f"MoneyPrinterTurbo render task {task_id} started", task_id=task_id)
         done = await self.client.wait_task(task_id)

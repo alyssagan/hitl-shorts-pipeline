@@ -39,7 +39,7 @@ aspect = "9:16"
 clip_seconds = 5
 paragraphs = 3
 language = ""
-# e.g. "elevenlabs:<voice_id>:<name>" or an Edge voice like "en-US-AriaNeural-Female"
-voice_name = ""
+# Free Edge voice (needs internet). Other examples: "en-US-GuyNeural-Male", or "elevenlabs:<voice_id>:<name>"
+voice_name = "en-US-AriaNeural-Female"
 # Per-scene audio previews at the scene-review gate (slower; one TTS call per scene).
 generate_scene_audio = false
