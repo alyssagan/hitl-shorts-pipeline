@@ -163,7 +163,21 @@ def scene_gate(api: Api, job: dict, reviewer: str = "") -> dict:
             clip = Path(s["clip_path"]).name if s.get("clip_path") else "(NO CLIP - approve more assets or add footage to library/clips)"
             why = f"\n     clip chosen because: {s['clip_reason']}" if s.get("clip_reason") else ""
             print(f"  {i}. [{clip}]{why}\n     {s['narration']}")
-        order = ask("\nNew order? e.g. 2,1,3 (Enter keeps the current order): ")
+        words = sum(len(sc["narration"].split()) for sc in job["scenes"])
+        print(f"\nLength: {words} words, about {round(words / 2.6)} seconds when spoken.")
+        order = ask("New order? e.g. 2,1,3  |  'edit 2' to change the text of scene 2  |  Enter keeps everything: ")
+        if order.lower().startswith("edit"):
+            try:
+                n = int(order.split()[1])
+                scene = job["scenes"][n - 1]
+            except (ValueError, IndexError):
+                print(f"  Write it like: edit 2   (a scene number from 1 to {len(job['scenes'])})")
+                continue
+            print(f"  Current text: {scene['narration']}")
+            new = ask("  New text (one line, Enter cancels): ")
+            if new:
+                job = api.call("PATCH", f"/jobs/{job['id']}/scenes", {"edits": {scene["id"]: {"narration": new}}, "reviewer": reviewer})
+            continue
         if order:
             try:
                 n = len(job["scenes"])

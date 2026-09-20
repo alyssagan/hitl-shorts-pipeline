@@ -11,6 +11,7 @@ from ...core.models import Job, Scene
 from ..base import SceneResult, StageContext
 from ..mpt_client import MptClient, MptError
 from .clips import AssetClipSource, ClipSource
+from .writer import ScriptWriter
 
 # MoneyPrinterTurbo rejects a script prompt longer than 2000 characters (400 "field required"),
 # (tracked in docs/KNOWN_LIMITATIONS.md #1) so the source text we ground on has to leave room for the instructions and reviewer notes.
@@ -30,11 +31,16 @@ def split_scenes(script: str, sentences_per_scene: int = 2) -> list[str]:
 
 
 class MptSceneStage:
+    """Script + scenes. The script comes from our own ScriptWriter when one is configured
+    (longer, better grounded); otherwise from MoneyPrinterTurbo's script step."""
     actor = ai("moneyprinterturbo-script", model="(set in mpt-config.toml)")
 
     def __init__(self, client: MptClient, clips: ClipSource, voice_name: str = "", language: str = "",
-                 generate_audio: bool = False, paragraphs: int = 3):
+                 generate_audio: bool = False, paragraphs: int = 3, writer: ScriptWriter | None = None):
         self.client = client
+        self.writer = writer
+        if writer:
+            self.actor = ai("script-writer", model=writer.model)
         self.clips = clips
         self.voice_name = voice_name
         self.language = language
@@ -75,7 +81,10 @@ class MptSceneStage:
             "feedback_used": list(job.scene_feedback),
         }
 
-        script = await self.client.script(job.subject, self.language, self.paragraphs, prompt)
+        if self.writer:
+            script, self.last_trace = await self.writer.write(job, keywords)
+        else:
+            script = await self.client.script(job.subject, self.language, self.paragraphs, prompt)
         texts = split_scenes(script)
         if not texts:
             raise MptError("MoneyPrinterTurbo returned an empty script")

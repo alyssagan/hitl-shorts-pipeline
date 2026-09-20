@@ -18,6 +18,7 @@ from .mpt_client import MptClient
 from .render.mpt import MptRenderStage
 from .scenes.clips import LocalFolderClipSource
 from .scenes.mpt import MptSceneStage
+from .scenes.writer import ScriptWriter
 from .sourcing import SourcingStage
 
 
@@ -106,6 +107,23 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
         model=os.getenv("KEYWORD_LLM_MODEL", kw_cfg.get("model", "gpt-4o-mini")),
         count=int(kw_cfg.get("count", 10)),
     ))
+    script_cfg = settings.get("script", {})
+
+    def script_writer():
+        """Our own longer script writer; needs a key. Without one, MoneyPrinterTurbo writes the script."""
+        if script_cfg.get("provider", "llm") != "llm":
+            return None
+        key = os.getenv(script_cfg.get("api_key_env", "GEMINI_API_KEY"), "")
+        if not key:
+            return None
+        return ScriptWriter(
+            base_url=os.getenv("SCRIPT_LLM_BASE_URL", script_cfg.get("base_url", "https://generativelanguage.googleapis.com/v1beta/openai")),
+            api_key=key,
+            model=os.getenv("SCRIPT_LLM_MODEL", script_cfg.get("model", "gemini-3.6-flash")),
+            target_words=int(script_cfg.get("target_words", 260)),
+            grounding_chars=int(script_cfg.get("grounding_chars", 12000)),
+        )
+
     reg.register_scenes("mpt", lambda: MptSceneStage(
         client=mpt(),
         clips=LocalFolderClipSource(lib_cfg.get("clips_dir", "library/clips")),
@@ -113,6 +131,7 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
         language=mpt_cfg.get("language", ""),
         generate_audio=bool(mpt_cfg.get("generate_scene_audio", False)),
         paragraphs=int(mpt_cfg.get("paragraphs", 3)),
+        writer=script_writer(),
     ))
     reg.register_render("mpt", lambda: MptRenderStage(
         client=mpt(),

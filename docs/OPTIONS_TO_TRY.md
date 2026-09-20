@@ -35,14 +35,18 @@ Format: `<language>-<Region>-<Name>Neural-<Female|Male>`. After editing, run
 | `pexels` | to try | Free key. Adds video clips and simpler licensing. |
 | `folder` (`library/scraped/`) | to try | Your own scraped or downloaded files, vetted like the rest. |
 
-## Script grounding (see Limitation #1)
+## Script length and grounding (see Limitation #1)
+
+Settings in `[script]` of `config/pipeline.toml`. After editing, `docker compose up --force-recreate`.
 
 | Option | Status | Result |
 |---|---|---|
-| First ~1000 characters of each article | current | |
-| Use MPT's `custom_system_prompt` (8000 chars) | to try | Check first that it doesn't replace MPT's built-in instructions. |
-| Summarize each article into a fact list first | to try | Extra AI call; would be logged and shown at the scene gate. |
-| Write the script ourselves, skip MPT's script step | to try | |
+| Own writer, `target_words = 260` (~100 s), 12000 chars of sources | current | |
+| `target_words = 150` (~60 s) | to try | |
+| `target_words = 400` (~150 s) | to try | Check the facts closely: less source text per word. |
+| Let MoneyPrinterTurbo write it (`provider = "mpt"`) | fallback | Short, about 1000 chars of sources. |
+| Fact-check pass comparing each claim to the sources | to try | Extra AI call, logged. |
+| Summarize long sources first | to try | Needed for true-crime length. |
 
 ## Video look and length (`config/pipeline.toml`, `[mpt]`)
 

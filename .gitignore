@@ -10,3 +10,12 @@ library/clips/*
 __pycache__/
 *.pyc
 .venv/
+
+# Finished videos and any media stay on this computer only
+output/
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.mp3
+*.wav

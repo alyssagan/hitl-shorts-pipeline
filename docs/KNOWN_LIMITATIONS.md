@@ -5,27 +5,24 @@ improve it later. Add new ones at the bottom; move an entry to "Resolved" when f
 
 ## Open
 
-### 1. Script grounding text is capped at ~1100 characters
-- **What:** when the script is written from Wikipedia text, only the first ~1100
-  characters of the source text are sent to MoneyPrinterTurbo (MPT). Roughly the article intro.
-- **Why:** MPT rejects a `video_script_prompt` longer than 2000 characters
-  (`app/models/schema.py`, `VideoScriptParams`) and reports it as a misleading
-  `400 field required`. Our instructions, approved keywords and reviewer notes share that budget.
-- **Effect:** scripts can miss facts that only appear further down an article. The
-  scene review gate is where a human catches this.
-- **Also:** the budget is split evenly across the source articles. Wikipedia's search can
-  return a loosely related article first ("3 surprising facts about octopuses" returned
-  "Kraken" before "Octopus"), so some of the budget may go to the wrong topic.
-- **Where in code:** `GROUNDING_CHARS` in `pipeline/stages/scenes/mpt.py`, and the last-resort
-  trim `MAX_SCRIPT_PROMPT` in `pipeline/stages/mpt_client.py`.
-- **Options to improve (not started):**
-  1. Send the grounding through MPT's `custom_system_prompt` field (limit 8000). First check
-     whether it replaces MPT's built-in instructions.
-  2. Summarize the whole article into a short fact list first (extra AI call; log it in the
-     decision log and show it at the scene gate).
-  3. Write the script ourselves and skip MPT's script step.
-- **Revisit when:** the first scripts look thin or wrong, or when true-crime mode needs long
-  source material (it will).
+### 1. Script writing depends on a key and a free-tier model
+- **What:** the script is now written by our own writer (`pipeline/stages/scenes/writer.py`,
+  settings in `[script]` of `config/pipeline.toml`): about 260 words (~100 seconds) by default,
+  reading up to 12000 characters of source text split across the articles. Reviewer notes
+  from a rejected draft are added to the prompt.
+- **If there is no `GEMINI_API_KEY`,** or `provider = "mpt"`, the scene stage falls back to
+  MoneyPrinterTurbo's script step. That one is capped by MPT at 2000 characters of
+  instructions (about 1000 of source text) and has no length control, so scripts are short.
+- **Effect:** the model can still get a fact wrong or write below the target. The review gate
+  shows the word count and estimated seconds, and a `warning` is saved in the decision log when
+  the script is under 60% of the target.
+- **Also:** Wikipedia's search can return a loosely related article first
+  ("3 surprising facts about octopuses" returned "Kraken" before "Octopus"). The writer is told
+  to use only the sources, so a wrong source can pull the script off topic.
+- **Longer than ~100 seconds:** raise `target_words` and `grounding_chars`. Very long scripts
+  need more source text than two Wikipedia articles provide (true-crime mode will).
+- **Options to improve:** better article selection; a fact-check pass that compares each claim
+  with the sources; summarizing long sources first.
 
 ### 2. Vetting reads metadata, not pictures
 - **What:** the risk rules (`pipeline/vetting/rules.py`) look at license text, titles,
@@ -81,13 +78,18 @@ improve it later. Add new ones at the bottom; move an entry to "Resolved" when f
 - **Options:** move the recipe into a real `docker/mpt.Dockerfile`, and re-check it whenever
   the MPT submodule is updated.
 
-### 9. Not verified end to end yet
-Assumptions that unit tests can't confirm, to be checked against a real render:
-- per-scene audio path (`/tasks/<id>/audio.mp3`) matches what MPT really writes;
-- MPT reads approved images from the mounted project folder (`PATH_MAP` mapping);
-- subtitle fonts and text rendering work in our MPT container;
-- scene timing and reordering give the video you expect.
-Update this entry as each one is confirmed or fixed.
+### 9. First real render worked; quality is still unjudged
+The first full run (octopus video, about 4 minutes to render) completed end to end. Confirmed:
+gates -> Gemini script -> Edge voice -> MPT render with approved images -> credits file.
+Getting there needed these fixes (all in git history): script prompt over 2000 characters,
+retired Gemini model, MPT error text shown as a script, empty voice name, and a read-only
+project mount.
+Still to judge by watching and comparing runs (record in OPTIONS_TO_TRY.md):
+- do the images match what the voice is saying (clip choice is by shared words only);
+- subtitle look, voice quality, pacing and total length;
+- scene reordering in the review gate (not exercised yet);
+- per-scene audio previews (`generate_scene_audio`, off by default);
+- Windows and the Docker paths there (#10).
 
 ### 10. Windows is untested
 - **What:** designed to run on Windows through Docker, but only developed against a Mac.

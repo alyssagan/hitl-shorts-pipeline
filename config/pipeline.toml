@@ -33,6 +33,19 @@ base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 count = 10
 
+[script]
+# Our own script writer (longer and better grounded than MoneyPrinterTurbo's). Uses any
+# OpenAI-compatible endpoint; the default is Gemini's free tier with GEMINI_API_KEY from .env.
+# Set provider = "mpt" (or leave the key empty) to let MoneyPrinterTurbo write the script instead.
+provider = "llm"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+model = "gemini-3.6-flash"
+api_key_env = "GEMINI_API_KEY"
+# About 2.6 words per second when spoken: 260 words is roughly 100 seconds.
+target_words = 260
+# Characters of source text (Wikipedia etc.) the writer may read, split across the articles.
+grounding_chars = 12000
+
 [mpt]
 base_url = "http://localhost:8080"     # docker-compose overrides via MPT_BASE_URL
 aspect = "9:16"
