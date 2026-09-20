@@ -1,0 +1,4 @@
+[app]
+llm_provider = "anthropic"
+anthropic_api_key = "${ANTHROPIC_API_KEY}"
+anthropic_model_name = "claude-sonnet-4-5"

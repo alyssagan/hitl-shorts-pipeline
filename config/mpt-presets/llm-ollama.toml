@@ -1,0 +1,5 @@
+# Local LLM on the host machine. From inside Docker the host is host.docker.internal.
+[app]
+llm_provider = "ollama"
+ollama_base_url = "http://host.docker.internal:11434/v1"
+ollama_model_name = "llama3.1"

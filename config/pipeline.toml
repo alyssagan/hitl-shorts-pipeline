@@ -1,0 +1,31 @@
+# Settings for the pipeline service itself (not MoneyPrinterTurbo -- see config/mpt-presets/).
+# Secrets do not go here; use .env (KEYWORD_LLM_API_KEY, MPT_API_KEY, ...).
+
+[storage]
+data_dir = "data"
+
+[library]
+# Your scraper / AI-generation output lands here. Scene clips are picked from it.
+clips_dir = "library/clips"
+# Docker only: the same folder as seen by the host and by the MoneyPrinterTurbo
+# container, so render requests can translate paths. Leave blank outside Docker.
+clips_dir_host = ""
+clips_dir_in_mpt = ""
+
+[keywords]
+# Any OpenAI-compatible endpoint: OpenAI, Gemini, OpenRouter, or local Ollama
+# ("http://localhost:11434/v1"). Key comes from KEYWORD_LLM_API_KEY in .env.
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+count = 10
+
+[mpt]
+base_url = "http://localhost:8080"     # docker-compose overrides via MPT_BASE_URL
+aspect = "9:16"
+clip_seconds = 5
+paragraphs = 3
+language = ""
+# e.g. "elevenlabs:<voice_id>:<name>" or an Edge voice like "en-US-AriaNeural-Female"
+voice_name = ""
+# Per-scene audio previews at the scene-review gate (slower; one TTS call per scene).
+generate_scene_audio = false

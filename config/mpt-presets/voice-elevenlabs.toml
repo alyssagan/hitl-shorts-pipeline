@@ -1,0 +1,3 @@
+[elevenlabs]
+api_key = "${ELEVENLABS_API_KEY}"
+model_id = "eleven_multilingual_v2"

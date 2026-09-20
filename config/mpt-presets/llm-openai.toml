@@ -1,0 +1,4 @@
+[app]
+llm_provider = "openai"
+openai_api_key = "${OPENAI_API_KEY}"
+openai_model_name = "gpt-4o-mini"

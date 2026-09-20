@@ -1,0 +1,9 @@
+.env
+config/mpt-config.toml
+data/jobs/*
+!data/jobs/.gitkeep
+library/clips/*
+!library/clips/.gitkeep
+__pycache__/
+*.pyc
+.venv/

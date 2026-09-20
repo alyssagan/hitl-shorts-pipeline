@@ -1,0 +1,30 @@
+# Two services: the pipeline (this repo) and MoneyPrinterTurbo's API (pinned in vendor/).
+# Everything binds to localhost only.
+services:
+  mpt:
+    build:
+      context: ./vendor/MoneyPrinterTurbo
+      dockerfile: Dockerfile
+    command: ["python3", "main.py"]
+    ports: ["127.0.0.1:8080:8080"]
+    volumes:
+      - ./config/mpt-config.toml:/MoneyPrinterTurbo/config.toml:ro
+      - ./library/clips:/data/clips:ro
+    extra_hosts: ["host.docker.internal:host-gateway"]   # reach Ollama running on the host
+    restart: unless-stopped
+
+  pipeline:
+    build: .
+    ports: ["127.0.0.1:8000:8000"]
+    env_file: [.env]
+    environment:
+      MPT_BASE_URL: http://mpt:8080
+      CLIPS_DIR_HOST: /app/library/clips     # where the pipeline sees the library
+      CLIPS_DIR_IN_MPT: /data/clips          # where MoneyPrinterTurbo sees the same folder
+    volumes:
+      - ./data:/app/data
+      - ./library/clips:/app/library/clips
+      - ./config/pipeline.toml:/app/config/pipeline.toml:ro
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on: [mpt]
+    restart: unless-stopped

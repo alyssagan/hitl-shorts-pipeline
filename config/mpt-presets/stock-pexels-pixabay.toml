@@ -1,0 +1,4 @@
+# Only used if you switch a job's footage source to stock instead of your own library.
+[app]
+pexels_api_keys = ["${PEXELS_API_KEY}"]
+pixabay_api_keys = ["${PIXABAY_API_KEY}"]

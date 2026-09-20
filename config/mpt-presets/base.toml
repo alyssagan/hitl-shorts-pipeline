@@ -1,0 +1,5 @@
+# Always applied first. Your own clips are the default footage source, and the
+# pipeline (not MoneyPrinterTurbo's UI) decides clip order.
+[app]
+video_source = "local"
+subtitle_provider = "edge"
