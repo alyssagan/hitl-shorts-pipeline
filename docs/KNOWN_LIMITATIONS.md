@@ -13,6 +13,9 @@ improve it later. Add new ones at the bottom; move an entry to "Resolved" when f
   `400 field required`. Our instructions, approved keywords and reviewer notes share that budget.
 - **Effect:** scripts can miss facts that only appear further down an article. The
   scene review gate is where a human catches this.
+- **Also:** the budget is split evenly across the source articles. Wikipedia's search can
+  return a loosely related article first ("3 surprising facts about octopuses" returned
+  "Kraken" before "Octopus"), so some of the budget may go to the wrong topic.
 - **Where in code:** `GROUNDING_CHARS` in `pipeline/stages/scenes/mpt.py`, and the last-resort
   trim `MAX_SCRIPT_PROMPT` in `pipeline/stages/mpt_client.py`.
 - **Options to improve (not started):**
@@ -57,10 +60,7 @@ improve it later. Add new ones at the bottom; move an entry to "Resolved" when f
 
 ### 6. Free tiers and unofficial services can change or throttle
 - **Gemini free tier** has rate and daily limits, and model names get retired. The model in
-  `config/mpt-config.toml` may need updating. This already happened: `gemini-2.0-flash` was
-  retired (404) and we moved to `gemini-3.6-flash`, the model Google's error message named.
-  Free-tier limits for the new model are unchecked. Change it in `config/mpt-presets/llm-gemini.toml`
-  and re-run `scripts/apply_preset.py` (or edit `config/mpt-config.toml`), then restart `mpt`.
+  `config/mpt-config.toml` (`gemini-2.0-flash`) may need updating.
 - **Edge TTS** (the free voice) is an unofficial service that needs internet and can change
   without notice.
 - **Wikipedia / Commons** expect polite use. Heavy repeated searches may need throttling.
