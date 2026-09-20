@@ -2,12 +2,21 @@
 # Everything binds to localhost only.
 services:
   mpt:
+    # We build MoneyPrinterTurbo with our own recipe instead of its Dockerfile: upstream pins
+    # Debian "bullseye", which is end-of-life and no longer downloads. This uses current Debian.
     build:
       context: ./vendor/MoneyPrinterTurbo
-      dockerfile: Dockerfile
-      args:                       # upstream defaults to Chinese mirrors; use the standard ones
-        DOCKER_BUILD_MIRROR: default
-        PIP_USE_OFFICIAL: "1"
+      dockerfile_inline: |
+        FROM python:3.11-slim
+        ENV PYTHONPATH=/MoneyPrinterTurbo PYTHONUNBUFFERED=1
+        WORKDIR /MoneyPrinterTurbo
+        RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg fonts-dejavu-core \
+            && rm -rf /var/lib/apt/lists/*
+        COPY requirements.txt ./
+        RUN pip install --no-cache-dir -r requirements.txt
+        COPY . .
+        EXPOSE 8080
+        CMD ["python3", "main.py"]
     command: ["python3", "main.py"]
     ports: ["127.0.0.1:8080:8080"]
     volumes:

@@ -107,13 +107,55 @@ def write_manifests(job: Job, project_dir: Path) -> None:
             {"source": name, "project": job.slug, "subject": job.subject, **data}, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _short_credit(a) -> str:
+    """One compact line for a video description."""
+    if a.author or a.attribution:
+        who = a.author or a.attribution
+        lic = f" ({a.license})" if a.license else ""
+        return f"Photo: {who}{lic}" if a.kind != "video" else f"Video: {who}{lic}"
+    return ""
+
+
+def description_block(job: Job) -> str:
+    """Paste-ready credits for a YouTube Shorts / TikTok description. Only assets that need
+    a credit get a line; public-domain/CC0 items need none and are left out."""
+    approved = job.approved_assets
+    lines, licenses, seen = [], {}, set()
+    for a in approved:
+        line = _short_credit(a)
+        kind = f"{a.license} {a.license_url}".lower()
+        needs = any(k in kind for k in ("by", "sa", "gfdl", "pexels")) and "cc0" not in kind and "public domain" not in kind
+        if line and needs and line not in seen:
+            seen.add(line)
+            lines.append(line)
+            if a.license and a.license_url:
+                licenses[a.license] = a.license_url
+    text_refs = [r for r in job.references if r.license]
+    for r in text_refs:
+        line = f"Text: {r.title} ({r.license}), {r.url}"
+        if line not in seen:
+            seen.add(line)
+            lines.append(line)
+            if r.license_url:
+                licenses[r.license] = r.license_url
+    if not lines:
+        return ""
+    lines += [f"{name}: {url}" for name, url in sorted(licenses.items())]
+    return "\n".join(lines)
+
+
 def write_credits(job: Job, project_dir: Path) -> Path:
-    """CREDITS.md: attribution for every approved asset and every text reference used."""
+    """CREDITS.md: attribution for every approved asset and every text reference used.
+    Also writes DESCRIPTION_CREDITS.txt, a paste-ready block for the video description."""
     lines = [f"# Credits: {job.subject}", "",
              "Publish these credits with the video wherever the license or platform terms require it.", ""]
+    block = description_block(job)
+    (project_dir / "DESCRIPTION_CREDITS.txt").write_text((block + "\n") if block else "", encoding="utf-8")
+    if block:
+        lines += ["## Paste into your video description", "", "```", block, "```", ""]
     approved = job.approved_assets
     if approved:
-        lines += ["## Images and video", ""]
+        lines += ["## Images and video (full detail)", ""]
         for a in approved:
             lines.append(f"- {a.attribution or a.title or a.source_url}  \n  license: {a.license or 'unknown'} · file: `{a.rel_path}`")
         lines.append("")

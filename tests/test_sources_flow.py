@@ -211,6 +211,9 @@ class FlowTests(Base):
         credits = (d / "CREDITS.md").read_text()
         self.assertIn("Cat photo", credits)
         self.assertNotIn("Tiny cat", credits)
+        self.assertIn("Paste into your video description", credits)
+        desc = (d / "DESCRIPTION_CREDITS.txt").read_text()
+        self.assertNotIn("Tiny cat", desc)
 
         log = self.store.decisions(job.id)
         self.assertEqual(log.verify(), (True, None))

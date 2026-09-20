@@ -12,7 +12,9 @@ from ..base import SceneResult, StageContext
 from ..mpt_client import MptClient, MptError
 from .clips import AssetClipSource, ClipSource
 
-GROUNDING_CHARS = 4000
+# MoneyPrinterTurbo rejects a script prompt longer than 2000 characters (400 "field required"),
+# (tracked in docs/KNOWN_LIMITATIONS.md #1) so the source text we ground on has to leave room for the instructions and reviewer notes.
+GROUNDING_CHARS = 1100
 
 
 def split_scenes(script: str, sentences_per_scene: int = 2) -> list[str]:

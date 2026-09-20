@@ -215,6 +215,10 @@ def main() -> None:
     dest = Path(args.out) / f"{job['id']}.mp4"
     api.download(f"/jobs/{job['id']}/output", dest)
     print(f"Done! Your video: {dest.resolve()}")
+    cred = Path("projects") / f"{job['slug']}-{job['id']}" / "DESCRIPTION_CREDITS.txt"
+    if cred.exists() and cred.read_text().strip():
+        print("\nPaste this into your video description (credits required by the licenses):\n")
+        print(cred.read_text())
     print(f"Every decision (yours and the machine's): projects/{job['slug']}-{job['id']}/DECISIONS.md")
 
 

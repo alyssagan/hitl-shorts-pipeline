@@ -21,6 +21,9 @@ STATE_COMPLETE = 1
 STATE_FAILED = -1
 
 
+MAX_SCRIPT_PROMPT = 2000     # MoneyPrinterTurbo's limit on video_script_prompt
+
+
 class MptError(RuntimeError):
     pass
 
@@ -45,6 +48,8 @@ class MptClient:
         return body.get("data") or {}
 
     async def script(self, subject: str, language: str = "", paragraphs: int = 3, prompt: str = "") -> str:
+        if len(prompt) > MAX_SCRIPT_PROMPT:      # MoneyPrinterTurbo answers 400 above this
+            prompt = prompt[:MAX_SCRIPT_PROMPT]
         data = await self._request("POST", "/api/v1/scripts", json={
             "video_subject": subject,
             "video_language": language,

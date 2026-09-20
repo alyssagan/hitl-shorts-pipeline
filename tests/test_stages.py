@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 
-from pipeline.core.models import Job, Keyword, Scene
+from pipeline.core.models import Job, Keyword, Scene, TextRef
 from pipeline.stages.base import StageContext
 from pipeline.stages.keywords.llm import LLMKeywordStage, parse_keywords
 from pipeline.stages.keywords.manual import ManualKeywordStage
@@ -104,6 +104,21 @@ class SceneTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(second.endswith("a_ocean.mp4"))
             used.add(second)
             self.assertIsNone(await src.fetch(s, Path(d), used))
+
+    async def test_script_prompt_never_exceeds_mpt_limit(self):
+        mpt = FakeMpt()
+        client = MptClient("http://mpt", transport=httpx.MockTransport(mpt))
+        with tempfile.TemporaryDirectory() as lib, tempfile.TemporaryDirectory() as assets:
+            src = Path(assets) / "wiki.txt"
+            src.write_text("Title\n\n" + "Octopuses have three hearts. " * 500, encoding="utf-8")
+            stage = MptSceneStage(client, LocalFolderClipSource(lib), voice_name="v", generate_audio=False)
+            job = Job(subject="octopuses")
+            job.keywords = [Keyword(term="octopus", approved=True)]
+            job.references = [TextRef(source="wikipedia", title="Octopus", url="http://x", path=str(src))]
+            job.scene_feedback = ["make it punchier " * 20]
+            await stage.run(job, StageContext(Path(assets)))
+        script_req = next(b for m, p, b in mpt.requests if p == "/api/v1/scripts")
+        self.assertLessEqual(len(script_req["video_script_prompt"]), 2000)
 
     async def test_mpt_scene_stage_builds_scenes_from_approved_keywords_only(self):
         mpt = FakeMpt()
