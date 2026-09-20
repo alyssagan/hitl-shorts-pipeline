@@ -103,16 +103,17 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
     reg.user_agent = os.getenv("SOURCES_USER_AGENT", src_cfg.get("user_agent", DEFAULT_USER_AGENT))
     reg.max_queries = int(src_cfg.get("max_queries", 5))
     per_query = int(src_cfg.get("per_query", 4))
+    vids = int(src_cfg.get("videos_per_query", 2))
     reg.register_source("wikipedia", lambda: WikipediaSource(max_articles=int(src_cfg.get("wikipedia_articles", 2))))
     reg.register_source("commons", lambda: CommonsSource(per_query=per_query))
-    reg.register_source("pexels", lambda: PexelsSource(per_query=per_query, videos=bool(src_cfg.get("pexels_videos", True))))
-    reg.register_source("pixabay", lambda: PixabaySource(per_query=per_query, videos=bool(src_cfg.get("pixabay_videos", True))))
+    reg.register_source("pexels", lambda: PexelsSource(per_query=per_query, videos_per_query=vids, videos=bool(src_cfg.get("pexels_videos", True))))
+    reg.register_source("pixabay", lambda: PixabaySource(per_query=per_query, videos_per_query=vids, videos=bool(src_cfg.get("pixabay_videos", True))))
     reg.register_source("unsplash", lambda: UnsplashSource(per_query=per_query))
-    reg.register_source("nasa", lambda: NasaSource(per_query=per_query, videos=bool(src_cfg.get("nasa_videos", True))))
+    reg.register_source("nasa", lambda: NasaSource(per_query=per_query, videos_per_query=vids, videos=bool(src_cfg.get("nasa_videos", True))))
     reg.register_source("archive", lambda: InternetArchiveSource(
-        per_query=per_query, require_license=bool(src_cfg.get("archive_require_license", True)),
+        per_query=per_query, videos_per_query=vids, require_license=bool(src_cfg.get("archive_require_license", True)),
         max_mb=int(src_cfg.get("archive_max_mb", 60))))
-    reg.register_source("loc", lambda: LibraryOfCongressSource(per_query=per_query))
+    reg.register_source("loc", lambda: LibraryOfCongressSource(per_query=per_query, videos_per_query=vids))
     reg.register_source("smithsonian", lambda: SmithsonianSource(per_query=per_query))
     reg.register_source("urls", lambda: UrlListSource(
         max_mb=int(src_cfg.get("url_max_mb", 200)), max_height=int(src_cfg.get("url_max_height", 1080))))

@@ -212,6 +212,14 @@ class FlowTests(Base):
         self.assertIn("Cat photo", credits)
         self.assertNotIn("Tiny cat", credits)
         self.assertIn("Paste into your video description", credits)
+        sources_md = (d / "SOURCES.md").read_text()
+        self.assertIn("Tiny cat", sources_md)                 # every pulled item is listed, approved or not
+        self.assertIn("https://commons.wikimedia.org/wiki/File:Cat", sources_md)
+        self.assertIn("## What was searched", sources_md)
+        self.assertIn("## Found but not kept", sources_md)   # the svg the renderer can't use is listed with its reason
+        self.assertIn("can't be used by the renderer", sources_md)
+        self.assertRegex(sources_md, r"Cat photo.*\| approved \|")       # your decision is recorded per file
+        self.assertIn("Used in scene", sources_md)
         desc = (d / "DESCRIPTION_CREDITS.txt").read_text()
         self.assertNotIn("Tiny cat", desc)
 

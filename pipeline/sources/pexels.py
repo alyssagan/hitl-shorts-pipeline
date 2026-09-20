@@ -26,8 +26,8 @@ class PexelsSource(HttpSource):
     name = "pexels"
     label = "Pexels (stock photos and video)"
 
-    def __init__(self, per_query: int = 4, videos: bool = True, api_key: str = ""):
-        super().__init__(per_query)
+    def __init__(self, per_query: int = 4, videos_per_query: int | None = None, videos: bool = True, api_key: str = ""):
+        super().__init__(per_query, videos_per_query)
         self.videos = videos
         self._key = api_key
 
@@ -55,7 +55,7 @@ class PexelsSource(HttpSource):
                       "avg_color": p.get("avg_color", "")}))
         if self.videos:
             vids = await ctx.http.get_json(VIDEOS, params={
-                "query": query, "per_page": max(1, self.per_query // 2), "orientation": "portrait"},
+                "query": query, "per_page": max(1, self.videos_per_query + 1), "orientation": "portrait"},
                 purpose=f"search Pexels videos for '{query}'")
             for v in vids.get("videos", []):
                 files = [f for f in v.get("video_files", []) if f.get("file_type") == "video/mp4" and f.get("link")]

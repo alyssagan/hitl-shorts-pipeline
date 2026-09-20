@@ -42,8 +42,8 @@ class InternetArchiveSource(HttpSource):
     name = "archive"
     label = "Internet Archive"
 
-    def __init__(self, per_query: int = 3, require_license: bool = True, max_mb: int = 60):
-        super().__init__(per_query)
+    def __init__(self, per_query: int = 3, videos_per_query: int | None = None, require_license: bool = True, max_mb: int = 60):
+        super().__init__(per_query, videos_per_query)
         self.require_license = require_license
         self.max_bytes = max_mb * 1024 * 1024
 

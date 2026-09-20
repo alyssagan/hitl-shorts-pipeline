@@ -30,8 +30,8 @@ class NasaSource(HttpSource):
     name = "nasa"
     label = "NASA Image and Video Library"
 
-    def __init__(self, per_query: int = 4, videos: bool = True):
-        super().__init__(per_query)
+    def __init__(self, per_query: int = 4, videos_per_query: int | None = None, videos: bool = True):
+        super().__init__(per_query, videos_per_query)
         self.videos = videos
 
     async def search(self, query: str, ctx: SourceContext) -> list[Candidate]:

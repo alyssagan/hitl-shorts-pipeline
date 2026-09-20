@@ -356,6 +356,7 @@ class Orchestrator:
     def _apply_sourcing(self, job: Job, stage: Any, res: Any) -> None:
         job.assets.extend(res.assets)
         job.references.extend(res.references)
+        job.source_notes.extend(res.trace)
         for t in res.trace:
             self._rec(job.id, "sourcing", "searched_source", stage.actor, decision="error" if t.get("error") else
                       ("skipped" if t.get("skipped_source") else "searched"),

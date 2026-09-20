@@ -250,6 +250,40 @@ class UrlListTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Video unavailable", res.trace[0]["skipped"][0]["reason"])
 
 
+class PhotosDoNotCrowdOutVideosTests(unittest.IsolatedAsyncioTestCase):
+    async def test_videos_are_kept_even_when_enough_photos_exist(self):
+        def h(req):
+            if req.url.host == "pixabay.com" and req.url.path == "/api/":
+                return httpx.Response(200, json={"hits": [
+                    {"id": i, "tags": f"octopus {i}", "user": "A", "pageURL": f"https://pixabay.com/p/{i}",
+                     "largeImageURL": f"https://cdn.pixabay.com/{i}.jpg", "imageWidth": 1280, "imageHeight": 1920} for i in range(1, 8)]})
+            if req.url.path == "/api/videos/":
+                return httpx.Response(200, json={"hits": [
+                    {"id": 100 + i, "tags": f"octopus video {i}", "user": "B", "pageURL": f"https://pixabay.com/v/{i}", "duration": 9,
+                     "videos": {"medium": {"url": f"https://cdn.pixabay.com/v{i}.mp4", "width": 1280, "height": 720}}} for i in range(1, 5)]})
+            return httpx.Response(200, content=BYTES + str(req.url).encode())
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "pixabay", h)
+            res = await PixabaySource(per_query=4, videos_per_query=2, api_key="k").fetch(["octopus"], ctx)
+            self.assertEqual(sum(a.kind == "image" for a in res.assets), 4)
+            self.assertEqual(sum(a.kind == "video" for a in res.assets), 2)
+            self.assertEqual((res.trace[0]["kept_photos"], res.trace[0]["kept_videos"]), (4, 2))
+
+    async def test_zero_videos_setting_keeps_photos_only(self):
+        def h(req):
+            if req.url.path == "/api/videos/":
+                return httpx.Response(200, json={"hits": [{"id": 1, "tags": "v", "user": "B", "pageURL": "https://pixabay.com/v/1", "duration": 9,
+                                                            "videos": {"medium": {"url": "https://cdn.pixabay.com/v.mp4", "width": 1280, "height": 720}}}]})
+            if req.url.path == "/api/":
+                return httpx.Response(200, json={"hits": [{"id": 1, "tags": "p", "user": "A", "pageURL": "https://pixabay.com/p/1", "largeImageURL": "https://cdn.pixabay.com/1.jpg",
+                                                            "imageWidth": 1280, "imageHeight": 1920}]})
+            return httpx.Response(200, content=BYTES)
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "pixabay", h)
+            res = await PixabaySource(per_query=4, videos_per_query=0, api_key="k").fetch(["octopus"], ctx)
+            self.assertEqual({a.kind for a in res.assets}, {"image"})
+
+
 class PositionHintTests(unittest.IsolatedAsyncioTestCase):
     async def test_hints_place_clips(self):
         def asset(name, hint):

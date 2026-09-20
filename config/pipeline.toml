@@ -13,7 +13,8 @@ default_reviewer = ""
 # Where text and images are pulled from. Each source gets its own folder in every project.
 user_agent = "hitl-shorts-pipeline/0.1 (personal video research tool)"
 max_queries = 5          # how many approved keywords to search with
-per_query = 4            # files to keep per keyword, per source
+per_query = 8            # photos to keep per keyword, per source
+videos_per_query = 4     # videos to keep per keyword, per source (counted separately from photos)
 wikipedia_articles = 2
 pexels_videos = true
 pixabay_videos = true

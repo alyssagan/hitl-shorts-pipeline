@@ -102,7 +102,9 @@ def show_asset(i: int, a: dict) -> None:
     tag = RISK_MARK.get(v.get("risk"), "??????")
     unusable = "" if v.get("usable", True) else "  [CAN'T BE USED]"
     print(f"\n  {i:>2}. [{tag}] {a['source']}: {a['title'] or a['id']}{unusable}")
-    print(f"      license: {a.get('license') or '(none found)'}   by: {a.get('author') or '(unknown)'}   file: projects/.../{a['rel_path']}")
+    print(f"      license: {a.get('license') or '(none found)'}   by: {a.get('author') or '(unknown)'}")
+    print(f"      from: {a.get('page_url') or a.get('source_url') or '(unknown)'}")
+    print(f"      file: projects/.../{a['rel_path']}")
     for f in v.get("flags", []):
         if f["severity"] != "info":
             print(f"      - {f['rule']} ({f['severity']}): {f['message']}\n        evidence: {f['evidence']}")

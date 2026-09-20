@@ -22,8 +22,8 @@ class PixabaySource(HttpSource):
     name = "pixabay"
     label = "Pixabay (free photos and video)"
 
-    def __init__(self, per_query: int = 4, videos: bool = True, api_key: str = ""):
-        super().__init__(per_query)
+    def __init__(self, per_query: int = 4, videos_per_query: int | None = None, videos: bool = True, api_key: str = ""):
+        super().__init__(per_query, videos_per_query)
         self.videos = videos
         self._key = api_key
 
@@ -53,7 +53,7 @@ class PixabaySource(HttpSource):
                 meta={"pixabay_id": p.get("id"), "tags": p.get("tags", "")}))
         if self.videos:
             vids = await ctx.http.get_json(VIDEOS, params={
-                "key": self.key(), "q": q, "per_page": max(3, self.per_query // 2), "safesearch": "true"},
+                "key": self.key(), "q": q, "per_page": max(3, self.videos_per_query + 1), "safesearch": "true"},
                 purpose=f"search Pixabay videos for '{query}'")
             for v in vids.get("hits", []):
                 sizes = [s for s in (v.get("videos") or {}).values() if isinstance(s, dict) and s.get("url")]

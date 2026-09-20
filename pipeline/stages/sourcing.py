@@ -105,6 +105,8 @@ def write_manifests(job: Job, project_dir: Path) -> None:
         d.mkdir(parents=True, exist_ok=True)
         (d / "manifest.json").write_text(json.dumps(
             {"source": name, "project": job.slug, "subject": job.subject, **data}, indent=2, ensure_ascii=False), encoding="utf-8")
+    if job.assets or job.references or job.source_notes:
+        write_sources_md(job, project_dir)
 
 
 def _short_credit(a) -> str:
@@ -142,6 +144,71 @@ def description_block(job: Job) -> str:
         return ""
     lines += [f"{name}: {url}" for name, url in sorted(licenses.items())]
     return "\n".join(lines)
+
+
+def write_sources_md(job: Job, project_dir: Path) -> Path:
+    """SOURCES.md: everything that happened while gathering material, in one readable file.
+
+    It has four parts: what was searched in each source, every photo/clip/text that was kept (approved
+    or not, and where in the video it is used), everything that was found but NOT kept and why, and the
+    sources that could not run. It is rewritten whenever the job changes."""
+    def cell(x: object) -> str:
+        return str(x or "").replace("|", "/").replace("\n", " ").strip()
+
+    used: dict[str, list[int]] = {}
+    for sc in job.scenes:
+        key = sc.asset_id or sc.clip_path
+        if key:
+            used.setdefault(key, []).append(sc.index + 1)
+
+    lines = [f"# Sources: {job.subject}", "",
+             "Everything gathered for this project and where it came from. Files are in `sources/<name>/files/`; each source",
+             "also has `manifest.json` (full details) and `requests.jsonl` (every request made, with status).", ""]
+
+    notes = job.source_notes
+    searched = [n for n in notes if "query" in n and not n.get("skipped_source")]
+    if searched:
+        lines += ["## What was searched", "",
+                  "| Source | Search | Found | Kept | Not kept | Problem |", "|---|---|---|---|---|---|"]
+        for n in searched:
+            lines.append(f"| {cell(n.get('source'))} | {cell(n.get('query'))} | {n.get('found', 0)} | {n.get('kept', 0)} | "
+                         f"{len(n.get('skipped') or [])} | {cell(n.get('error'))} |")
+        lines.append("")
+    unavailable = [n for n in notes if n.get("skipped_source") or (n.get("error") and "query" not in n)]
+    if unavailable:
+        lines += ["## Sources that could not run", ""]
+        for n in unavailable:
+            lines.append(f"- **{cell(n.get('source'))}**: {cell(n.get('skipped_source') or n.get('error'))}")
+        lines.append("")
+
+    if job.assets:
+        lines += ["## Photos and video kept", "",
+                  "| # | Source | Title | Page | License | By | Risk | Your decision | Used in scene | File |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
+        for i, a in enumerate(job.assets, 1):
+            risk = a.vetting.risk if a.vetting else ""
+            where = ", ".join(str(n) for n in sorted(set(used.get(a.id, []) + used.get(a.path, [])))) or ""
+            lines.append(f"| {i} | {cell(a.source)} | {cell(a.title)} | {cell(a.page_url or a.source_url)} | "
+                         f"{cell(a.license) or 'none found'} | {cell(a.author)} | {risk} | {cell(a.status)} | {where} | `{cell(a.rel_path)}` |")
+        lines.append("")
+    if job.references:
+        lines += ["## Text kept", "", "| Source | Title | Page | License | File |", "|---|---|---|---|---|"]
+        for r in job.references:
+            lines.append(f"| {cell(r.source)} | {cell(r.title)} | {cell(r.url)} | {cell(r.license)} | `{cell(r.rel_path)}` |")
+        lines.append("")
+
+    skipped = [(n.get("source"), n.get("query"), sk) for n in notes for sk in (n.get("skipped") or [])]
+    if skipped:
+        lines += ["## Found but not kept", "",
+                  "| Source | Search | Link | Why not |", "|---|---|---|---|"]
+        for src, q, sk in skipped:
+            lines.append(f"| {cell(src)} | {cell(q)} | {cell(sk.get('url'))} | {cell(sk.get('reason'))} |")
+        lines.append("")
+    if not (job.assets or job.references or notes):
+        lines.append("Nothing has been gathered yet.")
+    p = project_dir / "SOURCES.md"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
 
 
 def write_credits(job: Job, project_dir: Path) -> Path:

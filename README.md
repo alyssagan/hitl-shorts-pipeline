@@ -187,6 +187,7 @@ projects/cute-cats-294eb679f060/
 ├── job.json              current state of the project
 ├── decisions.jsonl       every decision, append-only and hash-chained (tamper-evident)
 ├── DECISIONS.md          the same log, readable
+├── SOURCES.md            every photo, clip and text pulled, with its link, license and status (updated as you go)
 ├── CREDITS.md            attribution for every approved asset (written at render)
 ├── sources/
 │   ├── wikipedia/  requests.jsonl  manifest.json  files/   (article text)

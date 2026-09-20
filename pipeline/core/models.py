@@ -163,6 +163,8 @@ class Job(BaseModel):
     keywords: list[Keyword] = Field(default_factory=list)
     assets: list[Asset] = Field(default_factory=list)
     references: list[TextRef] = Field(default_factory=list)
+    # Per-source search notes: what was searched, found, kept, skipped (with reasons) or failed.
+    source_notes: list[dict[str, Any]] = Field(default_factory=list)
     script: str = ""
     scenes: list[Scene] = Field(default_factory=list)
     output_path: str | None = None

@@ -199,11 +199,14 @@ class HttpSource:
     Subclasses set `name`/`label` and implement `search()`."""
     name = "source"
     label = "Source"
-    per_query = 4
+    per_query = 4            # photos kept per search
+    videos_per_query = 2     # videos kept per search, counted separately so photos can't crowd them out
 
-    def __init__(self, per_query: int | None = None):
+    def __init__(self, per_query: int | None = None, videos_per_query: int | None = None):
         if per_query:
             self.per_query = per_query
+        if videos_per_query is not None:
+            self.videos_per_query = videos_per_query
 
     async def search(self, query: str, ctx: SourceContext) -> list[Candidate]:
         raise NotImplementedError
@@ -224,9 +227,11 @@ class HttpSource:
                 continue
             note["found"] = len(cands)
             kept = 0
+            kept_by_kind = {"image": 0, "video": 0}
             for c in cands:
-                if kept >= self.per_query:
-                    break
+                kind = "video" if c.kind == "video" else "image"
+                if kept_by_kind[kind] >= (self.videos_per_query if kind == "video" else self.per_query):
+                    continue
                 ext = MIME_TO_EXT.get((c.mime or "").lower())
                 if not ext:
                     note["skipped"].append({"url": c.url, "reason": f"format '{c.mime or 'unknown'}' can't be used by the renderer"})
@@ -256,6 +261,8 @@ class HttpSource:
                     mime=c.mime, sha256=sha, meta=c.meta,
                 ))
                 kept += 1
+                kept_by_kind[kind] += 1
             note["kept"] = kept
+            note["kept_photos"], note["kept_videos"] = kept_by_kind["image"], kept_by_kind["video"]
             result.trace.append(note)
         return result
