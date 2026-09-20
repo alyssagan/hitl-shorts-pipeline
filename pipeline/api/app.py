@@ -2,13 +2,18 @@
 
   POST /jobs                          {subject, providers?}     create
   POST /jobs/{id}/start                                          -> keywords_running
-  POST /jobs/{id}/keywords/review     {approved_ids, extra_terms?}   GATE 1 approve
-  POST /jobs/{id}/keywords/reject     {feedback}                     GATE 1 re-run
-  PATCH /jobs/{id}/scenes             {order?, edits?}               reorder / edit
-  POST /jobs/{id}/scenes/approve                                     GATE 2 approve -> rendering
-  POST /jobs/{id}/scenes/reject       {feedback}                     GATE 2 re-run
-  POST /jobs/{id}/back-to-keywords    | /cancel | /retry
+  POST /jobs/{id}/keywords/review     {approved_ids, extra_terms?, reviewer}   GATE 1 approve
+  POST /jobs/{id}/keywords/reject     {feedback, reviewer}                     GATE 1 re-run
+  POST /jobs/{id}/assets/review       {decisions:{asset_id:{decision,note}}, reviewer}   GATE 2 per asset
+  POST /jobs/{id}/assets/approve      {reviewer, note?}                        GATE 2 done -> scenes
+  POST /jobs/{id}/assets/reject       {feedback, extra_queries?, reviewer}     GATE 2 search again
+  PATCH /jobs/{id}/scenes             {order?, edits?, reviewer}               reorder / edit
+  POST /jobs/{id}/scenes/approve      {reviewer}                               GATE 3 approve -> rendering
+  POST /jobs/{id}/scenes/reject       {feedback, reviewer}                     GATE 3 re-run
+  POST /jobs/{id}/back-to-keywords    | /back-to-assets | /cancel | /retry
   GET  /jobs, /jobs/{id}, /jobs/{id}/output, /providers, /health
+  GET  /jobs/{id}/decisions           the decision log (add ?format=md for DECISIONS.md)
+  GET  /jobs/{id}/assets/{asset_id}/file   the downloaded image/video (for previews)
 """
 from __future__ import annotations
 
@@ -45,7 +50,7 @@ def _job_json(job: Job) -> dict[str, Any]:
 def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None = None) -> Starlette:
     settings = settings if settings is not None else load_settings()
     if orch is None:
-        data_dir = settings.get("storage", {}).get("data_dir", "data")
+        data_dir = settings.get("storage", {}).get("data_dir", "projects")
         orch = Orchestrator(JobStore(data_dir), build_default_registry(settings), settings)
 
     tasks: set[asyncio.Task] = set()
@@ -94,45 +99,86 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         d = await body(r)
         providers = ProviderChoice(**d["providers"]) if d.get("providers") else None
         if providers:
+            avail = orch.registry.available()
             for kind, name in (("keywords", providers.keywords), ("scenes", providers.scenes), ("render", providers.render)):
-                if name not in orch.registry.available()[kind]:
+                if name not in avail[kind]:
                     raise ValueError(f"unknown {kind} provider '{name}'")
-        job = await orch.create_job(d.get("subject", ""), providers)
+            for name in providers.sources:
+                if name not in avail["sources"]:
+                    raise ValueError(f"unknown source '{name}'. available: {avail['sources']}")
+        job = await orch.create_job(d.get("subject", ""), providers, reviewer=d.get("reviewer", ""))
         return JSONResponse(_job_json(job), status_code=201)
 
     async def get_job(r: Request):
         return orch.get(r.path_params["id"])
 
     async def start(r: Request):
-        return await orch.start(r.path_params["id"])
+        d = await body(r)
+        return await orch.start(r.path_params["id"], reviewer=d.get("reviewer", ""))
 
     async def kw_review(r: Request):
         d = await body(r)
-        return await orch.review_keywords(r.path_params["id"], d.get("approved_ids", []), d.get("extra_terms"))
+        return await orch.review_keywords(r.path_params["id"], d.get("approved_ids", []), d.get("extra_terms"),
+                                          reviewer=d.get("reviewer", ""), note=d.get("note", ""))
 
     async def kw_reject(r: Request):
         d = await body(r)
-        return await orch.reject_keywords(r.path_params["id"], d.get("feedback", ""))
+        return await orch.reject_keywords(r.path_params["id"], d.get("feedback", ""), reviewer=d.get("reviewer", ""))
 
     async def scenes_edit(r: Request):
         d = await body(r)
-        return await orch.edit_scenes(r.path_params["id"], d.get("order"), d.get("edits"))
+        return await orch.edit_scenes(r.path_params["id"], d.get("order"), d.get("edits"), reviewer=d.get("reviewer", ""))
 
     async def scenes_approve(r: Request):
-        return await orch.approve_scenes(r.path_params["id"])
+        d = await body(r)
+        return await orch.approve_scenes(r.path_params["id"], reviewer=d.get("reviewer", ""))
 
     async def scenes_reject(r: Request):
         d = await body(r)
-        return await orch.reject_scenes(r.path_params["id"], d.get("feedback", ""))
+        return await orch.reject_scenes(r.path_params["id"], d.get("feedback", ""), reviewer=d.get("reviewer", ""))
+
+    async def assets_review(r: Request):
+        d = await body(r)
+        return await orch.review_assets(r.path_params["id"], d.get("decisions", {}), reviewer=d.get("reviewer", ""))
+
+    async def assets_approve(r: Request):
+        d = await body(r)
+        return await orch.approve_assets(r.path_params["id"], reviewer=d.get("reviewer", ""), note=d.get("note", ""))
+
+    async def assets_reject(r: Request):
+        d = await body(r)
+        return await orch.reject_assets(r.path_params["id"], d.get("feedback", ""), d.get("extra_queries"), reviewer=d.get("reviewer", ""))
 
     async def back(r: Request):
-        return await orch.back_to_keywords(r.path_params["id"])
+        d = await body(r)
+        return await orch.back_to_keywords(r.path_params["id"], reviewer=d.get("reviewer", ""))
+
+    async def back_assets(r: Request):
+        d = await body(r)
+        return await orch.back_to_assets(r.path_params["id"], reviewer=d.get("reviewer", ""))
 
     async def cancel(r: Request):
-        return await orch.cancel(r.path_params["id"])
+        d = await body(r)
+        return await orch.cancel(r.path_params["id"], reviewer=d.get("reviewer", ""))
 
     async def retry(r: Request):
-        return await orch.retry(r.path_params["id"])
+        d = await body(r)
+        return await orch.retry(r.path_params["id"], reviewer=d.get("reviewer", ""))
+
+    async def decisions(r: Request):
+        orch.get(r.path_params["id"])                       # 404 if unknown
+        log = orch.store.decisions(r.path_params["id"])
+        if r.query_params.get("format") == "md":
+            return Response(log.md.read_text(encoding="utf-8") if log.md.exists() else "", media_type="text/markdown")
+        ok, bad = log.verify()
+        return JSONResponse({"intact": ok, "first_bad_entry": bad, "entries": log.entries()})
+
+    async def asset_file(r: Request):
+        job = orch.get(r.path_params["id"])
+        a = next((x for x in job.assets if x.id == r.path_params["asset_id"]), None)
+        if a is None or not Path(a.path).exists():
+            return JSONResponse({"error": "asset not found"}, status_code=404)
+        return FileResponse(a.path, media_type=a.mime or None)
 
     async def output(r: Request):
         job = orch.get(r.path_params["id"])
@@ -157,6 +203,12 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/start", wrap(start), methods=["POST"]),
         Route(f"{P}/keywords/review", wrap(kw_review), methods=["POST"]),
         Route(f"{P}/keywords/reject", wrap(kw_reject), methods=["POST"]),
+        Route(f"{P}/assets/review", wrap(assets_review), methods=["POST"]),
+        Route(f"{P}/assets/approve", wrap(assets_approve), methods=["POST"]),
+        Route(f"{P}/assets/reject", wrap(assets_reject), methods=["POST"]),
+        Route(f"{P}/assets/{{asset_id}}/file", wrap(asset_file), methods=["GET"]),
+        Route(f"{P}/decisions", wrap(decisions), methods=["GET"]),
+        Route(f"{P}/back-to-assets", wrap(back_assets), methods=["POST"]),
         Route(f"{P}/scenes", wrap(scenes_edit), methods=["PATCH"]),
         Route(f"{P}/scenes/approve", wrap(scenes_approve), methods=["POST"]),
         Route(f"{P}/scenes/reject", wrap(scenes_reject), methods=["POST"]),

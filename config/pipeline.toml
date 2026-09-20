@@ -2,7 +2,21 @@
 # Secrets do not go here; use .env (KEYWORD_LLM_API_KEY, MPT_API_KEY, ...).
 
 [storage]
-data_dir = "data"
+# One folder per video project lives here: projects/<name>-<id>/
+data_dir = "projects"
+
+[review]
+# Written to the decision log when a request doesn't say who is deciding. Leave blank to always ask.
+default_reviewer = ""
+
+[sources]
+# Where text and images are pulled from. Each source gets its own folder in every project.
+user_agent = "hitl-shorts-pipeline/0.1 (personal video research tool)"
+max_queries = 5          # how many approved keywords to search with
+per_query = 4            # files to keep per keyword, per source
+wikipedia_articles = 2
+pexels_videos = true
+folder_path = "library/scraped"   # drop your own scraper's output here (used by the "folder" source)
 
 [library]
 # Your scraper / AI-generation output lands here. Scene clips are picked from it.

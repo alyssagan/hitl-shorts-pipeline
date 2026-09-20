@@ -14,6 +14,8 @@ services:
       - ./config/mpt-config.toml:/MoneyPrinterTurbo/config.toml:ro
       # MoneyPrinterTurbo only reads local clips from this exact folder (a safety rule in its code)
       - ./library/clips:/MoneyPrinterTurbo/storage/local_videos
+      # Project folders (pulled images/video) must also appear under that same folder
+      - ./projects:/MoneyPrinterTurbo/storage/local_videos/projects:ro
     extra_hosts: ["host.docker.internal:host-gateway"]   # reach Ollama running on the host
     restart: unless-stopped
 
@@ -25,8 +27,11 @@ services:
       MPT_BASE_URL: http://mpt:8080
       CLIPS_DIR_HOST: /app/library/clips     # where the pipeline sees the library
       CLIPS_DIR_IN_MPT: /MoneyPrinterTurbo/storage/local_videos  # where MoneyPrinterTurbo sees the same folder
+      # host-path=path-in-MPT pairs, so the renderer can find each project's files
+      PATH_MAP: "/app/projects=/MoneyPrinterTurbo/storage/local_videos/projects"
     volumes:
-      - ./data:/app/data
+      - ./projects:/app/projects
+      - ./library/scraped:/app/library/scraped
       - ./library/clips:/app/library/clips
       - ./config/pipeline.toml:/app/config/pipeline.toml:ro
     extra_hosts: ["host.docker.internal:host-gateway"]

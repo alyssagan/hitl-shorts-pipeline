@@ -15,6 +15,7 @@ from ..core.models import Job, Keyword, Scene
 class StageContext:
     assets_dir: Path                     # where this job's files should be written
     settings: dict[str, Any] = field(default_factory=dict)   # from config/pipeline.toml + job options
+    project_dir: Path | None = None      # the project's root folder (sources/, decisions.jsonl, ...)
 
 
 @dataclass

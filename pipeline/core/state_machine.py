@@ -6,11 +6,22 @@ mutating the Job passed in, so it is trivial to test and reason about.
       v
     KEYWORDS_RUNNING --keywords_ready--> KEYWORDS_REVIEW  (human gate 1)
       ^                                     |  approve_keywords (>=1 approved)
-      |  reject_keywords (+feedback)        v
-      +-------------------------------- SCENES_RUNNING --scenes_ready--> SCENES_REVIEW (gate 2)
-                                              ^                             |  approve_scenes
-                                              |  reject_scenes (+feedback)  v
-                                              +------------------------- RENDERING --render_done--> COMPLETED
+      |  reject_keywords (+feedback)        |
+      +-------------------------------------+
+                                            v
+             job has sources?  no ------------------------------+
+                                yes                             |
+                                 v                              |
+    SOURCING_RUNNING --sourcing_done--> VETTING_RUNNING         |
+      ^                                     | vetting_done      |
+      |                                     v                   |
+      |  reject_assets (+feedback)     ASSETS_REVIEW (human gate 2)
+      +-------------------------------      | approve_assets    |
+                                            v                   v
+                                        SCENES_RUNNING --scenes_ready--> SCENES_REVIEW (human gate 3)
+                                            ^                                |  approve_scenes
+                                            |  reject_scenes (+feedback)     v
+                                            +---------------------------  RENDERING --render_done--> COMPLETED
 
     Any running state --fail--> FAILED --retry--> the running state it failed in
     Any non-terminal state --cancel--> CANCELLED
@@ -21,22 +32,27 @@ from .models import Job, JobState, RUNNING_STATES, TERMINAL_STATES
 
 S = JobState
 
-# (from_state, event) -> to_state.  `fail`, `retry` and `cancel` are handled
-# separately because their targets depend on the job.
+# (from_state, event) -> to_state.  `approve_keywords`, `fail`, `retry` and
+# `cancel` are handled separately because their targets depend on the job.
 TRANSITIONS: dict[tuple[JobState, str], JobState] = {
     (S.CREATED, "start"): S.KEYWORDS_RUNNING,
     (S.KEYWORDS_RUNNING, "keywords_ready"): S.KEYWORDS_REVIEW,
-    (S.KEYWORDS_REVIEW, "approve_keywords"): S.SCENES_RUNNING,
     (S.KEYWORDS_REVIEW, "reject_keywords"): S.KEYWORDS_RUNNING,
+    (S.SOURCING_RUNNING, "sourcing_done"): S.VETTING_RUNNING,
+    (S.VETTING_RUNNING, "vetting_done"): S.ASSETS_REVIEW,
+    (S.ASSETS_REVIEW, "approve_assets"): S.SCENES_RUNNING,
+    (S.ASSETS_REVIEW, "reject_assets"): S.SOURCING_RUNNING,
+    (S.ASSETS_REVIEW, "back_to_keywords"): S.KEYWORDS_REVIEW,
     (S.SCENES_RUNNING, "scenes_ready"): S.SCENES_REVIEW,
     (S.SCENES_REVIEW, "approve_scenes"): S.RENDERING,
     (S.SCENES_REVIEW, "reject_scenes"): S.SCENES_RUNNING,
-    # A reviewer who decides the keywords were wrong can go back a whole gate.
+    # A reviewer who decides the keywords/assets were wrong can go back a whole gate.
     (S.SCENES_REVIEW, "back_to_keywords"): S.KEYWORDS_REVIEW,
+    (S.SCENES_REVIEW, "back_to_assets"): S.ASSETS_REVIEW,
     (S.RENDERING, "render_done"): S.COMPLETED,
 }
 
-EVENTS = {e for _, e in TRANSITIONS} | {"fail", "retry", "cancel"}
+EVENTS = {e for _, e in TRANSITIONS} | {"approve_keywords", "fail", "retry", "cancel"}
 
 
 class TransitionError(Exception):
@@ -69,6 +85,13 @@ def _target(job: Job, event: str) -> JobState:
         if state in TERMINAL_STATES:
             raise TransitionError(f"job is already {state.value}")
         return S.CANCELLED
+    if event == "approve_keywords":
+        if state is not S.KEYWORDS_REVIEW:
+            raise TransitionError(f"event 'approve_keywords' not allowed in state '{state.value}'")
+        if not job.approved_keywords:
+            raise TransitionError("approve at least one keyword before continuing")
+        # Jobs with asset sources go through sourcing -> vetting -> asset review first.
+        return S.SOURCING_RUNNING if job.uses_sources else S.SCENES_RUNNING
 
     try:
         target = TRANSITIONS[(state, event)]
@@ -76,8 +99,14 @@ def _target(job: Job, event: str) -> JobState:
         raise TransitionError(f"event '{event}' not allowed in state '{state.value}'") from None
 
     # ---- guards ------------------------------------------------------
-    if event == "approve_keywords" and not job.approved_keywords:
-        raise TransitionError("approve at least one keyword before continuing")
+    if event == "approve_assets":
+        pending = [a for a in job.assets if a.status == "pending"]
+        if pending:
+            raise TransitionError(f"{len(pending)} asset(s) still need a decision (approve or reject each one)")
+        if not job.approved_assets:
+            raise TransitionError("approve at least one asset before continuing")
+    if event in ("reject_assets", "back_to_assets") and not job.uses_sources:
+        raise TransitionError("this job does not use asset sources")
     if event == "approve_scenes":
         if not job.scenes:
             raise TransitionError("there are no scenes to approve")
@@ -96,7 +125,7 @@ def apply(job: Job, event: str, note: str = "") -> Job:
     elif event == "retry":
         job.error = None
         job.failed_from = None
-    elif event == "keywords_ready" or event == "scenes_ready":
+    elif event in ("keywords_ready", "sourcing_done", "vetting_done", "scenes_ready"):
         job.error = None
 
     job.state = target

@@ -1,7 +1,10 @@
 .env
 config/mpt-config.toml
-data/jobs/*
-!data/jobs/.gitkeep
+projects/*
+!projects/.gitkeep
+library/scraped/*
+!library/scraped/.gitkeep
+library/clips/projects
 library/clips/*
 !library/clips/.gitkeep
 __pycache__/

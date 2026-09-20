@@ -14,6 +14,7 @@ import re
 
 import httpx
 
+from ...core.decisions import ai
 from ...core.models import Job, Keyword
 from ..base import StageContext
 
@@ -33,6 +34,8 @@ class LLMKeywordStage:
         self.model = model
         self.count = count
         self.timeout = timeout
+        self.actor = ai("keyword-llm", model=model)
+        self.last_trace: dict = {}
 
     async def run(self, job: Job, ctx: StageContext) -> list[Keyword]:
         feedback = ""
@@ -41,6 +44,9 @@ class LLMKeywordStage:
             feedback = f"The reviewer rejected earlier suggestions. Their notes:\n{notes}\n"
         prompt = PROMPT.format(subject=job.subject, feedback=feedback, n=self.count)
 
+        self.last_trace = {"prompt": prompt, "model": self.model, "endpoint": self.base_url,
+                           "feedback_used": list(job.keyword_feedback),
+                           "note": "volume/difficulty are the model's estimates, not measured data"}
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(

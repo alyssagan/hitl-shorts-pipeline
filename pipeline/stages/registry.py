@@ -7,12 +7,18 @@ import os
 from typing import Any, Callable
 
 from .base import KeywordStage, RenderStage, SceneStage
+from ..sources.base import DEFAULT_USER_AGENT, SourceAdapter
+from ..sources.commons import CommonsSource
+from ..sources.folder import FolderSource
+from ..sources.pexels import PexelsSource
+from ..sources.wikipedia import WikipediaSource
 from .keywords.llm import LLMKeywordStage
 from .keywords.manual import ManualKeywordStage
 from .mpt_client import MptClient
 from .render.mpt import MptRenderStage
 from .scenes.clips import LocalFolderClipSource
 from .scenes.mpt import MptSceneStage
+from .sourcing import SourcingStage
 
 
 class Registry:
@@ -20,6 +26,10 @@ class Registry:
         self._keywords: dict[str, Callable[[], KeywordStage]] = {}
         self._scenes: dict[str, Callable[[], SceneStage]] = {}
         self._render: dict[str, Callable[[], RenderStage]] = {}
+        self._sources: dict[str, Callable[[], SourceAdapter]] = {}
+        self.user_agent = DEFAULT_USER_AGENT
+        self.max_queries = 5
+        self.source_transport = None      # tests inject an httpx mock transport
 
     def register_keywords(self, name: str, factory: Callable[[], KeywordStage]) -> None:
         self._keywords[name] = factory
@@ -29,6 +39,13 @@ class Registry:
 
     def register_render(self, name: str, factory: Callable[[], RenderStage]) -> None:
         self._render[name] = factory
+
+    def register_source(self, name: str, factory: Callable[[], SourceAdapter]) -> None:
+        self._sources[name] = factory
+
+    def sourcing_stage(self) -> SourcingStage:
+        return SourcingStage({n: f() for n, f in self._sources.items()}, user_agent=self.user_agent,
+                             max_queries=self.max_queries, transport=self.source_transport)
 
     def keyword_stage(self, name: str) -> KeywordStage:
         return self._get(self._keywords, name, "keyword")()
@@ -46,7 +63,19 @@ class Registry:
         return table[name]
 
     def available(self) -> dict[str, list[str]]:
-        return {"keywords": sorted(self._keywords), "scenes": sorted(self._scenes), "render": sorted(self._render)}
+        return {"keywords": sorted(self._keywords), "scenes": sorted(self._scenes), "render": sorted(self._render),
+                "sources": sorted(self._sources)}
+
+
+def parse_path_map(text: str) -> list[tuple[str, str]]:
+    """PATH_MAP="/app/projects=/MoneyPrinterTurbo/storage/local_videos/projects;..." -> [(host, mpt), ...]
+    Translates file paths as this service sees them into paths as MoneyPrinterTurbo sees them."""
+    out = []
+    for part in filter(None, (p.strip() for p in text.split(";"))):
+        if "=" in part:
+            host, mpt = part.split("=", 1)
+            out.append((host.strip(), mpt.strip()))
+    return out
 
 
 def build_default_registry(settings: dict[str, Any]) -> Registry:
@@ -54,6 +83,7 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
     mpt_cfg = settings.get("mpt", {})
     kw_cfg = settings.get("keywords", {})
     lib_cfg = settings.get("library", {})
+    src_cfg = settings.get("sources", {})
 
     def mpt() -> MptClient:
         return MptClient(
@@ -62,6 +92,13 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
         )
 
     reg = Registry()
+    reg.user_agent = os.getenv("SOURCES_USER_AGENT", src_cfg.get("user_agent", DEFAULT_USER_AGENT))
+    reg.max_queries = int(src_cfg.get("max_queries", 5))
+    per_query = int(src_cfg.get("per_query", 4))
+    reg.register_source("wikipedia", lambda: WikipediaSource(max_articles=int(src_cfg.get("wikipedia_articles", 2))))
+    reg.register_source("commons", lambda: CommonsSource(per_query=per_query))
+    reg.register_source("pexels", lambda: PexelsSource(per_query=per_query, videos=bool(src_cfg.get("pexels_videos", True))))
+    reg.register_source("folder", lambda: FolderSource(src_cfg.get("folder_path", "library/scraped")))
     reg.register_keywords("manual", ManualKeywordStage)
     reg.register_keywords("llm", lambda: LLMKeywordStage(
         base_url=os.getenv("KEYWORD_LLM_BASE_URL", kw_cfg.get("base_url", "https://api.openai.com/v1")),
@@ -85,5 +122,6 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
         clip_seconds=int(mpt_cfg.get("clip_seconds", 5)),
         clip_root_host=os.getenv("CLIPS_DIR_HOST", lib_cfg.get("clips_dir_host", "")),
         clip_root_mpt=os.getenv("CLIPS_DIR_IN_MPT", lib_cfg.get("clips_dir_in_mpt", "")),
+        path_map=parse_path_map(os.getenv("PATH_MAP", "")),
     ))
     return reg

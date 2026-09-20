@@ -16,7 +16,8 @@ from ..mpt_client import MptClient, MptError
 class MptRenderStage:
     def __init__(self, client: MptClient, voice_name: str = "", language: str = "",
                  aspect: str = "9:16", clip_seconds: int = 5,
-                 clip_root_host: str = "", clip_root_mpt: str = ""):
+                 clip_root_host: str = "", clip_root_mpt: str = "",
+                 path_map: list[tuple[str, str]] | None = None):
         self.client = client
         self.voice_name = voice_name
         self.language = language
@@ -24,12 +25,14 @@ class MptRenderStage:
         self.clip_seconds = clip_seconds
         # When MoneyPrinterTurbo runs in Docker, clips are mounted at a different
         # path than on the host. Map host prefix -> container prefix.
-        self.clip_root_host = clip_root_host
-        self.clip_root_mpt = clip_root_mpt
+        self.path_map = list(path_map or [])
+        if clip_root_host:
+            self.path_map.append((clip_root_host, clip_root_mpt))
 
     def _to_mpt_path(self, p: str) -> str:
-        if self.clip_root_host and p.startswith(self.clip_root_host):
-            return self.clip_root_mpt + p[len(self.clip_root_host):]
+        for host, mpt in self.path_map:
+            if host and p.startswith(host):
+                return mpt + p[len(host):]
         return p
 
     async def run(self, job: Job, ctx: StageContext) -> str:

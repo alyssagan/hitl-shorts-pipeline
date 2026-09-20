@@ -14,16 +14,22 @@ Keyword research → *you approve* → script, voice and scenes → *you approve
 
 ## What it does
 
-Most video generators run start to finish and hand you whatever comes out. This one **stops twice
-and asks you first**, so bad keywords or a weak script never reach the render.
+Most video generators run start to finish and hand you whatever comes out. This one **stops three
+times and asks you first**, so bad keywords, risky images, or a weak script never reach the render.
 
 | Step | Who works | What happens |
 |:---:|---|---|
 | 1 | Machine | Analyzes your topic and proposes ranked keywords |
 | **Gate 1** | **You** | Approve, add, or reject keywords (rejections come with notes the next run uses) |
-| 2 | Machine | [MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo) writes the script and builds scenes from **approved keywords only** |
-| **Gate 2** | **You** | Reorder scenes, edit narration, swap clips, approve |
-| 3 | Machine | Renders the video using **your exact scene order** |
+| 2 | Machine | Pulls text and images for those keywords from **Wikipedia, Wikimedia Commons, Pexels** (or your own scraper's folder). Each source gets its own folder in the project, with a log of every request |
+| 2b | Machine | **Vets** every file with plain, readable rules: license, people, sensitive content, size. It flags and explains. It never deletes anything |
+| **Gate 2** | **You** | Approve or reject each asset, seeing the risk and *why* it was flagged. High-risk approvals need a written reason |
+| 3 | Machine | [MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo) writes the script (grounded in the Wikipedia text) and picks a clip per scene from **approved assets only** |
+| **Gate 3** | **You** | Reorder scenes, edit narration, swap clips, approve |
+| 4 | Machine | Renders using **your exact scene order** and writes `CREDITS.md` |
+
+Every decision, by you, by an AI model, or by a rule, is written to the project's
+`decisions.jsonl` and a readable `DECISIONS.md`. See [Where everything is saved](#where-everything-is-saved).
 
 ## The flow
 
@@ -32,8 +38,14 @@ stateDiagram-v2
     [*] --> CREATED
     CREATED --> KEYWORDS_RUNNING: start
     KEYWORDS_RUNNING --> KEYWORDS_REVIEW: keywords ready
-    KEYWORDS_REVIEW --> SCENES_RUNNING: approve keywords
+    KEYWORDS_REVIEW --> SOURCING_RUNNING: approve keywords (job uses sources)
+    KEYWORDS_REVIEW --> SCENES_RUNNING: approve keywords (no sources)
     KEYWORDS_REVIEW --> KEYWORDS_RUNNING: reject + feedback
+    SOURCING_RUNNING --> VETTING_RUNNING: files pulled
+    VETTING_RUNNING --> ASSETS_REVIEW: risks flagged
+    ASSETS_REVIEW --> SCENES_RUNNING: approve assets
+    ASSETS_REVIEW --> SOURCING_RUNNING: reject, search again
+    SCENES_REVIEW --> ASSETS_REVIEW: back to assets
     SCENES_RUNNING --> SCENES_REVIEW: scenes ready
     SCENES_REVIEW --> RENDERING: approve scenes
     SCENES_REVIEW --> SCENES_RUNNING: reject + feedback
@@ -126,13 +138,19 @@ that are legal right now, so buttons can enable and disable themselves.
 | Start analysis | `POST /jobs/{id}/start` |
 | **Gate 1** approve | `POST /jobs/{id}/keywords/review` `{approved_ids, extra_terms?}` |
 | **Gate 1** reject | `POST /jobs/{id}/keywords/reject` `{feedback}` |
+| **Gate 2** decide per asset | `POST /jobs/{id}/assets/review` `{decisions: {asset_id: {decision, note}}, reviewer}` |
+| **Gate 2** done | `POST /jobs/{id}/assets/approve` `{reviewer}` |
+| **Gate 2** search again | `POST /jobs/{id}/assets/reject` `{feedback, extra_queries?, reviewer}` |
+| Look at an asset | `GET /jobs/{id}/assets/{asset_id}/file` |
+| Decision log | `GET /jobs/{id}/decisions` (`?format=md` for the readable one) |
 | Reorder or edit scenes | `PATCH /jobs/{id}/scenes` `{order?, edits?}` |
-| **Gate 2** approve | `POST /jobs/{id}/scenes/approve` |
-| **Gate 2** reject | `POST /jobs/{id}/scenes/reject` `{feedback}` |
-| Go back a gate | `POST /jobs/{id}/back-to-keywords` |
+| **Gate 3** approve | `POST /jobs/{id}/scenes/approve` |
+| **Gate 3** reject | `POST /jobs/{id}/scenes/reject` `{feedback}` |
+| Go back a gate | `POST /jobs/{id}/back-to-keywords` · `POST /jobs/{id}/back-to-assets` |
 | Retry or cancel | `POST /jobs/{id}/retry` · `POST /jobs/{id}/cancel` |
 | Read | `GET /jobs` · `GET /jobs/{id}` · `GET /jobs/{id}/output` |
 
+Every human action accepts a `reviewer` name, which is written to the decision log. Asset decisions require one.
 Illegal actions return `409` with the reason, bad input `422`, unknown job `404`.
 
 ---
@@ -142,7 +160,9 @@ Illegal actions return `409` with the reason, bad input `422`, unknown job `404`
 ```
 hitl-shorts-pipeline/
 ├── pipeline/
-│   ├── core/        The brain: state machine, job models, storage, orchestrator
+│   ├── core/        The brain: state machine, models, storage, orchestrator, decision log
+│   ├── sources/     Where data is pulled from: wikipedia.py, commons.py, pexels.py, folder.py
+│   ├── vetting/     rules.py: the explainable risk rules
 │   ├── stages/      Swappable steps
 │   │   ├── keywords/    manual.py, llm.py        <- add SEO providers here
 │   │   ├── scenes/      mpt.py, clips.py         <- add clip sources here
@@ -151,11 +171,35 @@ hitl-shorts-pipeline/
 ├── config/          pipeline.toml, mpt-presets/
 ├── scripts/         apply_preset.py
 ├── library/clips/   Your footage goes here
-├── data/jobs/       One folder per job (job.json + assets)
+├── projects/        One folder per video (see below)
+├── library/scraped/ Drop your own scraper's output here (the "folder" source)
 ├── vendor/          MoneyPrinterTurbo (git submodule, pinned to a commit)
 ├── docs/            Background notes
-└── tests/           46 tests
+└── tests/           57 tests
 ```
+
+## Where everything is saved
+
+Each video is one folder. Each source you pull from gets its own sub-folder inside it:
+
+```
+projects/cute-cats-294eb679f060/
+├── job.json              current state of the project
+├── decisions.jsonl       every decision, append-only and hash-chained (tamper-evident)
+├── DECISIONS.md          the same log, readable
+├── CREDITS.md            attribution for every approved asset (written at render)
+├── sources/
+│   ├── wikipedia/  requests.jsonl  manifest.json  files/   (article text)
+│   ├── commons/    requests.jsonl  manifest.json  files/   (images)
+│   └── pexels/     requests.jsonl  manifest.json  files/   (photos and video)
+└── assets/               the rendered video
+```
+
+- `requests.jsonl`: every web request, with URL, purpose and result, so you can see exactly where data came from.
+- `manifest.json`: every kept file with its source URL, license, author, hash, the machine's risk flags, and your decision.
+- `decisions.jsonl`: who decided what, when, why, and by what logic. Actors are `human` (your name), `ai` (model recorded), or `machine` (a rule, with its version).
+
+How risk is judged, rule by rule: [docs/VETTING.md](docs/VETTING.md). Adding another scraping source: [docs/ADD_A_SOURCE.md](docs/ADD_A_SOURCE.md).
 
 ## Adding your own provider
 
@@ -195,9 +239,13 @@ Things to check on first run:
    (MoneyPrinterTurbo only reads local clips from `storage/local_videos`; `docker-compose.yml`
    already mounts `library/clips` there.)
 2. Per-scene audio previews assume MoneyPrinterTurbo serves audio at `/tasks/<id>/audio.mp3`.
-3. Only run one pipeline process per `data/` folder.
+3. Only run one pipeline process per `projects/` folder.
 
-**Not built yet:** the review UI, Pexels/Pixabay/AI clip sources, and a real SEO data provider.
+4. Wikipedia, Commons and Pexels were tested against hand-written mocks of their API responses, not the live sites. If a live response differs, the request log in `sources/<name>/requests.jsonl` shows what came back.
+5. The renderer only handles jpg/png images and mp4/mov/webm video, at least 480 px. Other formats are skipped and logged.
+6. The vetting rules read titles, descriptions and license text. They cannot see the picture itself. That is why a human stays in the loop.
+
+**Not built yet:** the review UI, Pixabay/AI clip sources, and a real SEO data provider.
 
 **About RankReel:** it is a countdown-video editor and, as far as its public pages show, has no
 keyword or ranking-data features. The keyword step therefore uses an LLM (its volume and difficulty

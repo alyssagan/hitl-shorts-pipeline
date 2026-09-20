@@ -1,0 +1,127 @@
+"""Sourcing stage: pull assets from every source chosen for the job.
+
+Queries come only from the keywords a human approved (plus any extra search
+terms the reviewer added when rejecting a batch of assets). Each source writes
+into its own folder under the project, with its own request log and manifest.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+from ..core.decisions import machine
+from ..core.models import Asset, Job, TextRef
+from ..sources.base import DEFAULT_USER_AGENT, LoggedHttp, SourceAdapter, SourceContext, SourceUnavailable
+from .base import StageContext
+
+
+class SourcingError(RuntimeError):
+    pass
+
+
+@dataclass
+class SourcingResult:
+    assets: list[Asset] = field(default_factory=list)
+    references: list[TextRef] = field(default_factory=list)
+    trace: list[dict[str, Any]] = field(default_factory=list)
+    queries: list[str] = field(default_factory=list)
+
+
+def queries_for(job: Job, limit: int = 5) -> list[str]:
+    terms = [k.term for k in job.approved_keywords]
+    terms += [q for q in job.providers.options.get("extra_queries", []) if q not in terms]
+    return terms[:limit]
+
+
+class SourcingStage:
+    actor = machine("sourcing", "1")
+
+    def __init__(self, adapters: dict[str, SourceAdapter], user_agent: str = DEFAULT_USER_AGENT,
+                 max_queries: int = 5, transport: httpx.AsyncBaseTransport | None = None):
+        self.adapters = adapters
+        self.user_agent = user_agent
+        self.max_queries = max_queries
+        self.transport = transport
+
+    async def run(self, job: Job, ctx: StageContext) -> SourcingResult:
+        if ctx.project_dir is None:
+            raise SourcingError("project folder unknown")
+        queries = queries_for(job, self.max_queries)
+        if not queries:
+            raise SourcingError("no approved keywords to search for")
+        out = SourcingResult(queries=queries)
+        problems = 0
+        for name in job.providers.sources:
+            adapter = self.adapters.get(name)
+            if adapter is None:
+                out.trace.append({"source": name, "error": f"unknown source '{name}'"})
+                problems += 1
+                continue
+            src_dir = ctx.project_dir / "sources" / name
+            (src_dir / "files").mkdir(parents=True, exist_ok=True)
+            known = [a for a in job.assets if a.source == name]
+            sctx = SourceContext(
+                project_dir=ctx.project_dir, dir=src_dir, subject=job.subject, settings=ctx.settings,
+                http=LoggedHttp(src_dir, name, user_agent=self.user_agent, transport=self.transport),
+                known_urls={a.source_url for a in known} | {r.url for r in job.references if r.source == name},
+                known_hashes={a.sha256 for a in job.assets if a.sha256},
+            )
+            try:
+                res = await adapter.fetch(queries, sctx)
+            except SourceUnavailable as exc:
+                out.trace.append({"source": name, "skipped_source": str(exc)})
+                problems += 1
+                continue
+            except Exception as exc:
+                out.trace.append({"source": name, "error": f"{type(exc).__name__}: {exc}"})
+                problems += 1
+                continue
+            out.assets.extend(res.assets)
+            out.references.extend(res.references)
+            out.trace.extend(res.trace)
+            # A source whose every query errored counts as a problem.
+            if res.trace and all(t.get("error") for t in res.trace) and not res.assets and not res.references:
+                problems += 1
+        if not out.assets and not out.references and problems and problems >= len(job.providers.sources):
+            detail = "; ".join(str(t.get("error") or t.get("skipped_source")) for t in out.trace if t.get("error") or t.get("skipped_source"))
+            raise SourcingError(f"nothing could be sourced: {detail}")
+        return out
+
+
+def write_manifests(job: Job, project_dir: Path) -> None:
+    """Write sources/<name>/manifest.json for each source, from the job's current
+    assets (including vetting flags and review decisions)."""
+    by_source: dict[str, dict[str, list]] = {}
+    for a in job.assets:
+        by_source.setdefault(a.source, {"assets": [], "references": []})["assets"].append(a.model_dump(mode="json"))
+    for r in job.references:
+        by_source.setdefault(r.source, {"assets": [], "references": []})["references"].append(r.model_dump(mode="json"))
+    for name, data in by_source.items():
+        d = project_dir / "sources" / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "manifest.json").write_text(json.dumps(
+            {"source": name, "project": job.slug, "subject": job.subject, **data}, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def write_credits(job: Job, project_dir: Path) -> Path:
+    """CREDITS.md: attribution for every approved asset and every text reference used."""
+    lines = [f"# Credits: {job.subject}", "",
+             "Publish these credits with the video wherever the license or platform terms require it.", ""]
+    approved = job.approved_assets
+    if approved:
+        lines += ["## Images and video", ""]
+        for a in approved:
+            lines.append(f"- {a.attribution or a.title or a.source_url}  \n  license: {a.license or 'unknown'} · file: `{a.rel_path}`")
+        lines.append("")
+    if job.references:
+        lines += ["## Text sources", ""]
+        for r in job.references:
+            lines.append(f"- \"{r.title}\", {r.url}. {r.license or 'license unknown'} {r.license_url}".rstrip())
+        lines.append("")
+    p = project_dir / "CREDITS.md"
+    p.write_text("\n".join(lines), encoding="utf-8")
+    return p

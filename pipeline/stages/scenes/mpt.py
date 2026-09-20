@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import re
 
+from pathlib import Path
+
+from ...core.decisions import ai
 from ...core.models import Job, Scene
 from ..base import SceneResult, StageContext
 from ..mpt_client import MptClient, MptError
-from .clips import ClipSource
+from .clips import AssetClipSource, ClipSource
+
+GROUNDING_CHARS = 4000
 
 
 def split_scenes(script: str, sentences_per_scene: int = 2) -> list[str]:
@@ -23,6 +28,8 @@ def split_scenes(script: str, sentences_per_scene: int = 2) -> list[str]:
 
 
 class MptSceneStage:
+    actor = ai("moneyprinterturbo-script", model="(set in mpt-config.toml)")
+
     def __init__(self, client: MptClient, clips: ClipSource, voice_name: str = "", language: str = "",
                  generate_audio: bool = False, paragraphs: int = 3):
         self.client = client
@@ -31,12 +38,35 @@ class MptSceneStage:
         self.language = language
         self.generate_audio = generate_audio
         self.paragraphs = paragraphs
+        self.last_trace: dict = {}
+
+    def _grounding(self, job: Job) -> str:
+        parts = []
+        for r in job.references:
+            try:
+                text = Path(r.path).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            body = text.split("\n\n", 1)[-1]
+            parts.append(f'From "{r.title}" ({r.url}):\n{body}')
+        return "\n\n".join(parts)[:GROUNDING_CHARS]
 
     async def run(self, job: Job, ctx: StageContext) -> SceneResult:
         keywords = [k.term for k in job.approved_keywords]
         prompt = f"Work these approved keywords in naturally: {', '.join(keywords)}."
+        grounding = self._grounding(job)
+        if grounding:
+            prompt += ("\nBase every factual claim ONLY on the source text below. Do not add facts that are not in it.\n"
+                       + grounding)
         if job.scene_feedback:
             prompt += " Reviewer notes on the previous draft: " + " | ".join(job.scene_feedback)
+        clips = AssetClipSource(job.assets) if job.uses_sources else self.clips
+        self.last_trace = {
+            "script_prompt": prompt, "paragraphs": self.paragraphs, "keywords": keywords,
+            "grounded_on": [{"title": r.title, "url": r.url} for r in job.references] if grounding else [],
+            "clip_source": "approved assets" if job.uses_sources else "library folder",
+            "feedback_used": list(job.scene_feedback),
+        }
 
         script = await self.client.script(job.subject, self.language, self.paragraphs, prompt)
         texts = split_scenes(script)
@@ -47,9 +77,12 @@ class MptSceneStage:
         scenes: list[Scene] = []
         for i, text in enumerate(texts):
             scene = Scene(index=i, narration=text, search_terms=[keywords[i % len(keywords)]] if keywords else [])
-            scene.clip_path = await self.clips.fetch(scene, ctx.assets_dir, used)
+            scene.clip_path = await clips.fetch(scene, ctx.assets_dir, used)
             if scene.clip_path:
                 used.add(scene.clip_path)
+                pick = getattr(clips, "last_pick", None)
+                if pick:
+                    scene.asset_id, scene.clip_reason = pick.asset_id, pick.reason
             if self.generate_audio and self.voice_name:
                 scene.audio_path = await self._audio(job, scene, ctx)
             scenes.append(scene)
