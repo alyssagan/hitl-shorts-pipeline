@@ -24,7 +24,8 @@ services:
       # MoneyPrinterTurbo only reads local clips from this exact folder (a safety rule in its code)
       - ./library/clips:/MoneyPrinterTurbo/storage/local_videos
       # Project folders (pulled images/video) must also appear under that same folder
-      - ./projects:/MoneyPrinterTurbo/storage/local_videos/projects:ro
+      # Not read-only: MoneyPrinterTurbo turns each image into a short .mp4 written next to it
+      - ./projects:/MoneyPrinterTurbo/storage/local_videos/projects
     extra_hosts: ["host.docker.internal:host-gateway"]   # reach Ollama running on the host
     restart: unless-stopped
 

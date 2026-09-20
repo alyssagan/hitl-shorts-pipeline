@@ -98,6 +98,16 @@ Update this entry as each one is confirmed or fixed.
   states (eligibility, images, final), its guardrails carried over, one shared MPT copy, and
   much longer source material (which will hit limitation #1 hard).
 
+### 12. MoneyPrinterTurbo writes into the project folders
+- **What:** to use a still image, MPT converts it to a short video and saves it next to the
+  original (for example `001-Octopus.jpg.mp4` in `sources/commons/files/`). So the project
+  folder is mounted into MPT as writable, not read-only.
+- **Effect:** MPT could in principle change files there, and those extra `.mp4` files sit
+  beside the originals. The recorded SHA-256 in each manifest is of the original download, so
+  you can still check the originals. The extras are safe to delete.
+- **Options:** point MPT at a scratch copy of approved assets instead, so the project folder
+  can stay read-only.
+
 ## Resolved
 
 _(nothing yet)_
