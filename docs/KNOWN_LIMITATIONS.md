@@ -57,7 +57,10 @@ improve it later. Add new ones at the bottom; move an entry to "Resolved" when f
 
 ### 6. Free tiers and unofficial services can change or throttle
 - **Gemini free tier** has rate and daily limits, and model names get retired. The model in
-  `config/mpt-config.toml` (`gemini-2.0-flash`) may need updating.
+  `config/mpt-config.toml` may need updating. This already happened: `gemini-2.0-flash` was
+  retired (404) and we moved to `gemini-3.6-flash`, the model Google's error message named.
+  Free-tier limits for the new model are unchecked. Change it in `config/mpt-presets/llm-gemini.toml`
+  and re-run `scripts/apply_preset.py` (or edit `config/mpt-config.toml`), then restart `mpt`.
 - **Edge TTS** (the free voice) is an unofficial service that needs internet and can change
   without notice.
 - **Wikipedia / Commons** expect polite use. Heavy repeated searches may need throttling.

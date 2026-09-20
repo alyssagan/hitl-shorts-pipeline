@@ -14,7 +14,7 @@ from .clips import AssetClipSource, ClipSource
 
 # MoneyPrinterTurbo rejects a script prompt longer than 2000 characters (400 "field required"),
 # (tracked in docs/KNOWN_LIMITATIONS.md #1) so the source text we ground on has to leave room for the instructions and reviewer notes.
-GROUNDING_CHARS = 1100
+GROUNDING_CHARS = 1000
 
 
 def split_scenes(script: str, sentences_per_scene: int = 2) -> list[str]:
@@ -43,15 +43,20 @@ class MptSceneStage:
         self.last_trace: dict = {}
 
     def _grounding(self, job: Job) -> str:
-        parts = []
+        """Source text for the script prompt. The character budget is split evenly across the
+        sources, so one long article can't crowd the others out entirely."""
+        bodies = []
         for r in job.references:
             try:
                 text = Path(r.path).read_text(encoding="utf-8")
             except OSError:
                 continue
-            body = text.split("\n\n", 1)[-1]
-            parts.append(f'From "{r.title}" ({r.url}):\n{body}')
-        return "\n\n".join(parts)[:GROUNDING_CHARS]
+            bodies.append((r, text.split("\n\n", 1)[-1]))
+        if not bodies:
+            return ""
+        share = max(200, GROUNDING_CHARS // len(bodies))
+        parts = [f'From "{r.title}" ({r.url}):\n{body[:share]}' for r, body in bodies]
+        return "\n\n".join(parts)
 
     async def run(self, job: Job, ctx: StageContext) -> SceneResult:
         keywords = [k.term for k in job.approved_keywords]

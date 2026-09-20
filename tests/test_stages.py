@@ -120,6 +120,23 @@ class SceneTests(unittest.IsolatedAsyncioTestCase):
         script_req = next(b for m, p, b in mpt.requests if p == "/api/v1/scripts")
         self.assertLessEqual(len(script_req["video_script_prompt"]), 2000)
 
+    async def test_every_source_gets_a_share_of_the_grounding(self):
+        mpt = FakeMpt()
+        client = MptClient("http://mpt", transport=httpx.MockTransport(mpt))
+        with tempfile.TemporaryDirectory() as lib, tempfile.TemporaryDirectory() as assets:
+            a, b = Path(assets) / "a.txt", Path(assets) / "b.txt"
+            a.write_text("Kraken\n\n" + "kraken legend. " * 800, encoding="utf-8")
+            b.write_text("Octopus\n\n" + "octopus hearts. " * 800, encoding="utf-8")
+            stage = MptSceneStage(client, LocalFolderClipSource(lib), voice_name="v", generate_audio=False)
+            job = Job(subject="octopuses")
+            job.keywords = [Keyword(term="octopus", approved=True)]
+            job.references = [TextRef(source="wikipedia", title="Kraken", url="http://k", path=str(a)),
+                              TextRef(source="wikipedia", title="Octopus", url="http://o", path=str(b))]
+            await stage.run(job, StageContext(Path(assets)))
+        prompt = next(b for m, p, b in mpt.requests if p == "/api/v1/scripts")["video_script_prompt"]
+        self.assertIn("octopus hearts", prompt)
+        self.assertLessEqual(len(prompt), 2000)
+
     async def test_mpt_scene_stage_builds_scenes_from_approved_keywords_only(self):
         mpt = FakeMpt()
         client = MptClient("http://mpt", transport=httpx.MockTransport(mpt))

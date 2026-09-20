@@ -191,25 +191,44 @@ def main() -> None:
     ap.add_argument("--sources", default="wikipedia,commons",
                     help='where to pull text/images from, comma separated: wikipedia,commons,pexels,folder ("" = your own clips only)')
     ap.add_argument("--reviewer", default="", help="your name, written to the decision log next to every choice you make")
+    ap.add_argument("--resume", metavar="JOB_ID", help="continue an existing job (retries it first if it failed)")
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
 
     api = Api(args.api)
-    subject = args.subject or ask("What is the video about? ")
     reviewer = args.reviewer or ask("Your name (recorded in the decision log next to your choices): ")
-    sources = [x.strip() for x in args.sources.split(",") if x.strip()]
-    job = api.call("POST", "/jobs", {"subject": subject, "reviewer": reviewer,
-                                     "providers": {"keywords": args.keywords, "sources": sources}})
-    print(f"Created job {job['id']}  ->  folder: projects/{job['slug']}-{job['id']}/")
-    api.call("POST", f"/jobs/{job['id']}/start", {"reviewer": reviewer})
 
-    job = wait_for(api, job["id"], {"keywords_review"}, "researching keywords")
-    job = keyword_gate(api, job, reviewer)
-    if sources:
+    if args.resume:
+        # Pick up a job the script was following earlier (for example one that failed and was fixed).
+        job = api.call("GET", f"/jobs/{args.resume}")
+        if job["state"] == "failed":
+            print(f"Job {job['id']} had failed ({job.get('error') or 'no details'}). Retrying it...")
+            api.call("POST", f"/jobs/{job['id']}/retry", {"reviewer": reviewer})
+        print(f"Resuming job {job['id']}  ->  folder: projects/{job['slug']}-{job['id']}/")
+        sources = job["providers"].get("sources") or []
+    else:
+        subject = args.subject or ask("What is the video about? ")
+        sources = [x.strip() for x in args.sources.split(",") if x.strip()]
+        job = api.call("POST", "/jobs", {"subject": subject, "reviewer": reviewer,
+                                         "providers": {"keywords": args.keywords, "sources": sources}})
+        print(f"Created job {job['id']}  ->  folder: projects/{job['slug']}-{job['id']}/")
+        api.call("POST", f"/jobs/{job['id']}/start", {"reviewer": reviewer})
+
+    # Each gate only runs if the job hasn't already passed it (matters when resuming).
+    order = ["created", "keywords_running", "keywords_review", "sourcing_running", "vetting_running",
+             "assets_review", "scenes_running", "scenes_review", "rendering", "completed"]
+    def at(name: str) -> bool:
+        state = api.call("GET", f"/jobs/{job['id']}")["state"]
+        return (order.index(state) if state in order else len(order)) <= order.index(name)
+    if at("keywords_review"):
+        job = wait_for(api, job["id"], {"keywords_review"}, "researching keywords")
+        job = keyword_gate(api, job, reviewer)
+    if sources and at("assets_review"):
         job = wait_for(api, job["id"], {"assets_review"}, "pulling and vetting sources", every=4)
         job = asset_gate(api, job, reviewer)
-    job = wait_for(api, job["id"], {"scenes_review"}, "writing script and picking clips", every=4)
-    job = scene_gate(api, job, reviewer)
+    if at("scenes_review"):
+        job = wait_for(api, job["id"], {"scenes_review"}, "writing script and picking clips", every=4)
+        job = scene_gate(api, job, reviewer)
     job = wait_for(api, job["id"], {"completed"}, "rendering video (a few minutes is normal)", every=5)
 
     dest = Path(args.out) / f"{job['id']}.mp4"
