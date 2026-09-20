@@ -14,6 +14,7 @@
   GET  /jobs, /jobs/{id}, /jobs/{id}/output, /providers, /health
   GET  /jobs/{id}/decisions           the decision log (add ?format=md for DECISIONS.md)
   GET  /jobs/{id}/assets/{asset_id}/file   the downloaded image/video (for previews)
+  GET  /review, /review/{id}               the review web page (thumbnails, scores, Use/Reject)
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ from typing import Any
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from ..core import state_machine as sm
@@ -34,6 +35,7 @@ from ..core.models import Job, ProviderChoice
 from ..core.orchestrator import Orchestrator
 from ..core.store import JobNotFound, JobStore
 from ..stages.registry import Registry, build_default_registry
+from .review_page import PAGE
 
 
 def load_settings(path: str | Path = "config/pipeline.toml") -> dict[str, Any]:
@@ -193,8 +195,13 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         for t in list(tasks):
             t.cancel()
 
+    async def review_page(_: Request):
+        return HTMLResponse(PAGE)
+
     P = "/jobs/{id}"
     routes = [
+        Route("/review", review_page, methods=["GET"]),
+        Route("/review/{id}", review_page, methods=["GET"]),
         Route("/health", health),
         Route("/providers", providers),
         Route("/jobs", wrap(list_jobs), methods=["GET"]),

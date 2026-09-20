@@ -74,3 +74,20 @@ class ApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewPageTest(unittest.TestCase):
+    def test_review_page_is_served(self):
+        from starlette.testclient import TestClient
+        from pipeline.api.app import create_app
+        import tempfile
+        from pipeline.core.orchestrator import Orchestrator
+        from pipeline.core.store import JobStore
+        from pipeline.stages.registry import build_default_registry
+        with tempfile.TemporaryDirectory() as d:
+            app = create_app(Orchestrator(JobStore(d), build_default_registry({}), {}), {})
+            with TestClient(app) as c:
+                for path in ("/review", "/review/abc"):
+                    r = c.get(path)
+                    self.assertEqual(r.status_code, 200)
+                    self.assertIn("Asset review", r.text)

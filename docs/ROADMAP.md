@@ -35,3 +35,5 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 - Step 2 needs `yt-dlp` and `ffmpeg` in the pipeline's Docker image, and internet access from it.
 - Downloading videos from platforms can break their terms of service and copyright. The
   pipeline flags it and records the decision; the risk stays with you (Limitation #3).
+
+> Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built. See docs/REVIEW_UI.md. Scene/script page still to do.

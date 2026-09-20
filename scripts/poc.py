@@ -134,8 +134,15 @@ def asset_gate(api: Api, job: dict, reviewer: str) -> dict:
         print(f"Showing {len(on)} at or above {thr}%. {len(off)} below {thr}% are hidden (numbers are unchanged; type 'hidden' to list them).")
         for i, a in on:
             show_asset(i, a)
+        print(f"\nPREFER CLICKING? Open {api.base}/review/{job['id']} in your browser (thumbnails, scores, Use/Reject), submit there, then type 'web' here.")
         print("\nOpen the files in the folder shown above to look at them. Reasons are also saved in DECISIONS.md.")
-        ans = ask("\nNumbers to APPROVE (e.g. 1,3,4), 'ok' = every on-topic, non-high-risk, usable one, 'hidden' = list the below-threshold ones, 'more' = search again, 'none': ").lower()
+        ans = ask("\nNumbers to APPROVE (e.g. 1,3,4), 'ok' = every on-topic, non-high-risk, usable one, 'web' = I used the browser page, 'hidden' = list the below-threshold ones, 'more' = search again, 'none': ").lower()
+        if ans == "web":
+            print("  Waiting for you to submit in the browser page...")
+            while api.call("GET", f"/jobs/{job['id']}")["state"] == "assets_review":
+                time.sleep(3)
+            job = wait_for(api, job["id"], {"assets_review", "scenes_review"}, "working on your decisions", every=4)
+            return asset_gate(api, job, reviewer) if job["state"] == "assets_review" else job
         if ans == "hidden":
             for i, a in off:
                 print(f"  {i:>3}. ({score_text(a)}) [{a['source']}] {(a['title'] or a['id'])[:70]}")

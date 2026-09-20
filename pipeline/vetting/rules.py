@@ -299,7 +299,7 @@ def vet_asset(a: Asset, all_assets: list[Asset], topic_terms: list[str] | None =
     else:
         summary = ("Risk LOW: no rule fired above 'info'. This is not an approval. It only means the checker "
                    "found nothing to warn about. A human still decides.")
-    return Vetting(risk=risk, flags=flags, method=VERSION, summary=summary, usable=usable, relevance=rel)
+    return Vetting(risk=risk, flags=flags, method=VERSION, summary=summary, usable=usable, relevance=rel, relevance_why=rel_why)
 
 
 def vet_all(assets: list[Asset], topic_terms: list[str] | None = None, min_relevance: float = RELEVANCE_MIN) -> None:
