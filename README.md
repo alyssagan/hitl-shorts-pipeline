@@ -21,7 +21,7 @@ times and asks you first**, so bad keywords, risky images, or a weak script neve
 |:---:|---|---|
 | 1 | Machine | Analyzes your topic and proposes ranked keywords |
 | **Gate 1** | **You** | Approve, add, or reject keywords (rejections come with notes the next run uses) |
-| 2 | Machine | Pulls text and images for those keywords from **Wikipedia, Wikimedia Commons, Pexels** (or your own scraper's folder). Each source gets its own folder in the project, with a log of every request |
+| 2 | Machine | Pulls text and images for those keywords from **Wikipedia, Wikimedia Commons, Pexels, Pixabay, Unsplash, NASA, Internet Archive, Library of Congress, Smithsonian, your own list of URLs** (or your own scraper's folder). Pick any combination with `--sources`. Each source gets its own folder in the project, with a log of every request |
 | 2b | Machine | **Vets** every file with plain, readable rules: license, people, sensitive content, size. It flags and explains. It never deletes anything |
 | **Gate 2** | **You** | Approve or reject each asset, seeing the risk and *why* it was flagged. High-risk approvals need a written reason |
 | 3 | Machine | [MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo) writes the script (grounded in the Wikipedia text) and picks a clip per scene from **approved assets only** |
@@ -161,7 +161,7 @@ Illegal actions return `409` with the reason, bad input `422`, unknown job `404`
 hitl-shorts-pipeline/
 ├── pipeline/
 │   ├── core/        The brain: state machine, models, storage, orchestrator, decision log
-│   ├── sources/     Where data is pulled from: wikipedia.py, commons.py, pexels.py, folder.py
+│   ├── sources/     Where data is pulled from: wikipedia.py, commons.py, pexels.py, pixabay.py, unsplash.py, nasa.py, internet_archive.py, loc.py, smithsonian.py, urls.py, folder.py
 │   ├── vetting/     rules.py: the explainable risk rules
 │   ├── stages/      Swappable steps
 │   │   ├── keywords/    manual.py, llm.py        <- add SEO providers here

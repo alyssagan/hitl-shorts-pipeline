@@ -19,7 +19,12 @@ Assets under 480 px (`LOW_RES`) can't be approved at all, because the renderer w
 | `LIC_GFDL` | medium | GNU Free Documentation License | Awkward extra obligations for video |
 | `LIC_BY` | low | Attribution required | Credit is generated in `CREDITS.md`; publish it |
 | `LIC_PEXELS` | low | Pexels License | Free commercial use; link back requested; people can't be shown in a bad light |
+| `LIC_PIXABAY` | low | Pixabay Content License | Free commercial use, no credit needed; no selling unaltered copies; no implied endorsement |
+| `LIC_UNSPLASH` | low | Unsplash License | Free commercial use; API download terms unchecked for this tool |
 | `LIC_PD` | info | Public domain / CC0 | No restrictions |
+| `PLATFORM_SOURCE` | high | Downloaded from YouTube, TikTok, Instagram, X, Vimeo etc. | Uploader may not own the rights; platform terms may forbid downloading |
+| `NASA_NOTE` | low | Any NASA item | Third-party material, people and protected logos are not covered |
+| `URL_LIST_NOTE` | info | File from your URL list without a license | URL and uploader are recorded so you can trace it |
 | `ATTR_MISSING` | medium | License needs credit but no author found | Can't comply |
 | `PEOPLE_MINOR` | high | Title/description mentions a child or minor | Needs extra care and consent |
 | `PEOPLE_IDENTIFIABLE` | medium | Mentions a person | Avoid implied endorsement or bad-light use |

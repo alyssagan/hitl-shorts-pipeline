@@ -89,6 +89,8 @@ class MptSceneStage:
         if not texts:
             raise MptError("MoneyPrinterTurbo returned an empty script")
 
+        if hasattr(clips, "total_scenes"):
+            clips.total_scenes = len(texts)
         used: set[str] = set()
         scenes: list[Scene] = []
         for i, text in enumerate(texts):

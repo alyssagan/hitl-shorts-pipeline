@@ -59,6 +59,16 @@ class LocalFolderClipSource:
         return str(available[0])
 
 
+def _hint_matches(a: Asset, scene: Scene, total: int = 0) -> bool:
+    hint = str((a.meta or {}).get("position_hint", "")).strip().lower()
+    if not hint:
+        return False
+    if hint.isdigit():
+        return int(hint) == scene.index + 1
+    return (hint in ("intro", "start", "opening") and scene.index == 0) or \
+           (hint in ("end", "outro", "closing") and total > 0 and scene.index == total - 1)
+
+
 class AssetClipSource:
     """Picks from the assets a human approved at the asset review stop. Nothing
     else can appear in the video. Matching uses words shared between the scene
@@ -68,12 +78,21 @@ class AssetClipSource:
     def __init__(self, assets: list[Asset]):
         self.assets = [a for a in assets if a.status == "approved" and (a.vetting is None or a.vetting.usable)]
         self.last_pick: ClipPick | None = None
+        self.total_scenes = 0          # set by the scene stage, so "end" can mean the last scene
 
     async def fetch(self, scene: Scene, dest_dir: Path, used: set[str]) -> str | None:
         available = [a for a in self.assets if a.path not in used]
         self.last_pick = None
         if not available:
             return None
+        # A URL-list entry can say where it belongs: a scene number ("2") or "intro" / "end".
+        hinted = [a for a in available if _hint_matches(a, scene, self.total_scenes)]
+        if hinted:
+            self.last_pick = ClipPick(hinted[0].path, f"you placed it here in your URL list (position '{hinted[0].meta.get('position_hint')}')", hinted[0].id)
+            return hinted[0].path
+        # Assets the user reserved for a specific position stay out of the general pool while
+        # other assets remain, so they are still free for their own scene.
+        available = [a for a in available if not str((a.meta or {}).get("position_hint", "")).strip()] or available
         scene_words = _tokens(scene.narration + " " + " ".join(scene.search_terms))
         best, best_hit = None, set()
         for a in available:

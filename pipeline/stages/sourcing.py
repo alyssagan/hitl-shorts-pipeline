@@ -65,7 +65,7 @@ class SourcingStage:
             (src_dir / "files").mkdir(parents=True, exist_ok=True)
             known = [a for a in job.assets if a.source == name]
             sctx = SourceContext(
-                project_dir=ctx.project_dir, dir=src_dir, subject=job.subject, settings=ctx.settings,
+                project_dir=ctx.project_dir, dir=src_dir, subject=job.subject, settings={**ctx.settings, "job_options": job.providers.options},
                 http=LoggedHttp(src_dir, name, user_agent=self.user_agent, transport=self.transport),
                 known_urls={a.source_url for a in known} | {r.url for r in job.references if r.source == name},
                 known_hashes={a.sha256 for a in job.assets if a.sha256},

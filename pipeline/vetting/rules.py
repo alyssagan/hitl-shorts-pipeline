@@ -47,8 +47,9 @@ def _license_kind(a: Asset) -> str:
     s = f"{a.license} {a.license_url}".lower()
     if not s.strip():
         return "unknown"
-    if "pexels" in s:
-        return "pexels"
+    for stock in ("pexels", "pixabay", "unsplash"):
+        if stock in s:
+            return stock
     if re.search(r"public domain|\bpd\b|cc0|cc-zero|publicdomain|/zero/|pdm|no known copyright", s):
         return "pd"
     if re.search(r"[-_/ ]nc\b|noncommercial|non-commercial|by-nc", s):
@@ -96,8 +97,42 @@ def r_license(a: Asset, _all: list[Asset]) -> list[Flag]:
         return [Flag(rule="LIC_PEXELS", severity="low",
                      message="Pexels License: free for commercial use, but Pexels' API terms ask for a visible link back, and identifiable people can't be shown in a bad light.",
                      evidence=f"license: {lic}")]
+    if kind == "pixabay":
+        return [Flag(rule="LIC_PIXABAY", severity="low",
+                     message="Pixabay Content License: free for commercial use, no credit required. You may not sell unaltered copies or imply that a person or brand endorses your video.",
+                     evidence=f"license: {lic}")]
+    if kind == "unsplash":
+        return [Flag(rule="LIC_UNSPLASH", severity="low",
+                     message="Unsplash License: free for commercial use, credit appreciated. You may not sell unaltered copies. Unsplash's API terms about downloading are unchecked for this tool (see KNOWN_LIMITATIONS).",
+                     evidence=f"license: {lic}")]
     return [Flag(rule="LIC_PD", severity="info",
                  message="Public domain / CC0. No license restrictions on use.", evidence=f"license: {lic}")]
+
+
+PLATFORM_HOSTS = ("youtube.com", "youtu.be", "tiktok.com", "instagram.com", "facebook.com", "fb.watch", "twitter.com",
+                  "x.com", "vimeo.com", "dailymotion.com", "twitch.tv", "reddit.com", "snapchat.com", "pinterest.com")
+
+
+def r_platform(a: Asset, _all: list[Asset]) -> list[Flag]:
+    from urllib.parse import urlparse
+    host = urlparse(a.page_url or a.source_url).netloc.lower().removeprefix("www.")
+    if any(host == h or host.endswith("." + h) for h in PLATFORM_HOSTS):
+        return [Flag(rule="PLATFORM_SOURCE", severity="high",
+                     message="Downloaded from a social or video platform. The uploader may not own the rights (re-uploads are common), and the platform's terms may forbid downloading. Approving needs your written note.",
+                     evidence=f"host: {host}")]
+    return []
+
+
+def r_source_notes(a: Asset, _all: list[Asset]) -> list[Flag]:
+    if a.source == "nasa":
+        return [Flag(rule="NASA_NOTE", severity="low",
+                     message="NASA media is generally not copyrighted, but it can contain third-party material, identifiable people, or NASA's protected logos. Don't imply NASA endorses your video.",
+                     evidence="source: NASA Image and Video Library")]
+    if a.source == "urls" and not a.license:
+        return [Flag(rule="URL_LIST_NOTE", severity="info",
+                     message="This came from your own URL list, so the pipeline has no license for it. Its URL and uploader are recorded so you can trace and credit it.",
+                     evidence=f"requested: {a.source_url}")]
+    return []
 
 
 def r_attribution(a: Asset, _all: list[Asset]) -> list[Flag]:
@@ -185,6 +220,8 @@ def r_duplicate(a: Asset, all_assets: list[Asset]) -> list[Flag]:
 
 RULES: list[tuple[str, str, Callable[[Asset, list[Asset]], list[Flag]]]] = [
     ("LIC_*", "License type decides commercial-use risk (unknown/NC/ND high, SA medium, BY/Pexels low, PD info)", r_license),
+    ("PLATFORM_SOURCE", "Downloaded from a social/video platform (uploader may not own the rights)", r_platform),
+    ("*_NOTE", "Source-specific notes (NASA third-party material, URL-list files)", r_source_notes),
     ("ATTR_MISSING", "License needs a credit but no author/credit text exists", r_attribution),
     ("PEOPLE_*", "Words in the title/description suggest identifiable people or minors", r_people),
     ("CONTENT_*", "Words in the title/description suggest graphic or sensitive content", r_sensitive),

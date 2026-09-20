@@ -10,7 +10,14 @@ from .base import KeywordStage, RenderStage, SceneStage
 from ..sources.base import DEFAULT_USER_AGENT, SourceAdapter
 from ..sources.commons import CommonsSource
 from ..sources.folder import FolderSource
+from ..sources.internet_archive import InternetArchiveSource
+from ..sources.loc import LibraryOfCongressSource
+from ..sources.nasa import NasaSource
 from ..sources.pexels import PexelsSource
+from ..sources.pixabay import PixabaySource
+from ..sources.smithsonian import SmithsonianSource
+from ..sources.unsplash import UnsplashSource
+from ..sources.urls import UrlListSource
 from ..sources.wikipedia import WikipediaSource
 from .keywords.llm import LLMKeywordStage
 from .keywords.manual import ManualKeywordStage
@@ -99,6 +106,16 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
     reg.register_source("wikipedia", lambda: WikipediaSource(max_articles=int(src_cfg.get("wikipedia_articles", 2))))
     reg.register_source("commons", lambda: CommonsSource(per_query=per_query))
     reg.register_source("pexels", lambda: PexelsSource(per_query=per_query, videos=bool(src_cfg.get("pexels_videos", True))))
+    reg.register_source("pixabay", lambda: PixabaySource(per_query=per_query, videos=bool(src_cfg.get("pixabay_videos", True))))
+    reg.register_source("unsplash", lambda: UnsplashSource(per_query=per_query))
+    reg.register_source("nasa", lambda: NasaSource(per_query=per_query, videos=bool(src_cfg.get("nasa_videos", True))))
+    reg.register_source("archive", lambda: InternetArchiveSource(
+        per_query=per_query, require_license=bool(src_cfg.get("archive_require_license", True)),
+        max_mb=int(src_cfg.get("archive_max_mb", 60))))
+    reg.register_source("loc", lambda: LibraryOfCongressSource(per_query=per_query))
+    reg.register_source("smithsonian", lambda: SmithsonianSource(per_query=per_query))
+    reg.register_source("urls", lambda: UrlListSource(
+        max_mb=int(src_cfg.get("url_max_mb", 200)), max_height=int(src_cfg.get("url_max_height", 1080))))
     reg.register_source("folder", lambda: FolderSource(src_cfg.get("folder_path", "library/scraped")))
     reg.register_keywords("manual", ManualKeywordStage)
     reg.register_keywords("llm", lambda: LLMKeywordStage(

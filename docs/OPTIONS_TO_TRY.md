@@ -29,10 +29,19 @@ Format: `<language>-<Region>-<Name>Neural-<Female|Male>`. After editing, run
 
 ## Where images and clips come from (`--sources`)
 
+Details, keys and caveats: [ADD_A_SOURCE.md](ADD_A_SOURCE.md). Combine any of them, e.g. `--sources commons,nasa,pixabay`.
+
 | Source | Status | Result |
 |---|---|---|
 | `wikipedia,commons` | current | Free, no key. Mostly still images, many CC BY-SA (medium flag). |
-| `pexels` | to try | Free key. Adds video clips and simpler licensing. |
+| `pexels` | to try | Free key. Photos and video, simple license. |
+| `pixabay` | to try | Free key. Photos and video, simple license. |
+| `nasa` | to try | No key. Great for space and science. |
+| `archive` | to try | No key. Old films and photos; only licensed items are kept. |
+| `loc` | to try | No key. Historic photos; check each rights note. |
+| `smithsonian` | to try | Free key. CC0 museum images. Response layout unchecked. |
+| `unsplash` | to try | Free key, 50 requests an hour. Stills only. See Limitation #14. |
+| `--urls urls.txt` | to try | Your own links with notes and positions. See [URL_LIST.md](URL_LIST.md). |
 | `folder` (`library/scraped/`) | to try | Your own scraped or downloaded files, vetted like the rest. |
 
 ## Script length and grounding (see Limitation #1)

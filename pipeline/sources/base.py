@@ -36,6 +36,25 @@ MIME_TO_EXT = {
 }
 
 
+_SECRET_PARAM = re.compile(r"([?&](?:key|api_key|apikey|client_id|access_token|token)=)[^&#]+", re.I)
+
+
+def redact_url(url: str) -> str:
+    """Hide API keys that some services require in the query string, before a URL is logged."""
+    return _SECRET_PARAM.sub(r"\1***", url)
+
+
+def cc_name(url: str) -> str:
+    """Readable license name from a Creative Commons URL, e.g. 'CC BY-SA 4.0'. Empty if not recognised."""
+    m = re.search(r"creativecommons\.org/licenses/([a-z-]+)/([0-9.]+)", url or "", re.I)
+    if m:
+        return f"CC {m.group(1).upper()} {m.group(2)}"
+    m = re.search(r"creativecommons\.org/publicdomain/(zero|mark)/([0-9.]+)", url or "", re.I)
+    if m:
+        return f"CC0 {m.group(2)}" if m.group(1).lower() == "zero" else f"Public Domain Mark {m.group(2)}"
+    return ""
+
+
 class SourceUnavailable(Exception):
     """The source can't run right now (e.g. missing API key). Logged, not fatal."""
 
@@ -99,7 +118,7 @@ class LoggedHttp:
                                         size += len(chunk)
                         body = None
                 ms = int((loop.time() - started) * 1000)
-                full_url = str(resp.request.url)
+                full_url = redact_url(str(resp.request.url))
                 self._log(method="GET", url=full_url, status=resp.status_code, purpose=purpose,
                           duration_ms=ms, bytes=len(body) if body is not None else size,
                           dest=str(stream_to) if stream_to else None,

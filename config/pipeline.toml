@@ -16,6 +16,14 @@ max_queries = 5          # how many approved keywords to search with
 per_query = 4            # files to keep per keyword, per source
 wikipedia_articles = 2
 pexels_videos = true
+pixabay_videos = true
+nasa_videos = true
+# Internet Archive: keep only items that carry a license or public-domain mark (most don't).
+archive_require_license = true
+archive_max_mb = 60
+# URL list (yt-dlp): biggest download and tallest video to accept.
+url_max_mb = 200
+url_max_height = 1080
 folder_path = "library/scraped"   # drop your own scraper's output here (used by the "folder" source)
 
 [library]

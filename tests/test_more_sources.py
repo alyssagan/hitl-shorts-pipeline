@@ -1,0 +1,273 @@
+"""The extra sources (Pixabay, NASA, Internet Archive, Library of Congress, Smithsonian, Unsplash,
+URL list), offline with httpx MockTransport. Response shapes follow each service's public docs."""
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+import httpx
+
+from pipeline.core.models import Asset, Scene
+from pipeline.sources.base import LoggedHttp, SourceContext, SourceUnavailable, cc_name, redact_url
+from pipeline.sources.internet_archive import InternetArchiveSource
+from pipeline.sources.loc import LibraryOfCongressSource
+from pipeline.sources.nasa import NasaSource, pick_file
+from pipeline.sources.pixabay import PixabaySource
+from pipeline.sources.smithsonian import SmithsonianSource
+from pipeline.sources.unsplash import UnsplashSource
+from pipeline.sources.urls import UrlListSource, parse_url_lines
+from pipeline.stages.scenes.clips import AssetClipSource
+from pipeline.vetting.rules import vet_asset
+
+BYTES = b"\xff\xd8\xff-fake-media-"
+
+
+def make_ctx(d: Path, name: str, handler, settings=None) -> SourceContext:
+    src = d / "sources" / name
+    (src / "files").mkdir(parents=True)
+    return SourceContext(project_dir=d, dir=src, settings=settings or {},
+                         http=LoggedHttp(src, name, transport=httpx.MockTransport(handler), backoff=0))
+
+
+def log_lines(ctx: SourceContext) -> list[dict]:
+    return [json.loads(x) for x in ctx.http.log_path.read_text().splitlines()]
+
+
+def risk(a: Asset) -> str:
+    return vet_asset(a, [a]).risk
+
+
+def rules(a: Asset) -> set[str]:
+    return {f.rule for f in vet_asset(a, [a]).flags}
+
+
+class HelperTests(unittest.TestCase):
+    def test_keys_are_hidden_in_urls(self):
+        self.assertEqual(redact_url("https://x/api?key=SECRET123&q=cat"), "https://x/api?key=***&q=cat")
+        self.assertNotIn("SECRET", redact_url("https://x/?a=1&api_key=SECRET&b=2"))
+
+    def test_cc_names(self):
+        self.assertEqual(cc_name("https://creativecommons.org/licenses/by-sa/4.0/"), "CC BY-SA 4.0")
+        self.assertEqual(cc_name("https://creativecommons.org/publicdomain/zero/1.0/"), "CC0 1.0")
+        self.assertEqual(cc_name("https://creativecommons.org/publicdomain/mark/1.0/"), "Public Domain Mark 1.0")
+        self.assertEqual(cc_name("https://example.com"), "")
+
+
+class PixabayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_photos_and_videos_and_key_never_logged(self):
+        def h(req):
+            if req.url.host == "pixabay.com" and req.url.path == "/api/":
+                return httpx.Response(200, json={"hits": [{"id": 1, "tags": "octopus, sea", "user": "Ann", "pageURL": "https://pixabay.com/p/1",
+                                                            "largeImageURL": "https://cdn.pixabay.com/1.jpg", "imageWidth": 1280, "imageHeight": 1920}]})
+            if req.url.path == "/api/videos/":
+                return httpx.Response(200, json={"hits": [{"id": 2, "tags": "octopus swim", "user": "Bo", "pageURL": "https://pixabay.com/v/2", "duration": 12,
+                                                            "videos": {"large": {"url": "https://cdn.pixabay.com/l.mp4", "width": 1920, "height": 1080},
+                                                                       "medium": {"url": "https://cdn.pixabay.com/m.mp4", "width": 1280, "height": 720},
+                                                                       "tiny": {"url": "https://cdn.pixabay.com/t.mp4", "width": 480, "height": 270}}}]})
+            return httpx.Response(200, content=BYTES + str(req.url.path).encode())
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "pixabay", h)
+            res = await PixabaySource(api_key="TOPSECRET").fetch(["octopus"], ctx)
+            self.assertEqual({a.kind for a in res.assets}, {"image", "video"})
+            vid = next(a for a in res.assets if a.kind == "video")
+            self.assertTrue(vid.source_url.endswith("m.mp4"))          # smallest that is at least 720 wide
+            self.assertEqual(vid.duration, 12)
+            self.assertEqual(vid.license, "Pixabay Content License")
+            self.assertNotIn("TOPSECRET", (ctx.dir / "requests.jsonl").read_text())
+            self.assertEqual(risk(vid), "low")
+            self.assertIn("LIC_PIXABAY", rules(vid))
+
+    async def test_no_key_means_unavailable(self):
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "pixabay", lambda r: httpx.Response(404))
+            with self.assertRaises(SourceUnavailable):
+                await PixabaySource(api_key="").fetch(["x"], ctx)
+
+
+class NasaTests(unittest.IsolatedAsyncioTestCase):
+    def test_pick_file(self):
+        hrefs = ["http://x/a~orig.jpg", "http://x/a~large.jpg", "http://x/a~medium.jpg", "http://x/metadata.json"]
+        self.assertTrue(pick_file(hrefs, "image").endswith("~large.jpg"))
+        vids = ["http://x/v~orig.mp4", "http://x/v~medium.mp4", "http://x/v~small.mp4"]
+        self.assertTrue(pick_file(vids, "video").endswith("~medium.mp4"))
+
+    async def test_search_manifest_download(self):
+        def h(req):
+            if req.url.path == "/search":
+                return httpx.Response(200, json={"collection": {"items": [{"data": [{
+                    "nasa_id": "PIA1", "title": "Octopus nebula", "description": "<b>Nice</b> view", "center": "JPL", "media_type": "image",
+                    "photographer": "NASA/JPL"}]}]}})
+            if req.url.path.startswith("/asset/"):
+                return httpx.Response(200, json={"collection": {"items": [{"href": "http://images-assets.nasa.gov/image/PIA1/PIA1~large.jpg"}, {"href": "http://images-assets.nasa.gov/image/PIA1/PIA1~small.jpg"}]}})
+            return httpx.Response(200, content=BYTES)
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "nasa", h)
+            res = await NasaSource().fetch(["nebula"], ctx)
+            a = res.assets[0]
+            self.assertEqual(a.page_url, "https://images.nasa.gov/details/PIA1")
+            self.assertIn("NASA", a.attribution)
+            self.assertEqual(a.description, "Nice view")
+            self.assertIn("NASA_NOTE", rules(a))
+            self.assertIn("LIC_PD", rules(a))
+
+
+class ArchiveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_licensed_items_and_right_file(self):
+        def h(req):
+            if req.url.path == "/advancedsearch.php":
+                return httpx.Response(200, json={"response": {"docs": [
+                    {"identifier": "licensed", "title": "Old film", "mediatype": "movies", "licenseurl": "https://creativecommons.org/publicdomain/mark/1.0/"},
+                    {"identifier": "nolicense", "title": "Random upload", "mediatype": "movies"}]}})
+            if req.url.path == "/metadata/licensed":
+                return httpx.Response(200, json={"metadata": {"title": "Old film", "creator": "Prelinger", "licenseurl": "https://creativecommons.org/publicdomain/mark/1.0/"},
+                                                 "files": [{"name": "old.mp4", "size": "5000000", "format": "h.264"},
+                                                           {"name": "old.ogv", "size": "9000000"},
+                                                           {"name": "huge.mp4", "size": "900000000"}]})
+            return httpx.Response(200, content=BYTES)
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "archive", h)
+            res = await InternetArchiveSource().fetch(["film"], ctx)
+            self.assertEqual(len(res.assets), 1)
+            a = res.assets[0]
+            self.assertTrue(a.source_url.endswith("/licensed/old.mp4"))
+            self.assertEqual(a.license, "Public Domain Mark 1.0")
+            self.assertEqual(risk(a), "low")
+
+
+class LocTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_domain_only_when_rights_say_so(self):
+        def h(req):
+            if req.url.host == "www.loc.gov":
+                return httpx.Response(200, json={"results": [
+                    {"title": "Harbor 1900", "url": "https://www.loc.gov/item/1/", "image_url": ["https://tile.loc.gov/a.gif", "https://tile.loc.gov/a_s.jpg#h=100", "https://tile.loc.gov/a_l.jpg#h=900"],
+                     "rights_advisory": ["No known restrictions on publication."], "contributor": ["Detroit Publishing Co."]},
+                    {"title": "Portrait", "url": "https://www.loc.gov/item/2/", "image_url": ["https://tile.loc.gov/b.jpg"], "rights_advisory": ["Rights status not evaluated."]}]})
+            return httpx.Response(200, content=BYTES + str(req.url).encode())
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "loc", h)
+            res = await LibraryOfCongressSource().fetch(["harbor"], ctx)
+            pd = next(a for a in res.assets if a.title == "Harbor 1900")
+            unk = next(a for a in res.assets if a.title == "Portrait")
+            self.assertTrue(pd.source_url.endswith("a_l.jpg"))
+            self.assertIn("Public domain", pd.license)
+            self.assertEqual(unk.license, "")
+            self.assertEqual(risk(unk), "high")
+            self.assertIn("Rights status not evaluated", unk.description)
+
+
+class SmithsonianTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cc0_gets_a_license_and_key_is_hidden(self):
+        def h(req):
+            if req.url.host == "api.si.edu":
+                return httpx.Response(200, json={"response": {"rows": [{"id": "x1", "content": {"descriptiveNonRepeating": {
+                    "title": {"content": "Octopus model"}, "data_source": "National Museum of Natural History", "record_link": "https://n2t.net/ark:/1",
+                    "online_media": {"media": [{"type": "Images", "content": "https://ids.si.edu/ids/deliveryService?id=1", "usage": {"access": "CC0"}}]}}}}]}})
+            return httpx.Response(200, content=BYTES)
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "smithsonian", h)
+            res = await SmithsonianSource(api_key="SIKEY").fetch(["octopus"], ctx)
+            self.assertEqual(res.assets[0].license, "CC0 1.0")
+            self.assertNotIn("SIKEY", ctx.http.log_path.read_text())
+
+
+class UnsplashTests(unittest.IsolatedAsyncioTestCase):
+    async def test_header_auth_and_download_ping(self):
+        seen = []
+
+        def h(req):
+            seen.append((req.url.host, req.url.path, req.headers.get("authorization")))
+            if req.url.path == "/search/photos":
+                return httpx.Response(200, json={"results": [{"id": "u1", "alt_description": "an octopus", "width": 4000, "height": 6000,
+                                                               "urls": {"regular": "https://images.unsplash.com/u1"}, "user": {"name": "Cy"},
+                                                               "links": {"html": "https://unsplash.com/photos/u1", "download_location": "https://api.unsplash.com/photos/u1/download"}}]})
+            if req.url.path.endswith("/download"):
+                return httpx.Response(200, json={"url": "https://images.unsplash.com/u1"})
+            return httpx.Response(200, content=BYTES)
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "unsplash", h)
+            res = await UnsplashSource(api_key="UKEY").fetch(["octopus"], ctx)
+            self.assertEqual(len(res.assets), 1)
+            self.assertIn(("api.unsplash.com", "/photos/u1/download", "Client-ID UKEY"), seen)
+            self.assertIn("LIC_UNSPLASH", rules(res.assets[0]))
+
+
+class UrlListTests(unittest.IsolatedAsyncioTestCase):
+    def test_parse_lines(self):
+        got = parse_url_lines("# comment\nhttps://a.com/v | great intro | 1\n\nhttps://b.com/x.mp4\n")
+        self.assertEqual(got, [{"url": "https://a.com/v", "note": "great intro", "position": "1"},
+                               {"url": "https://b.com/x.mp4", "note": "", "position": ""}])
+
+    async def test_no_urls_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "urls", lambda r: httpx.Response(404))
+            with self.assertRaises(SourceUnavailable):
+                await UrlListSource().fetch(["x"], ctx)
+
+    async def test_direct_file_and_platform_video(self):
+        calls = []
+
+        async def runner(args):
+            calls.append(args)
+            out = args[args.index("-o") + 1].replace("%(ext)s", "mp4")
+            Path(out).write_bytes(b"video-bytes")
+            Path(out.replace(".mp4", ".info.json")).write_text(json.dumps({
+                "title": "Octopus escapes tank", "uploader": "SeaFan", "duration": 42, "webpage_url": "https://www.youtube.com/watch?v=abc",
+                "width": 1080, "height": 1920, "upload_date": "20240101", "extractor_key": "Youtube",
+                "license": "Creative Commons Attribution license (reuse allowed)"}))
+            return 0, "", ""
+
+        def h(req):
+            return httpx.Response(200, content=BYTES + b"direct")
+        with tempfile.TemporaryDirectory() as d:
+            opts = {"job_options": {"urls": [
+                {"url": "https://files.example.com/clip.mp4", "note": "b-roll", "position": "2"},
+                {"url": "https://www.youtube.com/watch?v=abc", "note": "the escape", "position": "intro"},
+                "ftp://nope/x.mp4"]}}
+            ctx = make_ctx(Path(d), "urls", h, opts)
+            res = await UrlListSource(runner=runner).fetch([], ctx)
+            self.assertEqual(len(res.assets), 2)
+            direct = next(a for a in res.assets if a.source_url.startswith("https://files"))
+            yt = next(a for a in res.assets if "youtube" in a.source_url)
+            self.assertEqual(direct.meta["position_hint"], "2")
+            self.assertEqual(direct.meta["url_list_note"], "b-roll")
+            self.assertEqual(direct.license, "")
+            self.assertEqual(risk(direct), "high")                      # no license
+            self.assertEqual((yt.author, yt.duration, yt.height), ("SeaFan", 42, 1920))
+            self.assertIn("PLATFORM_SOURCE", rules(yt))
+            self.assertEqual(risk(yt), "high")                          # platform video
+            self.assertTrue((ctx.dir / "info").exists())
+            self.assertEqual(len(calls), 1)                             # only the platform link needed yt-dlp
+            self.assertTrue(any("ftp://" in str(s.get("url")) for s in res.trace[0]["skipped"]))
+            self.assertTrue(any(e["method"] == "yt-dlp" for e in log_lines(ctx)))
+
+    async def test_failed_download_is_reported_not_fatal(self):
+        async def runner(args):
+            return 1, "", "ERROR: Video unavailable"
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "urls", lambda r: httpx.Response(404), {"job_options": {"urls": ["https://www.tiktok.com/@a/video/1"]}})
+            res = await UrlListSource(runner=runner).fetch([], ctx)
+            self.assertEqual(res.assets, [])
+            self.assertIn("Video unavailable", res.trace[0]["skipped"][0]["reason"])
+
+
+class PositionHintTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hints_place_clips(self):
+        def asset(name, hint):
+            return Asset(source="urls", path=f"/p/{name}", title=name, status="approved", meta={"position_hint": hint}, kind="video")
+        assets = [asset("a", "2"), asset("b", "intro"), asset("c", "end"), asset("d", "")]
+        src = AssetClipSource(assets)
+        src.total_scenes = 4
+        picks = {}
+        used: set[str] = set()
+        for i in range(4):
+            p = await src.fetch(Scene(index=i, narration="zzz"), Path("."), used)
+            used.add(p)
+            picks[i] = p
+        self.assertEqual(picks[0], "/p/b")     # intro
+        self.assertEqual(picks[1], "/p/a")     # scene number 2
+        self.assertEqual(picks[3], "/p/c")     # end = last scene
+        self.assertEqual(picks[2], "/p/d")
+
+
+if __name__ == "__main__":
+    unittest.main()

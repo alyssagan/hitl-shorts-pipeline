@@ -205,6 +205,7 @@ def main() -> None:
     ap.add_argument("--sources", default="wikipedia,commons",
                     help='where to pull text/images from, comma separated: wikipedia,commons,pexels,folder ("" = your own clips only)')
     ap.add_argument("--reviewer", default="", help="your name, written to the decision log next to every choice you make")
+    ap.add_argument("--urls", metavar="FILE", help="text file of URLs to pull videos from, one per line: URL | note | position (adds the 'urls' source)")
     ap.add_argument("--resume", metavar="JOB_ID", help="continue an existing job (retries it first if it failed)")
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
@@ -223,8 +224,16 @@ def main() -> None:
     else:
         subject = args.subject or ask("What is the video about? ")
         sources = [x.strip() for x in args.sources.split(",") if x.strip()]
+        options = {}
+        if args.urls:
+            text = Path(args.urls).expanduser().read_text(encoding="utf-8")
+            options["urls"] = [dict(zip(("url", "note", "position"), [p.strip() for p in ln.split("|")]))
+                               for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+            if "urls" not in sources:
+                sources.append("urls")
+            print(f"Read {len(options['urls'])} URL(s) from {args.urls}")
         job = api.call("POST", "/jobs", {"subject": subject, "reviewer": reviewer,
-                                         "providers": {"keywords": args.keywords, "sources": sources}})
+                                         "providers": {"keywords": args.keywords, "sources": sources, "options": options}})
         print(f"Created job {job['id']}  ->  folder: projects/{job['slug']}-{job['id']}/")
         api.call("POST", f"/jobs/{job['id']}/start", {"reviewer": reviewer})
 

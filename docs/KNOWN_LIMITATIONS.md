@@ -110,6 +110,31 @@ Still to judge by watching and comparing runs (record in OPTIONS_TO_TRY.md):
 - **Options:** point MPT at a scratch copy of approved assets instead, so the project folder
   can stay read-only.
 
+### 13. New sources were built from documentation, not live responses
+- **What:** Pixabay, NASA, Internet Archive, Library of Congress, Unsplash and the URL list follow the
+  services' public API docs and are tested with hand-written mock replies. Smithsonian's layout
+  (`response.rows[].content.descriptiveNonRepeating`) is from memory, because its docs page could not be read.
+- **Effect:** the first live search on each may reveal a difference. `sources/<name>/requests.jsonl` shows
+  exactly what was asked and what status came back; a source that fails is skipped without stopping the others.
+- **Also:** Internet Archive search may match poorly for topics with few licensed items; Library of Congress leaves
+  items without a clear rights statement unlicensed (flagged high risk).
+- **Not built:** AI image generation (paid or heavy), by choice for now.
+
+### 14. Terms of use for some sources are only partly met
+- **Unsplash** asks apps to hot-link photos; we download them (needed for rendering) and send the download
+  ping. Whether that meets their API terms for a tool like this is unchecked.
+- **Pixabay** asks that results are cached for 24 hours and images are downloaded, not hot-linked. Both hold here.
+- **Platform videos** (URL list): downloading may break the platform's terms even where the uploader allows reuse.
+  The pipeline flags it and records your decision; it cannot make it safe.
+- **NASA:** media is generally not copyrighted, but third-party material, identifiable people and logos are
+  excepted. The `NASA_NOTE` flag reminds you; it can't see the image.
+
+### 15. URL list depends on yt-dlp working from Docker
+- **What:** sites change and sometimes block downloads (login walls, bot checks, region locks). A failed link is
+  reported in the source's trace and the others continue.
+- **Also:** the pipeline image now includes ffmpeg and yt-dlp, so it is larger and takes longer to build.
+  Rebuild (`docker compose up --build`) to get a newer yt-dlp when links start failing.
+
 ## Resolved
 
 _(nothing yet)_

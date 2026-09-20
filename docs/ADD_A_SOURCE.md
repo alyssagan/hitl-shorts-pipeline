@@ -37,3 +37,19 @@ with `"providers": {"sources": ["mysite"]}` or `--sources mysite`.
 Fill in `license`, `author`, `page_url` as accurately as the site allows. The vetting rules read them.
 Raise `SourceUnavailable("MYSITE_KEY is not set")` when a key is missing; it is logged and the other sources still run.
 Respect each site's terms and rate limits.
+
+## Sources that ship with the pipeline
+
+| Name for `--sources` | What | Key in `.env` | Notes |
+|---|---|---|---|
+| `wikipedia` | Article text for the script | none | Text only |
+| `commons` | Wikimedia Commons photos | none | Many CC BY-SA (medium flag) |
+| `pexels` | Photos and video | `PEXELS_API_KEY` | Free key |
+| `pixabay` | Photos and video | `PIXABAY_API_KEY` | Free key; key is hidden in request logs |
+| `unsplash` | Photos | `UNSPLASH_ACCESS_KEY` | Demo key: 50 requests an hour. API terms caveat in KNOWN_LIMITATIONS |
+| `nasa` | Images and video | none | Generally public domain, with exceptions (NASA_NOTE flag) |
+| `archive` | Internet Archive films and photos | none | Keeps only items with a license or public-domain mark |
+| `loc` | Library of Congress photos | none | Public domain only when the record's rights text says so |
+| `smithsonian` | Smithsonian Open Access images | `SMITHSONIAN_API_KEY` | CC0 items only get a license |
+| `urls` | Your own list of links (yt-dlp) | none | See `docs/URL_LIST.md` |
+| `folder` | Files in `library/scraped/` | none | Optional sidecar `.json` |
