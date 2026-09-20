@@ -89,9 +89,9 @@ def keyword_gate(api: Api, job: dict, reviewer: str = "") -> dict:
         except (ValueError, IndexError):
             print("  That didn't look right, try again.")
             continue
-        extra = ask("Add your own keywords? (comma separated, or Enter to skip): ")
+        extra = ask("Add your own keywords? (comma separated, no quotes needed, or Enter to skip): ")
         return api.call("POST", f"/jobs/{job['id']}/keywords/review",
-                        {"approved_ids": chosen, "extra_terms": [t for t in extra.split(",") if t.strip()], "reviewer": reviewer})
+                        {"approved_ids": chosen, "extra_terms": [t.strip().strip("\"'") for t in extra.split(",") if t.strip().strip("\"'")], "reviewer": reviewer})
 
 
 RISK_MARK = {"high": "HIGH  ", "medium": "MEDIUM", "low": "low   "}
@@ -101,7 +101,7 @@ def show_asset(i: int, a: dict) -> None:
     v = a.get("vetting") or {}
     tag = RISK_MARK.get(v.get("risk"), "??????")
     unusable = "" if v.get("usable", True) else "  [CAN'T BE USED]"
-    print(f"\n  {i:>2}. [{tag}] {a['source']}: {a['title'] or a['id']}{unusable}")
+    print(f"\n  {i:>2}. [{tag}] ({score_text(a)}) {a['source']}: {a['title'] or a['id']}{unusable}")
     print(f"      license: {a.get('license') or '(none found)'}   by: {a.get('author') or '(unknown)'}")
     print(f"      from: {a.get('page_url') or a.get('source_url') or '(unknown)'}")
     print(f"      file: projects/.../{a['rel_path']}")
@@ -110,15 +110,36 @@ def show_asset(i: int, a: dict) -> None:
             print(f"      - {f['rule']} ({f['severity']}): {f['message']}\n        evidence: {f['evidence']}")
 
 
+def score_text(a: dict) -> str:
+    rel = (a.get("vetting") or {}).get("relevance")
+    return "score n/a" if rel is None else f"score {round(rel * 100)}%"
+
+
+def off_topic(a: dict) -> bool:
+    return any(f["rule"] == "RELEVANCE_LOW" for f in (a.get("vetting") or {}).get("flags", []))
+
+
 def asset_gate(api: Api, job: dict, reviewer: str) -> dict:
     while True:
         print("\n=== GATE 2: assets ===  (why: only what you approve here can appear in the video)")
         print("The machine flagged risks below and said why. It did NOT filter anything: you decide.")
         assets = job["assets"]
-        for i, a in enumerate(assets, 1):
+        on = [(i, a) for i, a in enumerate(assets, 1) if not off_topic(a)]
+        off = [(i, a) for i, a in enumerate(assets, 1) if off_topic(a)]
+        for n in job.get("source_notes", []):
+            if n.get("warning"):
+                print(f"\n  WARNING: {n['warning']}")
+        thr = round(float(job["providers"]["options"].get("min_relevance", 0.5)) * 100)
+        print(f"\nScoring: each asset gets a 0-100% relevance score (share of a keyword's words found in its title/description/tags). Details: docs/SCORING.md")
+        print(f"Showing {len(on)} at or above {thr}%. {len(off)} below {thr}% are hidden (numbers are unchanged; type 'hidden' to list them).")
+        for i, a in on:
             show_asset(i, a)
         print("\nOpen the files in the folder shown above to look at them. Reasons are also saved in DECISIONS.md.")
-        ans = ask("\nNumbers to APPROVE (e.g. 1,3,4), 'ok' = every non-high-risk usable one, 'more' = search again, 'none': ").lower()
+        ans = ask("\nNumbers to APPROVE (e.g. 1,3,4), 'ok' = every on-topic, non-high-risk, usable one, 'hidden' = list the below-threshold ones, 'more' = search again, 'none': ").lower()
+        if ans == "hidden":
+            for i, a in off:
+                print(f"  {i:>3}. ({score_text(a)}) [{a['source']}] {(a['title'] or a['id'])[:70]}")
+            continue
         if ans == "more":
             fb = ask("What was wrong with these? ")
             extra = ask("New search terms? (comma separated, or Enter): ")
@@ -127,7 +148,7 @@ def asset_gate(api: Api, job: dict, reviewer: str) -> dict:
             return asset_gate(api, wait_for(api, job["id"], {"assets_review"}, "searching again"), reviewer)
         try:
             if ans == "ok":
-                yes = {i for i, a in enumerate(assets, 1) if (a.get("vetting") or {}).get("risk") != "high" and (a.get("vetting") or {}).get("usable", True)}
+                yes = {i for i, a in enumerate(assets, 1) if (a.get("vetting") or {}).get("risk") != "high" and (a.get("vetting") or {}).get("usable", True) and not off_topic(a)}
             elif ans == "none":
                 yes = set()
             else:
@@ -209,6 +230,7 @@ def main() -> None:
     ap.add_argument("--reviewer", default="", help="your name, written to the decision log next to every choice you make")
     ap.add_argument("--urls", metavar="FILE", help="text file of URLs to pull videos from, one per line: URL | note | position (adds the 'urls' source)")
     ap.add_argument("--resume", metavar="JOB_ID", help="continue an existing job (retries it first if it failed)")
+    ap.add_argument("--min-relevance", type=float, default=0.5, help="hide assets scoring below this (0 to 1) at the asset review; default 0.5")
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
 
@@ -226,7 +248,7 @@ def main() -> None:
     else:
         subject = args.subject or ask("What is the video about? ")
         sources = [x.strip() for x in args.sources.split(",") if x.strip()]
-        options = {}
+        options = {"min_relevance": args.min_relevance}
         if args.urls:
             text = Path(args.urls).expanduser().read_text(encoding="utf-8")
             options["urls"] = [dict(zip(("url", "note", "position"), [p.strip() for p in ln.split("|")]))

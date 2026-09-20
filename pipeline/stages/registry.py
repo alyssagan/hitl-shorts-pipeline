@@ -36,7 +36,7 @@ class Registry:
         self._render: dict[str, Callable[[], RenderStage]] = {}
         self._sources: dict[str, Callable[[], SourceAdapter]] = {}
         self.user_agent = DEFAULT_USER_AGENT
-        self.max_queries = 5
+        self.max_queries = 8
         self.source_transport = None      # tests inject an httpx mock transport
 
     def register_keywords(self, name: str, factory: Callable[[], KeywordStage]) -> None:
@@ -101,7 +101,7 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
 
     reg = Registry()
     reg.user_agent = os.getenv("SOURCES_USER_AGENT", src_cfg.get("user_agent", DEFAULT_USER_AGENT))
-    reg.max_queries = int(src_cfg.get("max_queries", 5))
+    reg.max_queries = int(src_cfg.get("max_queries", 8))
     per_query = int(src_cfg.get("per_query", 4))
     vids = int(src_cfg.get("videos_per_query", 2))
     reg.register_source("wikipedia", lambda: WikipediaSource(max_articles=int(src_cfg.get("wikipedia_articles", 2))))
@@ -121,7 +121,7 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
     reg.register_keywords("manual", ManualKeywordStage)
     reg.register_keywords("llm", lambda: LLMKeywordStage(
         base_url=os.getenv("KEYWORD_LLM_BASE_URL", kw_cfg.get("base_url", "https://api.openai.com/v1")),
-        api_key=os.getenv("KEYWORD_LLM_API_KEY", ""),
+        api_key=os.getenv("KEYWORD_LLM_API_KEY", "") or os.getenv(kw_cfg.get("api_key_env", "GEMINI_API_KEY"), ""),
         model=os.getenv("KEYWORD_LLM_MODEL", kw_cfg.get("model", "gpt-4o-mini")),
         count=int(kw_cfg.get("count", 10)),
     ))

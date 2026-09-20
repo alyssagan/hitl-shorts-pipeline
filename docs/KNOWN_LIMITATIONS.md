@@ -138,3 +138,9 @@ Still to judge by watching and comparing runs (record in OPTIONS_TO_TRY.md):
 ## Resolved
 
 _(nothing yet)_
+
+## 16. Relevance is word matching, not understanding
+`RELEVANCE_LOW` only checks whether the words of an approved keyword appear in an asset's title, description, tags or page URL. Untitled
+photos (many stock and Flickr-style items) can be marked off-topic though they are fine, and a photo of the wrong Whitechapel would pass.
+That is why off-topic items stay numbered and approvable. A later option is a free vision/LLM check of the thumbnail (see OPTIONS_TO_TRY).
+Also: stock sites (Pexels, Pixabay, Unsplash) suit generic b-roll, not named historical events.

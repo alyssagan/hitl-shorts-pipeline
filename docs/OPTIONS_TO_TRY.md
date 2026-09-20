@@ -80,3 +80,9 @@ Settings in `[script]` of `config/pipeline.toml`. After editing, `docker compose
 
 Change one thing at a time, render, and write one line under Result: what you changed, what
 you saw, and whether to keep it. Commit the file with the change.
+
+## Choosing sources by topic
+- Historical or named subject (e.g. Jack the Ripper): `wikipedia,commons,loc,archive,smithsonian`, plus a little `pexels` for mood b-roll.
+- Generic or lifestyle (octopus, city night): `pexels,pixabay,unsplash,nasa` work well.
+- Use specific multi-word keywords ("whitechapel 1888", "victorian london street") rather than single words like "ripper" or "letters".
+- Idea: score relevance from the thumbnail with a free vision model (Gemini) instead of only text.

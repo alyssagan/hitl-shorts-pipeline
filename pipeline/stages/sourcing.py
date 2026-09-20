@@ -54,6 +54,11 @@ class SourcingStage:
         if not queries:
             raise SourcingError("no approved keywords to search for")
         out = SourcingResult(queries=queries)
+        wanted = queries_for(job, 10_000)
+        if len(wanted) > len(queries):
+            dropped = wanted[len(queries):]
+            out.trace.append({"warning": f"max_queries={self.max_queries}: these approved terms were NOT searched: {dropped}. "
+                                         "Raise [sources] max_queries in config/pipeline.toml or approve fewer keywords."})
         # How many times each (source, search) was already run: "search again" asks for the next page
         # of results instead of the same first page, so it brings new items instead of repeats.
         prior: dict[str, int] = {}

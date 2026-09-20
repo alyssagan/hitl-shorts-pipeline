@@ -32,6 +32,7 @@ Assets under 480 px (`LOW_RES`) can't be approved at all, because the renderer w
 | `CONTENT_SENSITIVE` | medium | Mentions violence, crime, drugs, etc. | Check it suits your topic |
 | `RESTRICTIONS` | medium | Commons lists legal restrictions | Trademark, personality rights, etc. |
 | `TRADEMARK` | medium | Title looks like a logo or brand | Copyright licenses don't cover trademarks |
+| `RELEVANCE_LOW` | low (never blocks; see [SCORING.md](SCORING.md)) | Best keyword has under half its words (ignoring "true", "crime", ...) in the asset's title, description, tags or page-URL words | Probably not about your topic. The review shows these as one line each and `ok` skips them |
 | `LOW_RES` | high (unusable) | Short side < 480 px | Renderer skips it |
 | `RES_UNKNOWN` | info | Size unknown | Resolution check skipped |
 | `NO_SOURCE_URL` | medium | No URL recorded | Can't trace or credit |

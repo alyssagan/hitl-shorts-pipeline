@@ -74,6 +74,7 @@ class Vetting(BaseModel):
     method: str = "rules-v1"
     summary: str = ""                       # how the risk level was derived
     usable: bool = True                     # False when the renderer cannot use the file
+    relevance: float | None = None          # 0..1 share of a keyword's words found in the asset's text; None = no topic given
 
 
 class Asset(BaseModel):

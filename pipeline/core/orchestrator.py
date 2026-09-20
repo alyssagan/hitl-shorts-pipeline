@@ -25,7 +25,7 @@ from .store import JobStore
 from ..stages.base import StageContext
 from ..stages.registry import Registry
 from ..stages.sourcing import write_credits, write_manifests
-from ..vetting.rules import RULES, VERSION as VETTING_VERSION, vet_all
+from ..vetting.rules import RELEVANCE_MIN, RULES, SCORING_FORMULA, STOPWORDS, VERSION as VETTING_VERSION, clean_term, vet_all
 
 VETTER = machine("vetting-rules", VETTING_VERSION)
 MATCHER = machine("clip-matcher", "1")
@@ -110,10 +110,11 @@ class Orchestrator:
             for k in job.keywords:
                 k.approved = k.id in ids
             added = []
-            for term in extra_terms or []:
-                if term.strip():
-                    job.keywords.append(Keyword(term=term.strip(), source="human", approved=True))
-                    added.append(term.strip())
+            for raw in extra_terms or []:
+                term = clean_term(raw)
+                if term:
+                    job.keywords.append(Keyword(term=term, source="human", approved=True))
+                    added.append(term)
             sm.apply(job, "approve_keywords")
             self._rec(job.id, "keywords", "approved_keywords", self._who(reviewer), decision="approve",
                       reason=note or "Selected the keywords to build the video around.",
@@ -189,7 +190,7 @@ class Orchestrator:
         def fn(job: Job) -> None:
             if feedback.strip():
                 job.asset_feedback.append(feedback.strip())
-            extra = [q.strip() for q in (extra_queries or []) if q.strip()]
+            extra = [clean_term(q) for q in (extra_queries or []) if clean_term(q)]
             if extra:
                 job.providers.options["extra_queries"] = list(dict.fromkeys(job.providers.options.get("extra_queries", []) + extra))
             sm.apply(job, "reject_assets", note=feedback)
@@ -376,18 +377,28 @@ class Orchestrator:
                       outputs={"file": r.rel_path, "url": r.url, "license": r.license, "chars": r.chars})
 
     def _apply_vetting(self, job: Job) -> None:
-        vet_all(job.assets)
+        terms = [k.term for k in job.approved_keywords] + list(job.providers.options.get("extra_queries", []))
+        min_rel = float(job.providers.options.get("min_relevance", RELEVANCE_MIN))
+        vet_all(job.assets, terms, min_rel)
+        hidden = sum(1 for a in job.assets if a.status == "pending" and a.vetting and a.vetting.relevance is not None and a.vetting.relevance < min_rel)
+        self._rec(job.id, "vetting", "relevance_scoring", VETTER, decision=f"{hidden} hidden below {round(min_rel * 100)}%",
+                  reason="Every asset got a 0-100% relevance score against the approved keywords. Assets under the threshold are hidden from "
+                         "the default review list (still saved on disk and approvable by asking to show hidden).",
+                  logic={"formula": SCORING_FORMULA, "keywords_scored_against": terms, "threshold": min_rel,
+                         "filler_words_ignored": sorted(STOPWORDS), "doc": "docs/SCORING.md"},
+                  outputs={"hidden_count": hidden, "shown_count": sum(1 for a in job.assets if a.status == "pending") - hidden})
         for a in job.assets:
             if a.status != "pending":
                 continue                     # already decided by a human in an earlier round
             v = a.vetting
-            self._rec(job.id, "vetting", "vetted_asset", VETTER, decision=f"risk {v.risk}", reason=v.summary,
+            score = "n/a" if v.relevance is None else f"{round(v.relevance * 100)}%"
+            self._rec(job.id, "vetting", "vetted_asset", VETTER, decision=f"risk {v.risk}, relevance {score}", reason=v.summary,
                       subject={"asset_id": a.id, "title": a.title, "source": a.source},
-                      logic={"method": v.method, "rules_checked": [r[0] for r in RULES],
+                      logic={"method": v.method, "rules_checked": [r[0] for r in RULES] + ["RELEVANCE_LOW"],
                              "fired": [f.model_dump() for f in v.flags],
                              "how_risk_is_set": "highest severity among fired rules; info flags don't raise it",
                              "auto_approves_or_rejects": False},
-                      outputs={"usable_by_renderer": v.usable})
+                      outputs={"usable_by_renderer": v.usable, "relevance": v.relevance})
 
     def _apply_scenes(self, job: Job, stage: Any, res: Any) -> None:
         job.script = res.script

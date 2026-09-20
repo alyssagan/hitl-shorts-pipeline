@@ -12,7 +12,7 @@ default_reviewer = ""
 [sources]
 # Where text and images are pulled from. Each source gets its own folder in every project.
 user_agent = "hitl-shorts-pipeline/0.1 (personal video research tool)"
-max_queries = 5          # how many approved keywords to search with
+max_queries = 8          # how many approved keywords to search with
 per_query = 8            # photos to keep per keyword, per source
 videos_per_query = 4     # videos to keep per keyword, per source (counted separately from photos)
 wikipedia_articles = 2
@@ -36,10 +36,12 @@ clips_dir_host = ""
 clips_dir_in_mpt = ""
 
 [keywords]
-# Any OpenAI-compatible endpoint: OpenAI, Gemini, OpenRouter, or local Ollama
-# ("http://localhost:11434/v1"). Key comes from KEYWORD_LLM_API_KEY in .env.
-base_url = "https://api.openai.com/v1"
-model = "gpt-4o-mini"
+# Used with `--keywords llm`. Any OpenAI-compatible endpoint works: Gemini (free tier, the default here),
+# OpenAI, OpenRouter, or a local Ollama ("http://localhost:11434/v1").
+# The key is KEYWORD_LLM_API_KEY from .env if set, otherwise the variable named in api_key_env (your Gemini key).
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+model = "gemini-3.6-flash"
+api_key_env = "GEMINI_API_KEY"
 count = 10
 
 [script]

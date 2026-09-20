@@ -233,10 +233,62 @@ RULES: list[tuple[str, str, Callable[[Asset, list[Asset]], list[Flag]]]] = [
 ]
 
 
-def vet_asset(a: Asset, all_assets: list[Asset]) -> Vetting:
+# --- relevance to the topic (needs the approved keywords, so it isn't in RULES) ----------
+
+RELEVANCE_MIN = 0.5            # default threshold; a job can override it with option `min_relevance`
+SCORING_FORMULA = ("score = max over approved keywords of (keyword words found in the asset's title/description/tags/page-URL words) "
+                   "/ (keyword words after removing filler words). 0.0 to 1.0. See docs/SCORING.md.")
+STOPWORDS = {"a", "an", "the", "of", "in", "on", "at", "and", "or", "to", "for", "with", "by", "from", "is", "are", "was",
+             "true", "crime", "facts", "fact", "about", "story", "history", "video", "footage", "photo", "photos",
+             "image", "images", "picture", "pictures", "stock", "how", "why", "what", "documentary"}
+
+
+def _tokens(text: str) -> set[str]:
+    out = set()
+    for w in re.findall(r"[a-z0-9]+", text.lower()):
+        out.add(w)
+        if len(w) > 3 and w.endswith("s"):
+            out.add(w[:-1])              # cheap plural handling: "letters" also counts as "letter"
+    return out
+
+
+def clean_term(term: str) -> str:
+    """Typed keywords sometimes carry quotes or stray punctuation. Drop them."""
+    return re.sub(r"\s+", " ", term.strip().strip("\"'`\u2018\u2019\u201c\u201d ")).strip()
+
+
+def asset_text(a: Asset) -> str:
+    slug = re.sub(r"[-_/.]+", " ", (a.page_url or "").split("//")[-1])
+    tags = a.meta.get("tags", "") if isinstance(a.meta, dict) else ""
+    if isinstance(tags, list):
+        tags = " ".join(str(t) for t in tags)
+    return " | ".join(x for x in (_text(a), str(tags), slug) if x)
+
+
+def relevance(a: Asset, topic_terms: list[str]) -> tuple[float | None, str]:
+    """Best score over the keywords: the share of that keyword's meaningful words found in the asset's own text."""
+    have = _tokens(asset_text(a))
+    best, why = None, ""
+    for term in topic_terms:
+        want = [w for w in re.findall(r"[a-z0-9]+", term.lower()) if w not in STOPWORDS]
+        if not want:
+            continue
+        hit = [w for w in want if w in have]
+        score = len(hit) / len(want)
+        if best is None or score > best:
+            best, why = score, f"matched {len(hit)} of {len(want)} words of '{term}'" + (f" ({', '.join(hit)})" if hit else "")
+    return best, why
+
+
+def vet_asset(a: Asset, all_assets: list[Asset], topic_terms: list[str] | None = None, min_relevance: float = RELEVANCE_MIN) -> Vetting:
     flags: list[Flag] = []
     for _rid, _desc, fn in RULES:
         flags.extend(fn(a, all_assets))
+    rel, rel_why = relevance(a, topic_terms or [])
+    if rel is not None and rel < min_relevance:
+        flags.append(Flag(rule="RELEVANCE_LOW", severity="low",
+                          message=f"Relevance score {round(rel * 100)}% is under the {round(min_relevance * 100)}% threshold, so it is probably not about your topic.",
+                          evidence=rel_why or "no keyword words found"))
     top = max((_ORDER[f.severity] for f in flags), default=0)
     risk = "high" if top >= 3 else "medium" if top == 2 else "low"
     usable = not any(f.rule == "LOW_RES" for f in flags)
@@ -247,9 +299,9 @@ def vet_asset(a: Asset, all_assets: list[Asset]) -> Vetting:
     else:
         summary = ("Risk LOW: no rule fired above 'info'. This is not an approval. It only means the checker "
                    "found nothing to warn about. A human still decides.")
-    return Vetting(risk=risk, flags=flags, method=VERSION, summary=summary, usable=usable)
+    return Vetting(risk=risk, flags=flags, method=VERSION, summary=summary, usable=usable, relevance=rel)
 
 
-def vet_all(assets: list[Asset]) -> None:
+def vet_all(assets: list[Asset], topic_terms: list[str] | None = None, min_relevance: float = RELEVANCE_MIN) -> None:
     for a in assets:
-        a.vetting = vet_asset(a, assets)
+        a.vetting = vet_asset(a, assets, topic_terms, min_relevance)
