@@ -34,7 +34,13 @@ class SourcingResult:
 def queries_for(job: Job, limit: int = 5) -> list[str]:
     terms = [k.term for k in job.approved_keywords]
     terms += [q for q in job.providers.options.get("extra_queries", []) if q not in terms]
-    return terms[:limit]
+    # Batching: terms that were never searched go first, so with more terms than `limit` each "search again"
+    # takes the next batch instead of re-paging the same ones. (sorted() is stable: ties keep your order.)
+    done: dict[str, int] = {}
+    for n in job.source_notes:
+        if n.get("query") and not n.get("error") and not n.get("skipped_source"):
+            done[n["query"]] = done.get(n["query"], 0) + 1
+    return sorted(terms, key=lambda t: done.get(t, 0))[:limit]
 
 
 class SourcingStage:
@@ -57,8 +63,8 @@ class SourcingStage:
         wanted = queries_for(job, 10_000)
         if len(wanted) > len(queries):
             dropped = wanted[len(queries):]
-            out.trace.append({"warning": f"max_queries={self.max_queries}: these approved terms were NOT searched: {dropped}. "
-                                         "Raise [sources] max_queries in config/pipeline.toml or approve fewer keywords."})
+            out.trace.append({"warning": f"Searching {len(queries)} of {len(wanted)} keywords this round (max_queries={self.max_queries}). "
+                                         f"Waiting for the next round ('more' / Search again): {dropped}"})
         # How many times each (source, search) was already run: "search again" asks for the next page
         # of results instead of the same first page, so it brings new items instead of repeats.
         prior: dict[str, int] = {}

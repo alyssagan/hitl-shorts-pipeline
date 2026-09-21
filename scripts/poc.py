@@ -71,7 +71,7 @@ def ask(prompt: str) -> str:
         sys.exit("\nNo input available; run this in an interactive terminal.")
 
 
-def keyword_gate(api: Api, job: dict, reviewer: str = "") -> dict:
+def keyword_gate(api: Api, job: dict, reviewer: str = "", file_terms: list[str] | None = None) -> dict:
     while True:
         print("\n=== GATE 1: keywords ===  (why: everything after this is built from what you pick)\n")
         kws = job["keywords"]
@@ -89,9 +89,13 @@ def keyword_gate(api: Api, job: dict, reviewer: str = "") -> dict:
         except (ValueError, IndexError):
             print("  That didn't look right, try again.")
             continue
+        if file_terms:
+            print(f"  Adding {len(file_terms)} keywords from your keywords file.")
         extra = ask("Add your own keywords? (comma separated, no quotes needed, or Enter to skip): ")
+        typed = [t.strip().strip("\"'") for t in extra.split(",") if t.strip().strip("\"'")]
+        terms = list(dict.fromkeys((file_terms or []) + typed))
         return api.call("POST", f"/jobs/{job['id']}/keywords/review",
-                        {"approved_ids": chosen, "extra_terms": [t.strip().strip("\"'") for t in extra.split(",") if t.strip().strip("\"'")], "reviewer": reviewer})
+                        {"approved_ids": chosen, "extra_terms": terms, "reviewer": reviewer})
 
 
 RISK_MARK = {"high": "HIGH  ", "medium": "MEDIUM", "low": "low   "}
@@ -237,11 +241,17 @@ def main() -> None:
     ap.add_argument("--reviewer", default="", help="your name, written to the decision log next to every choice you make")
     ap.add_argument("--urls", metavar="FILE", help="text file of URLs to pull videos from, one per line: URL | note | position (adds the 'urls' source)")
     ap.add_argument("--resume", metavar="JOB_ID", help="continue an existing job (retries it first if it failed)")
+    ap.add_argument("--keywords-file", metavar="FILE", help="text file of keywords, one per line (# for comments). Added as approved keywords; searched in batches of max_queries")
     ap.add_argument("--min-relevance", type=float, default=0.5, help="hide assets scoring below this (0 to 1) at the asset review; default 0.5")
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
 
     api = Api(args.api)
+    file_terms: list[str] = []
+    if args.keywords_file:
+        file_terms = [ln.strip().strip("\"'") for ln in Path(args.keywords_file).expanduser().read_text(encoding="utf-8").splitlines()
+                      if ln.strip() and not ln.strip().startswith("#")]
+        print(f"Read {len(file_terms)} keyword(s) from {args.keywords_file}")
     reviewer = args.reviewer or ask("Your name (recorded in the decision log next to your choices): ")
 
     if args.resume:
@@ -276,7 +286,7 @@ def main() -> None:
         return (order.index(state) if state in order else len(order)) <= order.index(name)
     if at("keywords_review"):
         job = wait_for(api, job["id"], {"keywords_review"}, "researching keywords")
-        job = keyword_gate(api, job, reviewer)
+        job = keyword_gate(api, job, reviewer, file_terms)
     if sources and at("assets_review"):
         job = wait_for(api, job["id"], {"assets_review"}, "pulling and vetting sources", every=4)
         job = asset_gate(api, job, reviewer)
