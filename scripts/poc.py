@@ -47,11 +47,28 @@ class Api:
                 f.write(chunk)
 
 
+LOG = {"cursor": {}, "level": "INFO", "show": True}
+
+
+def show_log(api: Api, job_id: str) -> None:
+    """Print the new activity-log lines (what the pipeline is doing right now)."""
+    if not LOG["show"]:
+        return
+    try:
+        r = api.call("GET", f"/jobs/{job_id}/log?format=json&level={LOG['level']}&after={LOG['cursor'].get(job_id, 0)}")
+    except SystemExit:
+        return
+    for ln in r.get("lines", []):
+        print("\r" + " " * 70 + "\r  | " + ln)
+    LOG["cursor"][job_id] = r.get("next", 0)
+
+
 def wait_for(api: Api, job_id: str, states: set[str], what: str, every: float = 3.0) -> dict:
     """Poll until the job reaches one of `states`. Exits with the reason if it fails."""
     started = time.time()
     while True:
         job = api.call("GET", f"/jobs/{job_id}")
+        show_log(api, job_id)
         if job["state"] in states:
             print()
             return job
@@ -243,10 +260,13 @@ def main() -> None:
     ap.add_argument("--resume", metavar="JOB_ID", help="continue an existing job (retries it first if it failed)")
     ap.add_argument("--keywords-file", metavar="FILE", help="text file of keywords, one per line (# for comments). Added as approved keywords; searched in batches of max_queries")
     ap.add_argument("--min-relevance", type=float, default=0.5, help="hide assets scoring below this (0 to 1) at the asset review; default 0.5")
+    ap.add_argument("--quiet", action="store_true", help="don't stream the pipeline's activity log while waiting")
+    ap.add_argument("--debug", action="store_true", help="stream DEBUG detail too (every HTTP request); the full log is always in the project's logs/ folder")
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
 
     api = Api(args.api)
+    LOG["show"], LOG["level"] = not args.quiet, "DEBUG" if args.debug else "INFO"
     file_terms: list[str] = []
     if args.keywords_file:
         file_terms = [ln.strip().strip("\"'") for ln in Path(args.keywords_file).expanduser().read_text(encoding="utf-8").splitlines()

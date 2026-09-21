@@ -100,3 +100,29 @@ class ScriptWriterTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LlmRetryTests(unittest.TestCase):
+    def test_retries_503_and_logs_to_project(self):
+        import asyncio, tempfile
+        from pathlib import Path
+        import httpx
+        from pipeline.core import joblog
+        from pipeline.stages.llm_http import post_chat
+        calls = {"n": 0}
+        def handler(req):
+            calls["n"] += 1
+            return httpx.Response(503 if calls["n"] < 3 else 200, json={"ok": True})
+        async def go(d):
+            tok = joblog.bind(Path(d))
+            try:
+                async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+                    return await post_chat(c, "http://x/chat", {}, {"model": "m"}, what="test", waits=(0, 0, 0))
+            finally:
+                joblog.unbind(tok)
+        with tempfile.TemporaryDirectory() as d:
+            r = asyncio.run(go(d))
+            lines, _ = joblog.read(Path(d), min_level="WARN")
+        self.assertEqual((r.status_code, calls["n"]), (200, 3))
+        self.assertEqual(len(lines), 2)
+        self.assertIn("model busy (503)", lines[0])

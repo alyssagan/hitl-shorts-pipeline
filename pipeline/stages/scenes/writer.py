@@ -13,7 +13,9 @@ from pathlib import Path
 
 import httpx
 
+from ...core import joblog
 from ...core.models import Job
+from ..llm_http import post_chat
 from ..mpt_client import MptError
 
 WORDS_PER_SECOND = 2.6          # a typical narration pace, about 155 words a minute
@@ -58,6 +60,7 @@ class ScriptWriter:
         self.grounding_chars = grounding_chars
         self.timeout = timeout
         self.transport = transport
+        self.retry_waits: tuple[float, ...] | None = None      # None = the defaults in llm_http
 
     def sources_text(self, job: Job) -> tuple[str, list[dict]]:
         """Source text for the prompt. The budget is split evenly across the articles so
@@ -88,9 +91,11 @@ class ScriptWriter:
     async def write(self, job: Job, keywords: list[str]) -> tuple[str, dict]:
         prompt, used = self.build_prompt(job, keywords)
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        joblog.info("script", f"asking {self.model} for about {self.target_words} words", grounded_on=len(used), prompt_chars=len(prompt))
         async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
-            resp = await client.post(f"{self.base_url}/chat/completions", headers=headers,
-                                     json={"model": self.model, "messages": [{"role": "user", "content": prompt}]})
+            resp = await post_chat(client, f"{self.base_url}/chat/completions", headers,
+                                   {"model": self.model, "messages": [{"role": "user", "content": prompt}]}, what="script writer",
+                                   waits=self.retry_waits)
         if resp.status_code != 200:
             try:
                 detail = resp.json()
@@ -107,6 +112,7 @@ class ScriptWriter:
         if not script:
             raise MptError("script model returned an empty script")
         n = word_count(script)
+        joblog.info("script", f"got {n} words (about {round(n / WORDS_PER_SECOND)}s spoken)")
         trace = {"writer": "own", "model": self.model, "endpoint": self.base_url, "prompt": prompt,
                  "target_words": self.target_words, "words": n, "est_seconds": round(n / WORDS_PER_SECOND),
                  "grounded_on": used, "feedback_used": list(job.scene_feedback), "keywords": keywords}

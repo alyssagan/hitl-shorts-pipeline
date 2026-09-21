@@ -7,6 +7,7 @@ into its own folder under the project, with its own request log and manifest.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 import httpx
 
 from ..core.decisions import machine
+from ..core import joblog
 from ..core.models import Asset, Job, TextRef
 from ..sources.base import DEFAULT_USER_AGENT, LoggedHttp, SourceAdapter, SourceContext, SourceUnavailable
 from .base import StageContext
@@ -60,11 +62,14 @@ class SourcingStage:
         if not queries:
             raise SourcingError("no approved keywords to search for")
         out = SourcingResult(queries=queries)
+        joblog.info("sourcing", f"searching {len(queries)} keyword(s) on {len(job.providers.sources)} source(s)",
+                    keywords=queries, sources=",".join(job.providers.sources))
         wanted = queries_for(job, 10_000)
         if len(wanted) > len(queries):
             dropped = wanted[len(queries):]
             out.trace.append({"warning": f"Searching {len(queries)} of {len(wanted)} keywords this round (max_queries={self.max_queries}). "
                                          f"Waiting for the next round ('more' / Search again): {dropped}"})
+            joblog.warn("sourcing", out.trace[-1]["warning"])
         # How many times each (source, search) was already run: "search again" asks for the next page
         # of results instead of the same first page, so it brings new items instead of repeats.
         prior: dict[str, int] = {}
@@ -76,6 +81,7 @@ class SourcingStage:
         for name in job.providers.sources:
             adapter = self.adapters.get(name)
             if adapter is None:
+                joblog.error("sourcing", f"unknown source '{name}'")
                 out.trace.append({"source": name, "error": f"unknown source '{name}'"})
                 problems += 1
                 continue
@@ -88,16 +94,27 @@ class SourcingStage:
                 known_urls={a.source_url for a in known} | {r.url for r in job.references if r.source == name},
                 known_hashes={a.sha256 for a in job.assets if a.sha256},
             )
+            joblog.info("sourcing", f"pulling from {name}", queries=queries, known_assets=len(known))
+            t0 = time.monotonic()
             try:
                 res = await adapter.fetch(queries, sctx)
             except SourceUnavailable as exc:
+                joblog.warn("sourcing", f"{name} skipped: {exc}")
                 out.trace.append({"source": name, "skipped_source": str(exc)})
                 problems += 1
                 continue
             except Exception as exc:
+                joblog.error("sourcing", f"{name} failed: {type(exc).__name__}: {exc}")
                 out.trace.append({"source": name, "error": f"{type(exc).__name__}: {exc}"})
                 problems += 1
                 continue
+            for t in res.trace:
+                if t.get("error"):
+                    joblog.warn("sourcing", f"{name} query failed: {t.get('query')}", error=t["error"])
+                else:
+                    joblog.info("sourcing", f"{name} '{t.get('query')}'", found=t.get("found"), kept=t.get("kept"),
+                                skipped=len(t["skipped"]) if isinstance(t.get("skipped"), list) else t.get("skipped"), page=t.get("page"))
+            joblog.info("sourcing", f"{name} done in {time.monotonic() - t0:.1f}s", new_assets=len(res.assets), new_references=len(res.references))
             out.assets.extend(res.assets)
             out.references.extend(res.references)
             out.trace.extend(res.trace)

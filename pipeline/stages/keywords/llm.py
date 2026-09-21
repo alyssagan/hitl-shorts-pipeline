@@ -14,7 +14,9 @@ import re
 
 import httpx
 
+from ...core import joblog
 from ...core.decisions import ai
+from ..llm_http import post_chat
 from ...core.models import Job, Keyword
 from ..base import StageContext
 
@@ -48,15 +50,15 @@ class LLMKeywordStage:
                            "feedback_used": list(job.keyword_feedback),
                            "note": "volume/difficulty are the model's estimates, not measured data"}
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        joblog.info("keywords", f"asking {self.model} for {self.count} keywords about '{job.subject}'")
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers=headers,
-                json={"model": self.model, "messages": [{"role": "user", "content": prompt}]},
-            )
+            resp = await post_chat(client, f"{self.base_url}/chat/completions", headers,
+                                   {"model": self.model, "messages": [{"role": "user", "content": prompt}]}, what="keyword model")
             resp.raise_for_status()
         text = resp.json()["choices"][0]["message"]["content"]
-        return parse_keywords(text, source=f"llm:{self.model}")
+        kws = parse_keywords(text, source=f"llm:{self.model}")
+        joblog.info("keywords", f"got {len(kws)} keywords", terms=[k.term for k in kws])
+        return kws
 
 
 def parse_keywords(text: str, source: str) -> list[Keyword]:

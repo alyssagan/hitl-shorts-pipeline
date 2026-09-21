@@ -94,6 +94,10 @@ class LoggedHttp:
         entry = {"at": _now(), "source": self.source, **entry}
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        from ..core import joblog
+        joblog.debug("http", f"{self.source} {entry.get('method', '')} {entry.get('status')}", url=str(entry.get("url", ""))[:200],
+                     ms=entry.get("duration_ms"), bytes=entry.get("bytes"), purpose=entry.get("purpose"), error=entry.get("error"),
+                     attempt=entry.get("attempt"))
 
     async def _send(self, url: str, params: dict[str, Any] | None, purpose: str, stream_to: Path | None):
         loop = asyncio.get_running_loop()

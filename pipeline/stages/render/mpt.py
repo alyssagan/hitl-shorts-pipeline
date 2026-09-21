@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ...core.models import Job
 from ..base import StageContext
+from ...core import joblog
 from ..mpt_client import MptClient, MptError
 
 
@@ -54,6 +55,8 @@ class MptRenderStage:
         }
         if self.voice_name:          # an empty voice_name would override MoneyPrinterTurbo's default and break TTS
             params["voice_name"] = self.voice_name
+        joblog.info("render", f"sending {len(clips)} clip(s) and {len(params['video_script'].split())} words to MoneyPrinterTurbo",
+                    voice=self.voice_name or "(default)", aspect=self.aspect)
         task_id = await self.client.create_video(params)
         job.log("note", f"MoneyPrinterTurbo render task {task_id} started", task_id=task_id)
         done = await self.client.wait_task(task_id)
@@ -62,4 +65,5 @@ class MptRenderStage:
             raise MptError(f"task {task_id} finished but returned no video")
         dest = Path(ctx.assets_dir) / "final.mp4"
         await self.client.download(videos[0], dest)
+        joblog.info("render", f"video saved ({dest.stat().st_size // 1024} KB)", file=str(dest))
         return str(dest)

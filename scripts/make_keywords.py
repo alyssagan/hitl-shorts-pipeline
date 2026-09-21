@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -115,24 +116,37 @@ def render(topic: str, groups: dict[str, list[str]]) -> str:
     return "\n".join(lines)
 
 
-def call_llm(base: str, model: str, key: str, prompt: str) -> str:
+RETRY_WAITS = (4, 10, 25, 45)          # seconds; Google's free tier says 503/429 "usually temporary"
+
+
+def call_llm(base: str, model: str, key: str, prompt: str, waits: tuple = RETRY_WAITS, sleep=time.sleep) -> str:
     body = json.dumps({"model": model, "temperature": 0.7, "messages": [{"role": "user", "content": prompt}]}).encode()
     req = urllib.request.Request(base.rstrip("/") + "/chat/completions", data=body, method="POST",
                                  headers={"content-type": "application/json", "authorization": f"Bearer {key}"})
-    try:
-        with urllib.request.urlopen(req, timeout=90) as r:
-            return json.loads(r.read())["choices"][0]["message"]["content"]
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:300]
-        if e.code == 429:
-            sys.exit("The free tier is rate-limited right now (429). Wait a minute and run it again.")
-        if e.code in (401, 403):
-            sys.exit(f"The API key was refused ({e.code}). Check GEMINI_API_KEY in .env.")
-        if e.code == 404:
-            sys.exit(f"Model '{model}' not found (404). Set a current free model with --model. Details: {detail}")
-        sys.exit(f"The LLM said no ({e.code}): {detail}")
-    except urllib.error.URLError as e:
-        sys.exit(f"Can't reach the LLM endpoint ({e.reason}).")
+    for attempt in range(len(waits) + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=90) as r:
+                return json.loads(r.read())["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:300]
+            if e.code in (429, 500, 502, 503, 504) and attempt < len(waits):
+                print(f"  The free tier is busy ({e.code}). Retrying in {waits[attempt]}s... ({attempt + 1}/{len(waits)})")
+                sleep(waits[attempt])
+                continue
+            if e.code in (429, 503):
+                sys.exit(f"Still busy after {len(waits)} retries ({e.code}). This is Google's free tier being overloaded, not your setup. "
+                         "Try again in a few minutes, or try another model with --model.")
+            if e.code in (401, 403):
+                sys.exit(f"The API key was refused ({e.code}). Check GEMINI_API_KEY in .env.")
+            if e.code == 404:
+                sys.exit(f"Model '{model}' not found (404). Set a current free model with --model. Details: {detail}")
+            sys.exit(f"The LLM said no ({e.code}): {detail}")
+        except urllib.error.URLError as e:
+            if attempt < len(waits):
+                sleep(waits[attempt])
+                continue
+            sys.exit(f"Can't reach the LLM endpoint ({e.reason}).")
+    sys.exit("unreachable")
 
 
 def slug(text: str) -> str:

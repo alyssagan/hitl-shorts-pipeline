@@ -12,6 +12,7 @@
   POST /jobs/{id}/scenes/reject       {feedback, reviewer}                     GATE 3 re-run
   POST /jobs/{id}/back-to-keywords    | /back-to-assets | /cancel | /retry
   GET  /jobs, /jobs/{id}, /jobs/{id}/output, /providers, /health
+  GET  /jobs/{id}/log                      step-by-step activity log (?level=DEBUG|INFO|WARN|ERROR&tail=N&after=N&format=json)
   GET  /jobs/{id}/decisions           the decision log (add ?format=md for DECISIONS.md)
   GET  /jobs/{id}/assets/{asset_id}/file   the downloaded image/video (for previews)
   GET  /review, /review/{id}               the review web page (thumbnails, scores, Use/Reject)
@@ -30,6 +31,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
+from ..core import joblog
 from ..core import state_machine as sm
 from ..core.models import Job, ProviderChoice
 from ..core.orchestrator import Orchestrator
@@ -182,6 +184,15 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
             return JSONResponse({"error": "asset not found"}, status_code=404)
         return FileResponse(a.path, media_type=a.mime or None)
 
+    async def log_view(r: Request):
+        orch.get(r.path_params["id"])                       # 404 if unknown
+        q = r.query_params
+        lines, nxt = joblog.read(orch.store.job_dir(r.path_params["id"]), after=int(q.get("after", 0) or 0),
+                                 min_level=q.get("level", "INFO"), tail=int(q["tail"]) if q.get("tail") else None)
+        if q.get("format") == "json":
+            return JSONResponse({"lines": lines, "next": nxt})
+        return Response("\n".join(lines) + ("\n" if lines else ""), media_type="text/plain; charset=utf-8")
+
     async def output(r: Request):
         job = orch.get(r.path_params["id"])
         if not job.output_path or not Path(job.output_path).exists():
@@ -215,6 +226,7 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/assets/reject", wrap(assets_reject), methods=["POST"]),
         Route(f"{P}/assets/{{asset_id}}/file", wrap(asset_file), methods=["GET"]),
         Route(f"{P}/decisions", wrap(decisions), methods=["GET"]),
+        Route(f"{P}/log", wrap(log_view), methods=["GET"]),
         Route(f"{P}/back-to-assets", wrap(back_assets), methods=["POST"]),
         Route(f"{P}/scenes", wrap(scenes_edit), methods=["PATCH"]),
         Route(f"{P}/scenes/approve", wrap(scenes_approve), methods=["POST"]),

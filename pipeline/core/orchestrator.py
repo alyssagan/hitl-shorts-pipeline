@@ -15,10 +15,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
+import traceback
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
+from . import joblog
 from . import state_machine as sm
 from .decisions import Actor, actor_from, human, machine
 from .models import Asset, Job, JobState, Keyword, ProviderChoice, RUNNING_STATES, Scene, _now
@@ -57,8 +60,14 @@ class Orchestrator:
             raise ValueError("a reviewer name is required for this decision (it is written to the decision log)")
         return human(name)
 
+    QUIET_ACTIONS = {"vetted_asset", "asset_kept", "asset_reviewed", "text_kept"}     # one per asset: DEBUG only
+
     def _rec(self, job_id: str, stage: str, action: str, actor: Actor, **kw: Any) -> None:
         self.store.decisions(job_id).record(job_id=job_id, stage=stage, action=action, actor=actor, **kw)
+        subj = kw.get("subject") or {}
+        joblog.write(self.store.job_dir(job_id), "DEBUG" if action in self.QUIET_ACTIONS else "INFO", "decision",
+                     f"{action}: {kw.get('decision', '')}", by=getattr(actor, "name", ""), area=stage,
+                     what=subj.get("title") or subj.get("source") or "", why=(kw.get("reason") or "")[:160])
 
     async def _mutate(self, job_id: str, fn: Callable[[Job], None]) -> Job:
         async with self._locks[job_id]:
@@ -80,6 +89,8 @@ class Orchestrator:
             raise ValueError("subject is required")
         job.log("note", "job created")
         self.store.save(job)
+        joblog.write(self.store.job_dir(job.id), "INFO", "project", f"created '{job.subject}'", job=job.id,
+                     folder=job.slug, sources=",".join(job.providers.sources), keywords=job.providers.keywords)
         self._rec(job.id, "project", "created", self._who(reviewer), decision="create", subject={"subject": job.subject, "folder": job.slug},
                   reason="Project started by a person.",
                   logic={"providers_chosen": job.providers.model_dump()},
@@ -333,6 +344,9 @@ class Orchestrator:
                 return job
             ctx = StageContext(assets_dir=self.store.assets_dir(job_id), settings=self.settings,
                                project_dir=self.store.job_dir(job_id))
+            token = joblog.bind(self.store.job_dir(job_id))
+            t0 = time.monotonic()
+            joblog.info("stage", f"START {state.value}", job=job_id, providers=job.providers.model_dump_json()[:200])
             try:
                 if state is JobState.KEYWORDS_RUNNING:
                     stage = self.registry.keyword_stage(job.providers.keywords)
@@ -362,7 +376,12 @@ class Orchestrator:
                 out = await stage.run(job, ctx)
                 return await self._commit(job_id, state, "render_done", lambda j: self._apply_render(j, stage, out))
             except Exception as exc:  # noqa: BLE001 - any stage failure must land in FAILED
+                joblog.error("stage", f"FAILED {state.value} after {time.monotonic() - t0:.1f}s: {type(exc).__name__}: {exc}")
+                joblog.error("stage", "traceback: " + " | ".join(traceback.format_exception(exc)).replace("\n", " ")[-1500:])
                 return await self._fail(job_id, state, exc)
+            finally:
+                joblog.info("stage", f"END {state.value} ({time.monotonic() - t0:.1f}s)")
+                joblog.unbind(token)
         finally:
             self._running.discard(job_id)
 
@@ -401,6 +420,12 @@ class Orchestrator:
         terms = [k.term for k in job.approved_keywords] + list(job.providers.options.get("extra_queries", []))
         min_rel = float(job.providers.options.get("min_relevance", RELEVANCE_MIN))
         vet_all(job.assets, terms, min_rel)
+        by_risk: dict[str, int] = {}
+        for a in job.assets:
+            r = a.vetting.risk if a.vetting else "unvetted"
+            by_risk[r] = by_risk.get(r, 0) + 1
+        joblog.write(self.store.job_dir(job.id), "INFO", "vetting", f"vetted {len(job.assets)} assets", risk=by_risk,
+                     scored_against=terms, min_relevance=min_rel)
         hidden = sum(1 for a in job.assets if a.status == "pending" and a.vetting and a.vetting.relevance is not None and a.vetting.relevance < min_rel)
         self._rec(job.id, "vetting", "relevance_scoring", VETTER, decision=f"{hidden} hidden below {round(min_rel * 100)}%",
                   reason="Every asset got a 0-100% relevance score against the approved keywords. Assets under the threshold are hidden from "
@@ -452,6 +477,7 @@ class Orchestrator:
             sm.apply(job, event)
             self.store.save(job)
             write_manifests(job, self.store.job_dir(job_id))
+            joblog.write(self.store.job_dir(job_id), "INFO", "state", f"{expected.value} -> {job.state.value}", event=event)
             return job
 
     async def _fail(self, job_id: str, expected: JobState, exc: Exception) -> Job:

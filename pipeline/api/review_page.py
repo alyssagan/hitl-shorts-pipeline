@@ -82,6 +82,11 @@ async function listPage(){
 }
 
 /* ------------------------------------------------------------ review page */
+let logLines=[], logOpen=false, logLevel="INFO";
+async function loadLog(){
+  try{ const r = await fetch(`/jobs/${JOB}/log?tail=150&level=${logLevel}`); logLines = (await r.text()).split("\n").filter(Boolean); }catch(e){}
+  const el = document.getElementById("logbox"); if(el){ el.textContent = logLines.join("\n"); el.scrollTop = el.scrollHeight; }
+}
 let job=null, decisions={}, notes={}, minScore=0.5, showHidden=false, srcFilter="", kindFilter="", sortBy="score", busy=false, error="";
 
 async function load(){
@@ -235,6 +240,12 @@ function render(){
       `Showing ${xs.length} of ${job.assets.length}. Score = share of a keyword's words found in the item's own title/description/tags (docs/SCORING.md). `+
       `Items under ${pct(minScore)} are hidden. Anything you leave undecided or hidden when you submit is not used (logged as rejected with a note) and is NOT counted as a training label. Only your Use / Irrelevant clicks are saved as labels (RELEVANCE_LABELS.jsonl in the project folder).`),
     h("div",{class:"grid"}, xs.map(card)),
+    h("div",{class:"panel"}, h("details",{open:logOpen,ontoggle:e=>{logOpen=e.target.open; if(logOpen) loadLog();}},
+      h("summary",{},"Activity log (what the pipeline did, step by step)"),
+      h("div",{class:"bar"}, h("label",{},"Detail ", h("select",{onchange:e=>{logLevel=e.target.value;loadLog();}},
+          ["INFO","DEBUG","WARN","ERROR"].map(l=>h("option",{value:l,selected:l===logLevel},l)))),
+        h("a",{href:`/jobs/${JOB}/log?level=DEBUG`,target:"_blank"},"open full log")),
+      h("pre",{id:"logbox",class:"why",style:"max-height:280px;overflow:auto"}, logLines.join("\n")))),
     h("div",{class:"panel"}, h("b",{},"Not enough good ones? Search again"),
       h("div",{class:"sub"},"Fetches the next page of results (no repeats). Add specific new search terms, comma separated."),
       h("div",{class:"bar"},
@@ -250,6 +261,7 @@ async function poll(){
   try{
     const j = await api("GET","/jobs/"+JOB);
     const was = job && job.state;
+    if (logOpen) loadLog();
     if (j.state!==was || (j.assets||[]).length!==(job.assets||[]).length){ if(!busy) await load(); }
   }catch(e){}
 }

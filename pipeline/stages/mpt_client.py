@@ -12,10 +12,13 @@ Task state codes: 1 = complete, -1 = failed, 4 = processing.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+from ..core import joblog
 
 STATE_COMPLETE = 1
 STATE_FAILED = -1
@@ -37,8 +40,10 @@ class MptClient:
         self.transport = transport   # tests inject httpx.MockTransport
 
     async def _request(self, method: str, path: str, **kw: Any) -> dict[str, Any]:
+        t0 = time.monotonic()
         async with httpx.AsyncClient(timeout=self.timeout, headers=self.headers, transport=self.transport) as c:
             resp = await c.request(method, f"{self.base_url}{path}", **kw)
+        joblog.debug("mpt", f"{method} {path} -> {resp.status_code}", ms=int((time.monotonic() - t0) * 1000))
         try:
             body = resp.json()
         except ValueError:
@@ -56,13 +61,21 @@ class MptClient:
             "paragraph_number": paragraphs,
             "video_script_prompt": prompt,
         })
-        return data["video_script"]
+        text = data["video_script"]
+        # MoneyPrinterTurbo reports an AI-provider failure (bad key, retired model, quota) as a normal
+        # 200 response whose "script" is the error text. Treat that as the failure it is.
+        if text.strip().lower().startswith(("error:", "error ")):
+            raise MptError(f"MoneyPrinterTurbo could not write the script: {text.strip()[:300]}")
+        return text
 
     async def terms(self, subject: str, script: str, amount: int = 5) -> list[str]:
         data = await self._request("POST", "/api/v1/terms", json={
             "video_subject": subject, "video_script": script, "amount": amount,
         })
-        return list(data["video_terms"])
+        terms = data["video_terms"]
+        if isinstance(terms, str) and terms.strip().lower().startswith("error"):
+            raise MptError(f"MoneyPrinterTurbo could not generate search terms: {terms.strip()[:300]}")
+        return list(terms)
 
     async def create_audio(self, script: str, voice_name: str, language: str = "") -> str:
         data = await self._request("POST", "/api/v1/audio", json={
@@ -76,9 +89,14 @@ class MptClient:
 
     async def wait_task(self, task_id: str, poll: float = 3.0, timeout: float = 3600) -> dict[str, Any]:
         waited = 0.0
+        last = None
         while True:
             data = await self._request("GET", f"/api/v1/tasks/{task_id}")
             state = data.get("state")
+            seen = (state, data.get("progress"))
+            if seen != last:                     # only log when something changed
+                joblog.info("mpt", f"task {task_id[:8]} state={state} progress={data.get('progress')}", waited_s=int(waited))
+                last = seen
             if state == STATE_COMPLETE:
                 return data
             if state == STATE_FAILED:

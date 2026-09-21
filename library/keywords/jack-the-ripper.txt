@@ -1,13 +1,38 @@
-# One keyword per line. Blank lines and lines starting with # are ignored. No quotes needed.
-jack the ripper whitechapel 1888
-whitechapel murders 1888
-victorian london street
-whitechapel high street 1880s
-jack the ripper letters
-from hell letter
-mitre square 1888
-dorset street spitalfields
-london police 1888
-metropolitan police victorian
-victorian east end london
-old bailey trial
+# Keywords for: jack the ripper  (made by scripts/make_keywords.py with an LLM; edit freely)
+# One per line. # lines are ignored. Use with: poc.py --keywords manual --keywords-file <this file>
+
+# places
+whitechapel road 1888
+spitalfields market victorian london
+commercial street whitechapel photo
+east end london 1880s
+
+# documents and press
+illustrated london news 1888
+dear boss letter ripper
+whitechapel murder newspaper headline
+london map east end 1888
+
+# investigation and justice
+metropolitan police station victorian
+old bailey courtroom engraving
+victorian police constable patrol
+city of london police 1880s
+
+# era and daily life
+victorian slum housing london
+hansom cab london street
+lodging house victorian london
+working class victorian crowd
+
+# atmosphere broll
+victorian gas lamp night
+london fog street night
+cobblestone alley night fog
+gaslight silhouette night street
+
+# people and context
+charles warren police commissioner
+queen victoria portrait 1880s
+frederick abberline inspector detective
+victorian london street vendor

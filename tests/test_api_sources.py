@@ -71,3 +71,44 @@ class ApiSourcesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LabelTests(ApiSourcesTests):
+    def test_labels_saved_only_for_explicit_clicks(self):
+        import json
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        jid = r.json()["id"]
+        self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        j = self.wait(jid, "keywords_review")
+        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        j = self.wait(jid, "assets_review")
+        a, b, c = j["assets"][:3]
+        dec = {a["id"]: {"decision": "approve", "label": "relevant"}, b["id"]: {"decision": "reject", "note": "x", "label": "irrelevant"},
+               c["id"]: {"decision": "reject", "note": "no decision"}}
+        if (a.get("vetting") or {}).get("risk") == "high":
+            dec[a["id"]]["note"] = "ok"
+        self.client.post(f"/jobs/{jid}/assets/review", json={"decisions": dec, "reviewer": "Aly"})
+        path = Path(self.tmp.name) / f"{j['slug']}-{jid}" / "RELEVANCE_LABELS.jsonl"
+        rows = [json.loads(x) for x in path.read_text().splitlines()]
+        self.assertEqual({r["asset_id"]: r["label"] for r in rows}, {a["id"]: "relevant", b["id"]: "irrelevant"})
+        self.assertIn("machine_score", rows[0])
+
+
+class LogEndpointTests(ApiSourcesTests):
+    def test_activity_log_covers_the_run(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        jid = r.json()["id"]
+        self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        j = self.wait(jid, "keywords_review")
+        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        self.wait(jid, "assets_review")
+        text = self.client.get(f"/jobs/{jid}/log").text
+        for expect in ("created 'cats'", "START keywords_running", "START sourcing_running", "pulling from commons",
+                       "commons done in", "vetted", "keywords_running -> keywords_review", "keywords=['kw1']"):
+            self.assertIn(expect, text)
+        self.assertNotIn(" http ", text)                                  # DEBUG hidden by default
+        self.assertIn(" http ", self.client.get(f"/jobs/{jid}/log?level=DEBUG").text)
+        js = self.client.get(f"/jobs/{jid}/log?format=json&after=3").json()
+        self.assertIn("next", js)
