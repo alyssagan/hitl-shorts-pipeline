@@ -95,7 +95,7 @@ def keyword_gate(api: Api, job: dict, reviewer: str = "", file_terms: list[str] 
         for i, k in enumerate(kws, 1):
             extra = f"  vol~{k['search_volume']}" if k.get("search_volume") else ""
             print(f"  {i:>2}. {k['term']}{extra}")
-        ans = ask("\nType the numbers to KEEP (e.g. 1,3,4), 'all', or 'no' to reject them: ").lower()
+        ans = ask("\nType the numbers to KEEP (e.g. 1,3,4), 'all' (or just press Enter) to keep every one, or 'no' to reject them: ").lower() or "all"
         if ans == "no":
             note = ask("What was wrong? (this guides the next attempt): ")
             job = api.call("POST", f"/jobs/{job['id']}/keywords/reject", {"feedback": note, "reviewer": reviewer})
@@ -286,6 +286,8 @@ def main() -> None:
         subject = args.subject or ask("What is the video about? ")
         sources = [x.strip() for x in args.sources.split(",") if x.strip()]
         options = {"min_relevance": args.min_relevance}
+        if file_terms and args.keywords == "manual":
+            options["seed_keywords"] = file_terms          # Gate 1 will show exactly your file's keywords
         if args.urls:
             text = Path(args.urls).expanduser().read_text(encoding="utf-8")
             options["urls"] = [dict(zip(("url", "note", "position"), [p.strip() for p in ln.split("|")]))
@@ -306,7 +308,7 @@ def main() -> None:
         return (order.index(state) if state in order else len(order)) <= order.index(name)
     if at("keywords_review"):
         job = wait_for(api, job["id"], {"keywords_review"}, "researching keywords")
-        job = keyword_gate(api, job, reviewer, file_terms)
+        job = keyword_gate(api, job, reviewer, [] if args.keywords == "manual" else file_terms)
     if sources and at("assets_review"):
         job = wait_for(api, job["id"], {"assets_review"}, "pulling and vetting sources", every=4)
         job = asset_gate(api, job, reviewer)

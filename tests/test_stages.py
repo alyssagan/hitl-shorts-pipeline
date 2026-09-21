@@ -120,6 +120,14 @@ class SceneTests(unittest.IsolatedAsyncioTestCase):
         script_req = next(b for m, p, b in mpt.requests if p == "/api/v1/scripts")
         self.assertLessEqual(len(script_req["video_script_prompt"]), 2000)
 
+    async def test_error_text_from_mpt_is_a_failure_not_a_script(self):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return ok({"video_script": "Error: 404 NOT_FOUND. This model is no longer available."})
+        client = MptClient("http://mpt", transport=httpx.MockTransport(handler))
+        with self.assertRaises(MptError) as cm:
+            await client.script("octopuses")
+        self.assertIn("404 NOT_FOUND", str(cm.exception))
+
     async def test_every_source_gets_a_share_of_the_grounding(self):
         mpt = FakeMpt()
         client = MptClient("http://mpt", transport=httpx.MockTransport(mpt))

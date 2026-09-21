@@ -10,12 +10,16 @@ from ..base import StageContext
 
 class ManualKeywordStage:
     actor = machine("manual-keywords", "1")
-    last_trace = {"method": "seed keywords from the job options, else the subject and its longer words"}
+    last_trace = {"method": "seed keywords from the job options (e.g. --keywords-file), else the subject and the subject without filler words"}
 
     async def run(self, job: Job, ctx: StageContext) -> list[Keyword]:
         seeds = job.providers.options.get("seed_keywords")
         if not seeds:
-            seeds = [job.subject] + [w for w in job.subject.split() if len(w) > 3]
+            # No seeds: the subject itself, and the subject without filler words ("true crime jack the ripper" ->
+            # "jack ripper"). Single words are NOT proposed: they match unrelated things.
+            from ...vetting.rules import STOPWORDS
+            core = " ".join(w for w in job.subject.split() if w.lower() not in STOPWORDS)
+            seeds = [job.subject] + ([core] if core and len(core.split()) > 1 else [])
         seen: set[str] = set()
         out: list[Keyword] = []
         for i, term in enumerate(seeds, start=1):
