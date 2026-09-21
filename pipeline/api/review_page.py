@@ -151,7 +151,7 @@ function card(a){
           oninput:e=>{notes[a.id]=e.target.value; updateSubmit();}}, notes[a.id]||""):null),
     h("div",{class:"acts"},
       h("button",{class:"use"+(d==="approve"?" on":""),disabled:v.usable===false,onclick:()=>setDecision(a,"approve")},"Use"),
-      h("button",{class:"rej"+(d==="reject"?" on":""),onclick:()=>setDecision(a,"reject")},"Reject")));
+      h("button",{class:"rej"+(d==="reject"?" on":""),onclick:()=>setDecision(a,"reject")},"Irrelevant")));
 }
 
 function lightbox(a){
@@ -163,8 +163,10 @@ function updateSubmit(){
   const b = document.getElementById("submit"); if(!b) return;
   const c = counts();
   const missing = job.assets.filter(a=>decisions[a.id]==="approve" && risk(a)==="high" && !(notes[a.id]||"").trim()).length;
-  b.disabled = busy || c.und>0 || c.use===0 || missing>0;
-  b.textContent = c.und>0 ? `Decide ${c.und} more first` : c.use===0 ? "Approve at least one" : missing>0 ? `${missing} high-risk need a note` : `Save decisions and continue (${c.use} used)`;
+  b.disabled = busy || c.use===0 || missing>0;
+  const skipped = c.und + c.hidden;
+  b.textContent = c.use===0 ? "Approve at least one" : missing>0 ? `${missing} high-risk need a note`
+    : `Save and continue (${c.use} used${skipped?`, ${skipped} skipped`:""})`;
 }
 
 async function submit(){
@@ -175,8 +177,11 @@ async function submit(){
     for (const a of job.assets){
       if (a.status!=="pending" && decisions[a.id]===(a.status==="approved"?"approve":"reject")) continue;
       let d = decisions[a.id], note = notes[a.id]||"";
-      if (!d){ d="reject"; note=`hidden below the ${pct(minScore)} relevance threshold (score ${pct(score(a))}); not looked at`; }
-      out[a.id]={decision:d, note};
+      let label = d==="approve" ? "relevant" : d==="reject" ? "irrelevant" : "";
+      if (!d){ d="reject"; note = below(a) ? `hidden below the ${pct(minScore)} relevance threshold (score ${pct(score(a))}); not looked at`
+                                            : `no decision made in the review page (left undecided, so not used); score ${pct(score(a))}`; }
+      if (d==='reject' && !note && label) note='marked irrelevant';
+      out[a.id]={decision:d, note, label};
     }
     await api("POST",`/jobs/${JOB}/assets/review`,{decisions:out, reviewer});
     await api("POST",`/jobs/${JOB}/assets/approve`,{reviewer});
@@ -221,14 +226,14 @@ function render(){
       h("label",{}, "Type ", opt("kind",kindFilter,[["","all"],["image","photos"],["video","videos"]])),
       h("label",{}, "Sort ", opt("sort",sortBy,[["score","best score"],["source","source"],["risk","risk (high first)"]])),
       h("button",{onclick:()=>bulk("use")},"Use all shown (not high-risk)"),
-      h("button",{onclick:()=>bulk("rej")},"Reject all shown undecided"),
+      h("button",{onclick:()=>bulk("rej")},"Mark all shown undecided irrelevant"),
       h("button",{id:"submit",class:"primary",disabled:true,onclick:submit},"...")));
   const body = h("main",{},
     !reviewing?h("div",{class:"banner"},`This project is in state "${job.state}", not asset review. This page will refresh when it reaches asset review.`):null,
     warn, error?h("div",{class:"err"},error):null,
     h("div",{class:"sub",style:"margin-bottom:10px"},
       `Showing ${xs.length} of ${job.assets.length}. Score = share of a keyword's words found in the item's own title/description/tags (docs/SCORING.md). `+
-      `Items under ${pct(minScore)} are hidden; if you submit while they are hidden they are recorded as rejected, unseen.`),
+      `Items under ${pct(minScore)} are hidden. Anything you leave undecided or hidden when you submit is not used (logged as rejected with a note) and is NOT counted as a training label. Only your Use / Irrelevant clicks are saved as labels (RELEVANCE_LABELS.jsonl in the project folder).`),
     h("div",{class:"grid"}, xs.map(card)),
     h("div",{class:"panel"}, h("b",{},"Not enough good ones? Search again"),
       h("div",{class:"sub"},"Fetches the next page of results (no repeats). Add specific new search terms, comma separated."),

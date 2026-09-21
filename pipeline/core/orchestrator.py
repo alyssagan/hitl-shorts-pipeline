@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
@@ -162,14 +163,34 @@ class Orchestrator:
                 a.status = "approved" if d["decision"] == "approve" else "rejected"
                 a.decision_note = (d.get("note") or "").strip()
                 a.reviewer, a.reviewed_at = actor.name, _now()
+                label = d.get("label") if d.get("label") in ("relevant", "irrelevant") else ""
+                if label:
+                    self._write_label(job, a, label, actor.name)
                 v = a.vetting
                 self._rec(job.id, "assets", "asset_reviewed", actor, decision=d["decision"],
                           reason=a.decision_note or "(no note)",
                           subject={"asset_id": a.id, "title": a.title, "source": a.source, "url": a.page_url or a.source_url},
                           logic={"machine_risk": v.risk if v else "unvetted", "machine_summary": v.summary if v else "",
                                  "flags_shown_to_reviewer": [f"{f.rule}:{f.severity}" for f in (v.flags if v else [])],
-                                 "high_risk_acknowledged": bool(v and v.risk == "high" and d["decision"] == "approve")})
+                                 "high_risk_acknowledged": bool(v and v.risk == "high" and d["decision"] == "approve"),
+                                 "relevance_label_saved": label or None})
         return await self._mutate(job_id, fn)
+
+    def _write_label(self, job: Job, a: Asset, label: str, who: str) -> None:
+        """Keep every explicit Use / Irrelevant click as a labelled example (RELEVANCE_LABELS.jsonl in the project folder).
+        These are the training/tuning data for relevance scoring: what the machine scored vs. what a human decided."""
+        v = a.vetting
+        row = {"job": job.id, "subject": job.subject, "label": label, "reviewer": who, "at": _now(),
+               "asset_id": a.id, "source": a.source, "kind": a.kind, "title": a.title, "description": a.description[:500],
+               "page_url": a.page_url, "sha256": a.sha256, "found_by_query": a.query,
+               "machine_score": v.relevance if v else None, "machine_why": v.relevance_why if v else "",
+               "keywords": [k.term for k in job.approved_keywords]}
+        path = self.store.job_dir(job.id) / "RELEVANCE_LABELS.jsonl"
+        keep = []
+        if path.exists():                     # one row per asset: a later click replaces an earlier one
+            keep = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip() and json.loads(ln).get("asset_id") != a.id]
+        keep.append(json.dumps(row, ensure_ascii=False))
+        path.write_text("\n".join(keep) + "\n", encoding="utf-8")
 
     async def approve_assets(self, job_id: str, *, reviewer: str = "", note: str = "") -> Job:
         actor = self._who(reviewer, require=True)

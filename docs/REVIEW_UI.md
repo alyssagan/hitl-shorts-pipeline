@@ -12,7 +12,8 @@ that fired with its evidence, and which search found it.
   Submitting while some are hidden records them as rejected with the note "hidden below threshold ... not looked at".
 - Filter by source or photos/videos, sort by score, source or risk. "Use all shown" skips HIGH-risk items.
 - **Save decisions and continue** posts your choices with your name to the same decision log the terminal uses, then moves on to scenes.
-  It stays disabled until every shown item has a decision.
+  You only need to click Use on the ones you want. Anything left undecided (or hidden below the threshold) is recorded as rejected with a note
+  saying it had no decision. The button is disabled only if nothing is approved or a HIGH-risk item is missing its note.
 - **Search again** (bottom): new search terms plus what was wrong; fetches the next page of results without repeats.
 
 In the terminal, after submitting in the browser, type `web` at the asset prompt so the script carries on.
