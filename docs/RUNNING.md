@@ -29,3 +29,15 @@ once all have been searched it goes back to page 2 of each. Your new search term
 python3 scripts/poc.py "true crime jack the ripper" --keywords manual --keywords-file library/keywords/jack-the-ripper.txt \
   --sources wikipedia,commons,loc,archive --reviewer "Aly"
 ```
+
+## Generate the keyword file with AI (free tier)
+```
+python3 scripts/make_keywords.py "jack the ripper"            # writes library/keywords/jack-the-ripper.txt
+python3 scripts/make_keywords.py "h h holmes" --n 30 --era "1890s Chicago"
+python3 scripts/make_keywords.py "jack the ripper" --print    # just show it
+python3 scripts/make_keywords.py "jack the ripper" --show-prompt   # see/adjust the prompt (it's PROMPT in the script)
+```
+Uses your free `GEMINI_API_KEY` from `.env` (Google AI Studio) and the model in `config/pipeline.toml` `[keywords]`. The prompt is written for
+true-crime reels: 2 to 5 word phrases with years and places, spread over places, documents and press, investigation and justice, era and daily life,
+atmosphere b-roll and people, aimed at archive-friendly material, no graphic content, no victims' names. Single words and repeats are dropped.
+Read and edit the file, then use it with `--keywords-file`. Files live in `library/keywords/` (the first one, `jack-the-ripper.txt`, was hand-written).
