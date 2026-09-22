@@ -37,3 +37,41 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
   pipeline flags it and records the decision; the risk stays with you (Limitation #3).
 
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built. See docs/REVIEW_UI.md. Scene/script page still to do.
+
+
+## Ideas backlog (added 2026-09-20, not started)
+
+### A. Notifications (Slack, readable on a phone)
+Goal: know what the pipeline is doing without watching a terminal.
+- **Errors and warnings first**: a message when a stage fails (job, stage, the error line, link to the log) and on WARN lines that need attention
+  (source skipped, model busy after all retries, script well under target length).
+- **Status**: job started, each stage finished, video done (with time taken and where the file is), what happens next.
+- **Pending on you**: a message whenever the job reaches a human gate (keywords, assets, scenes) with the count waiting and a link to
+  `/review/<id>`; a **reminder** if a gate has been waiting longer than N hours (default idea: 2h, then daily) so it shows up on the phone.
+- **Daily digest** (optional): one message listing every job and its state, what's pending, what failed.
+- How it fits: every state change and warning already goes through one place (`pipeline/core/joblog.py` and `orchestrator._commit`), so
+  notifications can be a listener on those, not new logic in each stage. Needs a `[notify]` section in `config/pipeline.toml`, the webhook URL in
+  `.env` (never in git), and a per-level filter (e.g. only WARN/ERROR + gates + done).
+- Free options: a Slack incoming webhook (free; the Slack phone app gives push). Alternative with no account: ntfy.sh push. Reminders need a small
+  background loop in the pipeline container that checks for jobs stuck at a gate.
+- The review link only opens from the Mac unless the port is exposed safely (Tailscale or similar); decide before promising phone links that open.
+
+### B. Usage, cost and time tracking
+- **Tokens**: Gemini's OpenAI-compatible replies include a `usage` block (prompt/completion/total tokens). Record it per call (keyword model,
+  script writer, make_keywords) into the project's log and a `USAGE.md`/`usage.json`: calls, tokens in and out, model, seconds.
+- **Cost**: free tier is $0, but track it anyway: tokens against the free quota (requests per minute/day) so we see how close we are; a price
+  table in config so switching to a paid model shows a real estimate.
+- **Time**: already in the activity log (`START/END <stage> (Ns)`); add a per-project summary: total wall time, time waiting on you, time per stage.
+- **Per-project summary** (in `DECISIONS.md` or its own file, and in the Slack "done" message): sources pulled, assets found/approved, tokens, cost,
+  time, render length.
+- **Is it done? What's next? Anything pending?**: a `/status` page and Slack summary per job: state, what it is waiting for and who, what runs next.
+
+### C. Several stories at the same time
+- Where we are: the orchestrator already keeps a lock per job and runs each in its own async task, so two jobs can run at once; the review page lists
+  all projects. The terminal script (`poc.py`) follows one story per terminal window.
+- Limits to design around: MoneyPrinterTurbo renders in one container (renders will likely queue or slow each other; may need a render queue with
+  N at a time); the free Gemini tier's rate limit is shared by all jobs (a shared limiter/queue so two stories don't trip 429s); disk and download
+  bandwidth; the terminal prompts (a `/review` queue page showing every job waiting on you is the natural way to handle many).
+- Steps: (1) a jobs dashboard (state, waiting-on, age) in the browser, (2) a start-a-story form in the browser so terminals aren't needed, (3) a global
+  cap on concurrent renders and LLM calls, (4) test two jobs in parallel end to end.
+- A batch mode is a natural extension of the keyword files: a list of subjects in, one job each, all waiting at Gate 1 in the dashboard.
