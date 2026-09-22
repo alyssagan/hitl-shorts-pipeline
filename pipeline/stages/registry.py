@@ -38,6 +38,7 @@ class Registry:
         self.user_agent = DEFAULT_USER_AGENT
         self.max_queries = 8
         self.source_transport = None      # tests inject an httpx mock transport
+        self._relevance_scorer_factory: Callable[[], Any] | None = None    # None = keyword-match only (no LLM configured)
 
     def register_keywords(self, name: str, factory: Callable[[], KeywordStage]) -> None:
         self._keywords[name] = factory
@@ -50,6 +51,11 @@ class Registry:
 
     def register_source(self, name: str, factory: Callable[[], SourceAdapter]) -> None:
         self._sources[name] = factory
+
+    def relevance_scorer(self):
+        """The configured semantic relevance scorer (pipeline/vetting/llm_relevance.py), or None to use
+        keyword-matching only. A fresh instance per call, like the other stage factories."""
+        return self._relevance_scorer_factory() if self._relevance_scorer_factory else None
 
     def sourcing_stage(self) -> SourcingStage:
         return SourcingStage({n: f() for n, f in self._sources.items()}, user_agent=self.user_agent,
@@ -118,6 +124,27 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
     reg.register_source("urls", lambda: UrlListSource(
         max_mb=int(src_cfg.get("url_max_mb", 200)), max_height=int(src_cfg.get("url_max_height", 1080))))
     reg.register_source("folder", lambda: FolderSource(src_cfg.get("folder_path", "library/scraped")))
+    rel_cfg = settings.get("relevance", {})
+
+    def relevance_scorer():
+        """Semantic relevance scoring (docs/SCORING.md). Reuses the [keywords] Gemini config by default, since
+        both are small free-tier chat calls; set [relevance] in pipeline.toml to use a different model/key.
+        Returns None (keyword-matching only) if disabled or no key is configured -- never a hard requirement."""
+        if not bool(rel_cfg.get("enabled", True)):
+            return None
+        key = os.getenv("RELEVANCE_LLM_API_KEY", "") or os.getenv(rel_cfg.get("api_key_env", kw_cfg.get("api_key_env", "GEMINI_API_KEY")), "")
+        if not key:
+            return None
+        from ..vetting.llm_relevance import LlmRelevanceScorer
+        return LlmRelevanceScorer(
+            base_url=os.getenv("RELEVANCE_LLM_BASE_URL", rel_cfg.get("base_url", kw_cfg.get(
+                "base_url", "https://generativelanguage.googleapis.com/v1beta/openai"))),
+            api_key=key,
+            model=os.getenv("RELEVANCE_LLM_MODEL", rel_cfg.get("model", kw_cfg.get("model", "gemini-3.6-flash"))),
+            batch_size=int(rel_cfg.get("batch_size", 25)),
+        )
+
+    reg._relevance_scorer_factory = relevance_scorer
     reg.register_keywords("manual", ManualKeywordStage)
     reg.register_keywords("llm", lambda: LLMKeywordStage(
         base_url=os.getenv("KEYWORD_LLM_BASE_URL", kw_cfg.get("base_url", "https://api.openai.com/v1")),

@@ -280,11 +280,19 @@ def relevance(a: Asset, topic_terms: list[str]) -> tuple[float | None, str]:
     return best, why
 
 
-def vet_asset(a: Asset, all_assets: list[Asset], topic_terms: list[str] | None = None, min_relevance: float = RELEVANCE_MIN) -> Vetting:
+def vet_asset(a: Asset, all_assets: list[Asset], topic_terms: list[str] | None = None, min_relevance: float = RELEVANCE_MIN,
+              llm_scores: dict[str, tuple[float, str]] | None = None) -> Vetting:
     flags: list[Flag] = []
     for _rid, _desc, fn in RULES:
         flags.extend(fn(a, all_assets))
-    rel, rel_why = relevance(a, topic_terms or [])
+    method = ""
+    if llm_scores and a.id in llm_scores:
+        rel, rel_why = llm_scores[a.id]
+        method = "llm-semantic"
+    else:
+        rel, rel_why = relevance(a, topic_terms or [])
+        if rel is not None:
+            method = "keyword-match" + (" (LLM unavailable/failed for this item)" if llm_scores is not None else "")
     if rel is not None and rel < min_relevance:
         flags.append(Flag(rule="RELEVANCE_LOW", severity="low",
                           message=f"Relevance score {round(rel * 100)}% is under the {round(min_relevance * 100)}% threshold, so it is probably not about your topic.",
@@ -299,9 +307,11 @@ def vet_asset(a: Asset, all_assets: list[Asset], topic_terms: list[str] | None =
     else:
         summary = ("Risk LOW: no rule fired above 'info'. This is not an approval. It only means the checker "
                    "found nothing to warn about. A human still decides.")
-    return Vetting(risk=risk, flags=flags, method=VERSION, summary=summary, usable=usable, relevance=rel, relevance_why=rel_why)
+    return Vetting(risk=risk, flags=flags, method=VERSION, summary=summary, usable=usable, relevance=rel, relevance_why=rel_why,
+                   relevance_method=method)
 
 
-def vet_all(assets: list[Asset], topic_terms: list[str] | None = None, min_relevance: float = RELEVANCE_MIN) -> None:
+def vet_all(assets: list[Asset], topic_terms: list[str] | None = None, min_relevance: float = RELEVANCE_MIN,
+            llm_scores: dict[str, tuple[float, str]] | None = None) -> None:
     for a in assets:
-        a.vetting = vet_asset(a, assets, topic_terms, min_relevance)
+        a.vetting = vet_asset(a, assets, topic_terms, min_relevance, llm_scores)

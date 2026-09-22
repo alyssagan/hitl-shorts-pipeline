@@ -75,6 +75,7 @@ class Vetting(BaseModel):
     summary: str = ""                       # how the risk level was derived
     usable: bool = True                     # False when the renderer cannot use the file
     relevance_why: str = ""                # plain-English reason for the score
+    relevance_method: str = ""              # "llm:<model>" or "keyword-match" (empty = not scored, no topic given)
     relevance: float | None = None          # 0..1 share of a keyword's words found in the asset's text; None = no topic given
 
 

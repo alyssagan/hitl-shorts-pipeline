@@ -356,11 +356,14 @@ class Orchestrator:
                 if state is JobState.SOURCING_RUNNING:
                     stage = self.registry.sourcing_stage()
                     res = await stage.run(job, ctx)
-                    await self._commit(job_id, state, "sourcing_done", lambda j: self._apply_sourcing(j, stage, res))
-                    # Vetting is quick, deterministic and always follows sourcing: do it right away.
-                    return await self._commit(job_id, JobState.VETTING_RUNNING, "vetting_done", self._apply_vetting)
+                    job = await self._commit(job_id, state, "sourcing_done", lambda j: self._apply_sourcing(j, stage, res))
+                    # Vetting is quick and always follows sourcing: do it right away. The relevance scorer (if
+                    # configured) needs an LLM call, so it runs here, before the (sync) vetting commit.
+                    llm_scores = await self._score_relevance(job)
+                    return await self._commit(job_id, JobState.VETTING_RUNNING, "vetting_done", lambda j: self._apply_vetting(j, llm_scores))
                 if state is JobState.VETTING_RUNNING:
-                    return await self._commit(job_id, state, "vetting_done", self._apply_vetting)
+                    llm_scores = await self._score_relevance(job)
+                    return await self._commit(job_id, state, "vetting_done", lambda j: self._apply_vetting(j, llm_scores))
                 if state is JobState.SCENES_RUNNING:
                     stage = self.registry.scene_stage(job.providers.scenes)
                     res = await stage.run(job, ctx)
@@ -416,16 +419,36 @@ class Orchestrator:
                       subject={"title": r.title, "source": r.source},
                       outputs={"file": r.rel_path, "url": r.url, "license": r.license, "chars": r.chars})
 
-    def _apply_vetting(self, job: Job) -> None:
+    async def _score_relevance(self, job: Job) -> dict[str, tuple[float, str]]:
+        """Semantic relevance via the configured LLM (pipeline/vetting/llm_relevance.py), scoped to assets that
+        still need a decision. Returns {} if no scorer is configured, there's nothing to score, or every batch
+        failed -- vet_all() falls back to keyword-matching per asset in that case, so this never blocks a run."""
+        scorer = self.registry.relevance_scorer()
+        pending = [a for a in job.assets if a.status == "pending"]
+        terms = [k.term for k in job.approved_keywords] + list(job.providers.options.get("extra_queries", []))
+        if scorer is None or not pending or not terms:
+            return {}
+        try:
+            return await scorer.score(job, pending, terms)
+        except Exception as exc:  # noqa: BLE001 - scoring must never fail a run; vet_all() falls back per asset
+            joblog.warn("relevance", f"LLM relevance scoring unavailable this round, using keyword-matching: {type(exc).__name__}: {exc}")
+            return {}
+
+    def _apply_vetting(self, job: Job, llm_scores: dict[str, tuple[float, str]] | None = None) -> None:
         terms = [k.term for k in job.approved_keywords] + list(job.providers.options.get("extra_queries", []))
         min_rel = float(job.providers.options.get("min_relevance", RELEVANCE_MIN))
-        vet_all(job.assets, terms, min_rel)
+        vet_all(job.assets, terms, min_rel, llm_scores)
         by_risk: dict[str, int] = {}
         for a in job.assets:
             r = a.vetting.risk if a.vetting else "unvetted"
             by_risk[r] = by_risk.get(r, 0) + 1
+        methods = {}
+        for a in job.assets:
+            m = a.vetting.relevance_method if a.vetting else ""
+            if m:
+                methods[m.split(" (")[0]] = methods.get(m.split(" (")[0], 0) + 1
         joblog.write(self.store.job_dir(job.id), "INFO", "vetting", f"vetted {len(job.assets)} assets", risk=by_risk,
-                     scored_against=terms, min_relevance=min_rel)
+                     scored_against=terms, min_relevance=min_rel, relevance_method=methods or None)
         hidden = sum(1 for a in job.assets if a.status == "pending" and a.vetting and a.vetting.relevance is not None and a.vetting.relevance < min_rel)
         self._rec(job.id, "vetting", "relevance_scoring", VETTER, decision=f"{hidden} hidden below {round(min_rel * 100)}%",
                   reason="Every asset got a 0-100% relevance score against the approved keywords. Assets under the threshold are hidden from "

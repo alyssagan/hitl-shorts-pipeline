@@ -112,3 +112,38 @@ class LogEndpointTests(ApiSourcesTests):
         self.assertIn(" http ", self.client.get(f"/jobs/{jid}/log?level=DEBUG").text)
         js = self.client.get(f"/jobs/{jid}/log?format=json&after=3").json()
         self.assertIn("next", js)
+
+
+class RelevanceScorerWiringTests(unittest.TestCase):
+    def test_orchestrator_uses_configured_relevance_scorer(self):
+        from pipeline.vetting.llm_relevance import LlmRelevanceScorer
+        def llm_handler(req: httpx.Request):
+            import json
+            body = json.loads(req.content)
+            text = body["messages"][0]["content"]
+            ids = [ln.split("id=")[1].split()[0] for ln in text.splitlines() if ln.strip() and ln[0].isdigit()]
+            reply = [{"id": i, "score": 5, "why": "not really about it"} for i in ids]
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(reply)}}]})
+        with tempfile.TemporaryDirectory() as tmp:
+            reg, _ = fake_registry()
+            reg.source_transport = httpx.MockTransport(handler)
+            reg.register_source("commons", lambda: CommonsSource(per_query=5))
+            reg._relevance_scorer_factory = lambda: LlmRelevanceScorer(
+                "http://llm", "key", "m", transport=httpx.MockTransport(llm_handler), retry_waits=())
+            with TestClient(create_app(Orchestrator(JobStore(tmp), reg), settings={})) as client:
+                r = client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                               "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+                jid = r.json()["id"]
+                client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+                end = time.time() + 5
+                while time.time() < end and client.get(f"/jobs/{jid}").json()["state"] != "keywords_review":
+                    time.sleep(0.02)
+                j = client.get(f"/jobs/{jid}").json()
+                client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+                end = time.time() + 5
+                while time.time() < end and client.get(f"/jobs/{jid}").json()["state"] != "assets_review":
+                    time.sleep(0.02)
+                j = client.get(f"/jobs/{jid}").json()
+                self.assertEqual(j["state"], "assets_review")
+                self.assertTrue(all(a["vetting"]["relevance_method"] == "llm-semantic" for a in j["assets"]))
+                self.assertTrue(all(a["vetting"]["relevance"] == 0.05 for a in j["assets"]))

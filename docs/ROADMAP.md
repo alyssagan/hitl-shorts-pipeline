@@ -39,6 +39,13 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built. See docs/REVIEW_UI.md. Scene/script page still to do.
 
 
+## Done: semantic (LLM) relevance scoring (2026-09-21)
+Asset relevance now defaults to a free-tier LLM judging each asset's title/description/tags against the topic *in meaning*, batched
+(~10 calls per 240 assets), with automatic fallback to the original keyword word-matching per asset when the LLM is off, unkeyed, or
+a batch fails. See docs/SCORING.md. Still text-only (no image analysis) -- see KNOWN_LIMITATIONS #16/#17. Next natural step, if wanted:
+score each approved asset against the actual scene narration once the script exists (a second pass at clip-matching time), for true
+per-scene story relevance rather than topic relevance.
+
 ## Ideas backlog (added 2026-09-20, not started)
 
 ### A. Notifications (Slack, readable on a phone)

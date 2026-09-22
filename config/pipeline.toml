@@ -44,6 +44,18 @@ model = "gemini-3.6-flash"
 api_key_env = "GEMINI_API_KEY"
 count = 10
 
+[relevance]
+# Semantic relevance scoring for asset review (docs/SCORING.md): a free-tier LLM judges whether each asset
+# actually relates to your topic in meaning, not just shared words. Runs in batches, so a 240-asset review is
+# about 10 calls. Falls back to word-matching automatically (per asset) if disabled, unkeyed, or a batch fails.
+enabled = true
+# Leave base_url/model unset to reuse the [keywords] Gemini config above (same free tier). RELEVANCE_LLM_API_KEY
+# overrides the key from .env if set, otherwise api_key_env (defaults to the same GEMINI_API_KEY as [keywords]).
+# base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+# model = "gemini-3.6-flash"
+api_key_env = "GEMINI_API_KEY"
+batch_size = 25
+
 [script]
 # Our own script writer (longer and better grounded than MoneyPrinterTurbo's). Uses any
 # OpenAI-compatible endpoint; the default is Gemini's free tier with GEMINI_API_KEY from .env.
