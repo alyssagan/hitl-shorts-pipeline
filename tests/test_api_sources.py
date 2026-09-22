@@ -114,6 +114,31 @@ class LogEndpointTests(ApiSourcesTests):
         self.assertIn("next", js)
 
 
+class TimingEndpointTests(ApiSourcesTests):
+    def test_timing_endpoint_reports_stage_durations_and_matches_the_decision_log(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        jid = r.json()["id"]
+        self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        j = self.wait(jid, "keywords_review")
+        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        self.wait(jid, "assets_review")
+
+        out = self.client.get(f"/jobs/{jid}/timing").json()
+        self.assertIn("keywords_running", out["time_per_stage_seconds"])
+        self.assertIn("sourcing_running", out["time_per_stage_seconds"])
+        self.assertGreaterEqual(out["total_wall_seconds"], 0.0)
+        # time waiting on Aly to approve keywords should show up as exactly one wait
+        self.assertEqual(len(out["waits"]), 1)
+
+        decisions = self.client.get(f"/jobs/{jid}/decisions").json()["entries"]
+        self.assertTrue(any(e["action"] == "stage_started" and e["subject"].get("stage") == "keywords_running" for e in decisions))
+        self.assertTrue(any(e["action"] == "stage_finished" and e["subject"].get("stage") == "sourcing_running" for e in decisions))
+
+    def test_timing_endpoint_404s_for_unknown_job(self):
+        self.assertEqual(self.client.get("/jobs/does-not-exist/timing").status_code, 404)
+
+
 class RelevanceScorerWiringTests(unittest.TestCase):
     def test_orchestrator_uses_configured_relevance_scorer(self):
         from pipeline.vetting.llm_relevance import LlmRelevanceScorer

@@ -56,6 +56,17 @@ narration once the script exists (a second pass at clip-matching time), for true
 relevance. Also raised but not started: switching the LLM tier itself to Groq (more generous free-tier limits, same
 OpenAI-compatible config swap) for the cases that still do call an LLM -- worth less now that far fewer calls happen at all.
 
+## Done: stage timing / provenance (2026-09-22)
+Prompted by a job failing silently from Aly's point of view (no notification -- see backlog item A below -- and the
+only record of "how long did it run before it failed" was an ephemeral activity-log line). Every stage's start,
+finish and duration -- and a failed stage's duration too -- is now written into the tamper-evident decision log
+(`stage_started`/`stage_finished`/`stage_failed`, docs/LOGGING.md "Timing / provenance"), not just logged as text.
+`Orchestrator.timing_summary()` / `GET /jobs/<id>/timing` rolls this up at any point in a job's life: total wall
+time, time per stage (summed across repeated rounds, e.g. "search again"), and time spent waiting on a human at
+each gate -- written to the decision log one final time as a `job_summary` entry when the job finishes or fails.
+`scripts/poc.py` prints a short version automatically. This is the "Time" and part of the "Per-project summary"
+bullets from the backlog item below; tokens/cost tracking and the Slack/notification pieces are still not started.
+
 ## Ideas backlog (added 2026-09-20, not started)
 
 ### A. Notifications (Slack, readable on a phone)
@@ -78,9 +89,9 @@ Goal: know what the pipeline is doing without watching a terminal.
   script writer, make_keywords) into the project's log and a `USAGE.md`/`usage.json`: calls, tokens in and out, model, seconds.
 - **Cost**: free tier is $0, but track it anyway: tokens against the free quota (requests per minute/day) so we see how close we are; a price
   table in config so switching to a paid model shows a real estimate.
-- **Time**: already in the activity log (`START/END <stage> (Ns)`); add a per-project summary: total wall time, time waiting on you, time per stage.
-- **Per-project summary** (in `DECISIONS.md` or its own file, and in the Slack "done" message): sources pulled, assets found/approved, tokens, cost,
-  time, render length.
+- **Time**: done, see "Done: stage timing / provenance" above (`docs/LOGGING.md`, `GET /jobs/<id>/timing`).
+- **Per-project summary**: the timing half is done (`job_summary` decision-log entry); still to add: sources pulled, assets found/approved,
+  tokens, cost, render length -- and surfacing it in the Slack "done" message once notifications (item A) exist.
 - **Is it done? What's next? Anything pending?**: a `/status` page and Slack summary per job: state, what it is waiting for and who, what runs next.
 
 ### C. Several stories at the same time

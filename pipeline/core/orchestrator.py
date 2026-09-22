@@ -18,6 +18,7 @@ import json
 import time
 import traceback
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,6 +35,11 @@ from ..vetting.tfidf_relevance import tfidf_scores
 
 VETTER = machine("vetting-rules", VETTING_VERSION)
 MATCHER = machine("clip-matcher", "1")
+
+STAGE_CATEGORY = {
+    JobState.KEYWORDS_RUNNING: "keywords", JobState.SOURCING_RUNNING: "sourcing",
+    JobState.VETTING_RUNNING: "vetting", JobState.SCENES_RUNNING: "scenes",
+}  # JobState.RENDERING (and anything else) falls back to "render" -- see run_pending()
 
 
 def _sha256(path: str) -> str:
@@ -348,41 +354,58 @@ class Orchestrator:
             token = joblog.bind(self.store.job_dir(job_id))
             t0 = time.monotonic()
             joblog.info("stage", f"START {state.value}", job=job_id, providers=job.providers.model_dump_json()[:200])
+            # Provenance (docs/LOGGING.md "Timing"): every stage's start/finish/duration is written to the
+            # tamper-evident decision log, not just the ephemeral activity log, so "how long did this take" is
+            # part of the permanent, auditable record and survives log rotation. `stage_category` picks which
+            # existing decision-log section (Keywords/Sourcing/Vetting/Scenes/Render) it belongs next to.
+            stage_category = STAGE_CATEGORY.get(state, "render")
+            self._rec(job_id, stage_category, "stage_started", machine("orchestrator"), subject={"stage": state.value})
             try:
                 if state is JobState.KEYWORDS_RUNNING:
                     stage = self.registry.keyword_stage(job.providers.keywords)
                     result = await stage.run(job, ctx)
-                    return await self._commit(job_id, state, "keywords_ready",
-                                              lambda j: self._apply_keywords(j, stage, result))
-                if state is JobState.SOURCING_RUNNING:
+                    result_job = await self._commit(job_id, state, "keywords_ready",
+                                                     lambda j: self._apply_keywords(j, stage, result))
+                elif state is JobState.SOURCING_RUNNING:
                     stage = self.registry.sourcing_stage()
                     res = await stage.run(job, ctx)
                     job = await self._commit(job_id, state, "sourcing_done", lambda j: self._apply_sourcing(j, stage, res))
                     # Vetting is quick and always follows sourcing: do it right away. The relevance scorer (if
                     # configured) needs an LLM call, so it runs here, before the (sync) vetting commit.
                     scores = await self._score_relevance(job)
-                    return await self._commit(job_id, JobState.VETTING_RUNNING, "vetting_done", lambda j: self._apply_vetting(j, scores))
-                if state is JobState.VETTING_RUNNING:
+                    result_job = await self._commit(job_id, JobState.VETTING_RUNNING, "vetting_done", lambda j: self._apply_vetting(j, scores))
+                elif state is JobState.VETTING_RUNNING:
                     scores = await self._score_relevance(job)
-                    return await self._commit(job_id, state, "vetting_done", lambda j: self._apply_vetting(j, scores))
-                if state is JobState.SCENES_RUNNING:
+                    result_job = await self._commit(job_id, state, "vetting_done", lambda j: self._apply_vetting(j, scores))
+                elif state is JobState.SCENES_RUNNING:
                     stage = self.registry.scene_stage(job.providers.scenes)
                     res = await stage.run(job, ctx)
-                    return await self._commit(job_id, state, "scenes_ready", lambda j: self._apply_scenes(j, stage, res))
-                # RENDERING
-                if job.uses_sources:
-                    credits = write_credits(job, self.store.job_dir(job_id))
-                    self._rec(job_id, "render", "credits_written", MATCHER, decision="write",
-                              reason="Attribution for every approved asset and text source.", outputs={"file": str(credits)})
-                stage = self.registry.render_stage(job.providers.render)
-                self._rec(job_id, "render", "render_started", actor_from(stage, machine("renderer")), decision="start",
-                          outputs={"scenes": [{"index": s.index, "clip": s.clip_path} for s in job.scenes]})
-                out = await stage.run(job, ctx)
-                return await self._commit(job_id, state, "render_done", lambda j: self._apply_render(j, stage, out))
+                    result_job = await self._commit(job_id, state, "scenes_ready", lambda j: self._apply_scenes(j, stage, res))
+                else:
+                    # RENDERING
+                    if job.uses_sources:
+                        credits = write_credits(job, self.store.job_dir(job_id))
+                        self._rec(job_id, "render", "credits_written", MATCHER, decision="write",
+                                  reason="Attribution for every approved asset and text source.", outputs={"file": str(credits)})
+                    stage = self.registry.render_stage(job.providers.render)
+                    self._rec(job_id, "render", "render_started", actor_from(stage, machine("renderer")), decision="start",
+                              outputs={"scenes": [{"index": s.index, "clip": s.clip_path} for s in job.scenes]})
+                    out = await stage.run(job, ctx)
+                    result_job = await self._commit(job_id, state, "render_done", lambda j: self._apply_render(j, stage, out))
+                duration = round(time.monotonic() - t0, 1)
+                self._rec(job_id, stage_category, "stage_finished", machine("orchestrator"), decision="ok",
+                          subject={"stage": state.value}, outputs={"duration_seconds": duration})
+                if result_job.state in (JobState.COMPLETED, JobState.FAILED):
+                    self._write_timing_summary(job_id)
+                return result_job
             except Exception as exc:  # noqa: BLE001 - any stage failure must land in FAILED
-                joblog.error("stage", f"FAILED {state.value} after {time.monotonic() - t0:.1f}s: {type(exc).__name__}: {exc}")
+                duration = round(time.monotonic() - t0, 1)
+                joblog.error("stage", f"FAILED {state.value} after {duration:.1f}s: {type(exc).__name__}: {exc}")
                 joblog.error("stage", "traceback: " + " | ".join(traceback.format_exception(exc)).replace("\n", " ")[-1500:])
-                return await self._fail(job_id, state, exc)
+                failed_job = await self._fail(job_id, state, exc, duration_seconds=duration)
+                if failed_job.state is JobState.FAILED:
+                    self._write_timing_summary(job_id)
+                return failed_job
             finally:
                 joblog.info("stage", f"END {state.value} ({time.monotonic() - t0:.1f}s)")
                 joblog.unbind(token)
@@ -553,7 +576,7 @@ class Orchestrator:
             joblog.write(self.store.job_dir(job_id), "INFO", "state", f"{expected.value} -> {job.state.value}", event=event)
             return job
 
-    async def _fail(self, job_id: str, expected: JobState, exc: Exception) -> Job:
+    async def _fail(self, job_id: str, expected: JobState, exc: Exception, duration_seconds: float | None = None) -> Job:
         async with self._locks[job_id]:
             job = self.store.load(job_id)
             if job.state is not expected:
@@ -563,8 +586,58 @@ class Orchestrator:
             sm.apply(job, "fail")
             self.store.save(job)
             self._rec(job_id, "project", "stage_failed", machine("orchestrator"), decision="fail",
-                      reason=job.error, subject={"stage": expected.value})
+                      reason=job.error, subject={"stage": expected.value},
+                      outputs={"duration_seconds": duration_seconds} if duration_seconds is not None else {})
             return job
+
+    def timing_summary(self, job_id: str) -> dict[str, Any]:
+        """Provenance rollup, computed on demand from the decision log (never a separate source of truth):
+        total wall time so far, time spent in machine work per stage (summed across every round -- a stage
+        that ran more than once, e.g. after "search again", is counted every time), and time spent waiting on
+        a human at each review gate. Works on a job that's still running (the "so far" numbers just stop at
+        "now") as well as a finished one. Safe to call anytime, including from the API (`GET /jobs/{id}/timing`)."""
+        entries = self.store.decisions(job_id).entries()
+        if not entries:
+            return {"total_wall_seconds": 0.0, "time_per_stage_seconds": {}, "time_waiting_on_you_seconds": 0.0,
+                     "waits": []}
+
+        def parse(ts: str) -> datetime:
+            return datetime.fromisoformat(ts)
+
+        started = parse(entries[0]["at"])
+        ended = parse(entries[-1]["at"])
+        stage_totals: dict[str, float] = {}
+        stage_runs: dict[str, int] = {}
+        waits: list[dict[str, Any]] = []
+        waiting_total = 0.0
+        gate_opened_at: str | None = None
+        for e in entries:
+            if e.get("action") == "stage_finished":
+                dur = (e.get("outputs") or {}).get("duration_seconds")
+                stg = (e.get("subject") or {}).get("stage", "?")
+                if isinstance(dur, (int, float)):
+                    stage_totals[stg] = stage_totals.get(stg, 0.0) + dur
+                    stage_runs[stg] = stage_runs.get(stg, 0) + 1
+                gate_opened_at = e["at"]                       # a human review gate may open right after this
+            elif e.get("actor", {}).get("type") == "human" and gate_opened_at is not None:
+                wait_s = (parse(e["at"]) - parse(gate_opened_at)).total_seconds()
+                waits.append({"closed_by": e.get("action"), "at": e["at"], "waited_seconds": round(wait_s, 1)})
+                waiting_total += wait_s
+                gate_opened_at = None                          # consumed -- only the FIRST human action closes a gate
+        return {
+            "total_wall_seconds": round((ended - started).total_seconds(), 1),
+            "time_per_stage_seconds": {k: round(v, 1) for k, v in stage_totals.items()},
+            "stage_run_counts": stage_runs,
+            "time_waiting_on_you_seconds": round(waiting_total, 1),
+            "waits": waits,
+        }
+
+    def _write_timing_summary(self, job_id: str) -> None:
+        summary = self.timing_summary(job_id)
+        self._rec(job_id, "project", "job_summary", machine("orchestrator"), decision="summary",
+                  reason="Provenance: total time, time per stage, and time spent waiting on a human review, "
+                         "computed from this log (docs/LOGGING.md).",
+                  outputs=summary)
 
     def resume_all(self) -> list[str]:
         """Call on startup: restart jobs that were mid-stage when we stopped."""

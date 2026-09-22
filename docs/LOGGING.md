@@ -5,7 +5,7 @@ There are three logs, each for a different question.
 | Log | Where | Answers |
 |---|---|---|
 | **Activity log** (new) | `projects/<name>-<id>/logs/pipeline.log` | What happened, step by step, and how long it took. Start here when something is slow or wrong. |
-| **Decision log** | `projects/<name>-<id>/DECISIONS.md` (+ `decisions.jsonl`) | Who decided what and why (tamper-evident). |
+| **Decision log** | `projects/<name>-<id>/DECISIONS.md` (+ `decisions.jsonl`) | Who decided what and why (tamper-evident) -- also where stage timing/provenance lives, see below. |
 | **Request logs** | `projects/<name>-<id>/sources/<source>/requests.jsonl` | Every HTTP request a source made: URL, status, time, size. |
 
 ## Reading the activity log
@@ -42,6 +42,42 @@ the next line has the traceback). The third column is the component: `stage`, `s
 5. Render problems: `mpt` lines show the render task's state and progress; `docker compose logs mpt` has the detail.
 
 Secrets are never written: any detail named key, api_key, token, secret, password or authorization shows as `***`, and URLs have keys stripped.
+
+## Timing / provenance
+"How long did each step take" is not just in the activity log's `END <state> (Ns)` lines (which are ephemeral text,
+not really queryable). Every stage's start, finish and duration is **also** written as an entry in the tamper-evident
+decision log (`DECISIONS.md` / `decisions.jsonl`) -- actions `stage_started` and `stage_finished`, the latter with
+`duration_seconds` in its `outputs`. A stage that fails records `stage_failed` with `duration_seconds` too, so you know
+how long it ran before it gave up. This makes timing part of the permanent, auditable record of the project, not
+something you have to grep out of a log file that could get rotated or deleted.
+
+On top of that, `GET /jobs/<id>/timing` computes a rollup at any point in the job's life (works on a job that's still
+running -- the numbers just stop at "now" -- as well as a finished one):
+
+```json
+{
+  "total_wall_seconds": 187.4,
+  "time_per_stage_seconds": {"keywords_running": 9.8, "sourcing_running": 64.3, "scenes_running": 22.1, "rendering": 91.2},
+  "stage_run_counts": {"keywords_running": 1, "sourcing_running": 1, "scenes_running": 1, "rendering": 1},
+  "time_waiting_on_you_seconds": 41.0,
+  "waits": [{"closed_by": "approved_keywords", "at": "2026-09-22T21:25:31Z", "waited_seconds": 18.0}, ...]
+}
+```
+
+- `time_per_stage_seconds` / `stage_run_counts`: summed across every time that stage ran -- a "search again" round
+  that re-enters `sourcing_running` a second time adds to the same total rather than overwriting it.
+- `time_waiting_on_you_seconds` / `waits`: the gap between a stage finishing (a review gate opening) and the next
+  decision you make there -- how much of the total wall time was actually you, not the machine.
+- Once a job reaches `completed` or `failed`, this same rollup is written one final time to the decision log as a
+  `job_summary` entry, so it's part of the permanent record even if nobody happens to hit the endpoint.
+
+`scripts/poc.py` prints a short version of this automatically when a job finishes (success or failure) --
+that's also where the retry command comes from when a stage like Gemini's script writer hits a transient
+error (`docs/KNOWN_LIMITATIONS.md` #1, #6).
+
+What this does *not* yet cover (see `docs/ROADMAP.md`'s backlog): token counts and $ cost per call. Time is
+tracked; usage/cost is not, so a `time_per_stage_seconds` number tells you how long something took, not what
+it cost (free tier is $0 regardless).
 
 ## Relevance scoring and "search again"
 The `relevance` component logs, each vetting round: how many pending assets got a free, local TF-IDF baseline score; how many

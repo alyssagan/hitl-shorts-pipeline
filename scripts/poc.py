@@ -63,6 +63,19 @@ def show_log(api: Api, job_id: str) -> None:
     LOG["cursor"][job_id] = r.get("next", 0)
 
 
+def print_timing(api: Api, job_id: str) -> None:
+    """Provenance (docs/LOGGING.md): how long each part took and how long the job sat waiting on you."""
+    try:
+        t = api.call("GET", f"/jobs/{job_id}/timing")
+    except SystemExit:
+        return
+    print(f"\n  Timing: {t['total_wall_seconds']:.0f}s total, {t['time_waiting_on_you_seconds']:.0f}s of that waiting on you")
+    for stage, secs in sorted(t["time_per_stage_seconds"].items(), key=lambda kv: -kv[1]):
+        n = t.get("stage_run_counts", {}).get(stage, 1)
+        print(f"    {stage}: {secs:.0f}s" + (f" ({n} runs)" if n > 1 else ""))
+    print(f"  Full detail: projects/.../DECISIONS.md  or  curl {api.base}/jobs/{job_id}/timing")
+
+
 def wait_for(api: Api, job_id: str, states: set[str], what: str, every: float = 3.0) -> dict:
     """Poll until the job reaches one of `states`. Exits with the reason if it fails."""
     started = time.time()
@@ -74,7 +87,8 @@ def wait_for(api: Api, job_id: str, states: set[str], what: str, every: float = 
             return job
         if job["state"] in ("failed", "cancelled"):
             print()
-            sys.exit(f"The job {job['state']}: {job.get('error') or 'no details'}\n"
+            print_timing(api, job_id)
+            sys.exit(f"\nThe job {job['state']}: {job.get('error') or 'no details'}\n"
                      "Fix the problem, then retry with:\n"
                      f"  curl -X POST {api.base}/jobs/{job_id}/retry")
         print(f"\r  {what}... {int(time.time() - started)}s", end="", flush=True)
@@ -325,6 +339,7 @@ def main() -> None:
         print("\nPaste this into your video description (credits required by the licenses):\n")
         print(cred.read_text())
     print(f"Every decision (yours and the machine's): projects/{job['slug']}-{job['id']}/DECISIONS.md")
+    print_timing(api, job["id"])
 
 
 if __name__ == "__main__":
