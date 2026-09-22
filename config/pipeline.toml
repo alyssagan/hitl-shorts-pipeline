@@ -79,6 +79,30 @@ target_words = 260
 # Characters of source text (Wikipedia etc.) the writer may read, split across the articles.
 grounding_chars = 12000
 
+[usage]
+# Tokens and $ cost provenance for every LLM call (docs/LOGGING.md "Tokens / cost"). Every call already gets its
+# own entry in the decision log with real token counts from the model's reply; this section only supplies the
+# two things that can't come from the reply itself: what a model's tokens actually cost, and how big its free
+# tier is, so the numbers can be read as "how much would this have cost" / "how close to the free limit am I".
+
+# $ per 1,000,000 tokens. A model with no entry here (every model this pipeline ships pointed at by default --
+# gemini-3.6-flash on the free tier) simply costs $0, which is accurate, not a placeholder. Add a row here the
+# day you point [keywords]/[relevance]/[script] at a paid model or a paid tier, and real $ estimates appear
+# automatically -- no other code changes.
+# [usage.prices.gemini-3.6-flash]
+# prompt_per_mtok = 0.0
+# completion_per_mtok = 0.0
+# [usage.prices.gpt-4o-mini]
+# prompt_per_mtok = 0.15
+# completion_per_mtok = 0.60
+
+# Purely informational (not enforced -- the pipeline doesn't rate-limit itself against this): Google's published
+# free-tier limits for the model(s) you use, so GET /jobs/{id}/usage and the decision log can show how close a
+# job's call count came to them. Update these if Google changes the free tier.
+[usage.free_quota.gemini-3.6-flash]
+requests_per_minute = 15
+requests_per_day = 1500
+
 [mpt]
 base_url = "http://localhost:8080"     # docker-compose overrides via MPT_BASE_URL
 aspect = "9:16"

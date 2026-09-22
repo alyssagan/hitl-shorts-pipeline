@@ -31,3 +31,29 @@ class MakeKeywords(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Retry(unittest.TestCase):
+    def test_retries_503_then_succeeds(self):
+        import io, json, urllib.error, urllib.request
+        calls = {"n": 0}
+        class R:
+            def __enter__(s): return s
+            def __exit__(s, *a): return False
+            def read(s): return json.dumps({"choices": [{"message": {"content": "ok"}}],
+                                            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}).encode()
+        def fake(req, timeout=0):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise urllib.error.HTTPError("u", 503, "x", {}, io.BytesIO(b"busy"))
+            return R()
+        real = urllib.request.urlopen
+        urllib.request.urlopen = fake
+        try:
+            slept = []
+            text, usage = mk.call_llm("http://x", "m", "k", "p", waits=(1, 2, 3), sleep=slept.append)
+        finally:
+            urllib.request.urlopen = real
+        self.assertEqual(text, "ok")
+        self.assertEqual(usage, {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
+        self.assertEqual((calls["n"], slept), (3, [1, 2]))

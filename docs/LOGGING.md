@@ -75,9 +75,48 @@ running -- the numbers just stop at "now" -- as well as a finished one):
 that's also where the retry command comes from when a stage like Gemini's script writer hits a transient
 error (`docs/KNOWN_LIMITATIONS.md` #1, #6).
 
-What this does *not* yet cover (see `docs/ROADMAP.md`'s backlog): token counts and $ cost per call. Time is
-tracked; usage/cost is not, so a `time_per_stage_seconds` number tells you how long something took, not what
-it cost (free tier is $0 regardless).
+## Tokens / cost
+Every LLM call in the pipeline (keyword generation, the script writer, and the relevance scorer's borderline
+"second opinion" calls) goes through one shared function, `pipeline/stages/llm_http.py::post_chat()`. When the
+model's reply carries an OpenAI-style `usage` block -- Gemini's OpenAI-compatible endpoint always sends one on a
+200 -- that call is recorded (`pipeline/core/usage.py`) and turned into its own `llm_call` entry in the same
+tamper-evident decision log the rest of this document describes, right next to that stage's `stage_started`/
+`stage_finished` entries:
+
+```json
+{"action": "llm_call", "stage": "vetting", "actor": {"type": "ai", "name": "relevance batch 1/1", "model": "gemini-3.6-flash"},
+ "subject": {"what": "relevance batch 1/1", "model": "gemini-3.6-flash"},
+ "outputs": {"prompt_tokens": 812, "completion_tokens": 96, "total_tokens": 908, "cost_usd": 0.0}}
+```
+
+`GET /jobs/<id>/usage` rolls every `llm_call` entry a job has made (so far, or ever, once it's finished) up into
+totals and a per-model breakdown, the same way `/timing` rolls up stage durations:
+
+```json
+{
+  "calls": 4, "prompt_tokens": 3120, "completion_tokens": 340, "total_tokens": 3460, "cost_usd": 0.0,
+  "by_model": {"gemini-3.6-flash": {"calls": 4, "prompt_tokens": 3120, "completion_tokens": 340, "total_tokens": 3460, "cost_usd": 0.0}},
+  "free_quota": {"gemini-3.6-flash": {"requests_per_minute": 15, "requests_per_day": 1500}}
+}
+```
+
+- **Cost** comes from `config/pipeline.toml`'s `[usage.prices.<model>]` table ($ per 1,000,000 tokens, in and
+  out separately). A model with no entry -- every model this pipeline points at by default, all free tier --
+  costs exactly $0, which is accurate, not a placeholder. Point `[keywords]`/`[relevance]`/`[script]` at a paid
+  model or tier and add its price there; every number above updates automatically, no code changes.
+- **`free_quota`** is Google's published free-tier limits for the model, from `[usage.free_quota.<model>]` --
+  purely informational (the pipeline does not rate-limit itself against it), so you can eyeball how close a job's
+  call count came to it.
+- Once a job reaches `completed` or `failed`, the rollup is written one final time to the decision log as a
+  `usage_summary` entry, same as `job_summary` for timing, so it's part of the permanent record even if nobody
+  hits the endpoint.
+- `scripts/poc.py` prints a short version automatically when a job finishes (success or failure), right after
+  the timing summary -- nothing to print if the job made no LLM calls at all.
+- `scripts/make_keywords.py` runs *before* any job exists (it just writes a keywords file), so it has no decision
+  log to write into; it prints its one call's tokens directly to the terminal instead.
+- Non-LLM API calls (Wikipedia, Commons, Pexels, Pixabay, Unsplash, NASA, Archive, LOC, Smithsonian) were already
+  logged in full to `sources/<source>/requests.jsonl` -- see the table at the top of this document -- this
+  section is specifically about the LLM calls, which weren't counted anywhere before.
 
 ## Relevance scoring and "search again"
 The `relevance` component logs, each vetting round: how many pending assets got a free, local TF-IDF baseline score; how many

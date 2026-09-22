@@ -87,7 +87,7 @@ async function loadLog(){
   try{ const r = await fetch(`/jobs/${JOB}/log?tail=150&level=${logLevel}`); logLines = (await r.text()).split("\n").filter(Boolean); }catch(e){}
   const el = document.getElementById("logbox"); if(el){ el.textContent = logLines.join("\n"); el.scrollTop = el.scrollHeight; }
 }
-let job=null, decisions={}, notes={}, minScore=0.5, showHidden=false, srcFilter="", kindFilter="", sortBy="score", busy=false, error="";
+let job=null, decisions={}, notes={}, minScore=0.5, showHidden=false, srcFilter="", kindFilter="", sortBy="risk", busy=false, error="";
 
 async function load(){
   job = await api("GET","/jobs/"+JOB);
@@ -105,8 +105,12 @@ const risk = a => (a.vetting&&a.vetting.risk)||"low";
 
 function visible(){
   let xs = job.assets.filter(a => (showHidden || !below(a)) && (!srcFilter||a.source===srcFilter) && (!kindFilter||a.kind===kindFilter));
+  // "risk" is the default: safest first (low, then medium, then high risk), and within each risk group,
+  // best-scoring (most relevant) items first -- so the top of the page is always what you'd want to approve
+  // first, and risk only gets worse as you scroll, with the strongest candidates surfacing first at each level.
   const by = {score:(a,b)=>(score(b)??-1)-(score(a)??-1), source:(a,b)=>a.source.localeCompare(b.source),
-              risk:(a,b)=>["high","medium","low"].indexOf(risk(a))-["high","medium","low"].indexOf(risk(b))};
+              risk:(a,b)=>["low","medium","high"].indexOf(risk(a))-["low","medium","high"].indexOf(risk(b))
+                          || (score(b)??-1)-(score(a)??-1)};
   return xs.sort(by[sortBy]);
 }
 function setDecision(a, d){
@@ -235,7 +239,7 @@ function render(){
       h("label",{}, h("input",{type:"checkbox",checked:showHidden,onchange:e=>{showHidden=e.target.checked;render();}}), "show below threshold"),
       h("label",{}, "Source ", opt("src",srcFilter,[["","all"],...sources.map(s=>[s,s])])),
       h("label",{}, "Type ", opt("kind",kindFilter,[["","all"],["image","photos"],["video","videos"]])),
-      h("label",{}, "Sort ", opt("sort",sortBy,[["score","best score"],["source","source"],["risk","risk (high first)"]])),
+      h("label",{}, "Sort ", opt("sort",sortBy,[["risk","risk (low first), best score first within each"],["score","best score"],["source","source"]])),
       h("button",{onclick:()=>bulk("use")},"Use all shown (not high-risk)"),
       h("button",{onclick:()=>bulk("rej")},"Mark all shown undecided irrelevant"),
       h("button",{id:"submit",class:"primary",disabled:true,onclick:submit},"...")));

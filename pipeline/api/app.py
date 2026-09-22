@@ -15,6 +15,7 @@
   GET  /jobs/{id}/log                      step-by-step activity log (?level=DEBUG|INFO|WARN|ERROR&tail=N&after=N&format=json)
   GET  /jobs/{id}/decisions           the decision log (add ?format=md for DECISIONS.md)
   GET  /jobs/{id}/timing               provenance: total time, time per stage, time waiting on you (docs/LOGGING.md)
+  GET  /jobs/{id}/usage                provenance: LLM calls, tokens in/out, $ cost, by model (docs/LOGGING.md)
   GET  /jobs/{id}/assets/{asset_id}/file   the downloaded image/video (for previews)
   GET  /review, /review/{id}               the review web page (thumbnails, scores, Use/Reject)
 """
@@ -198,6 +199,10 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         orch.get(r.path_params["id"])                       # 404 if unknown
         return JSONResponse(orch.timing_summary(r.path_params["id"]))
 
+    async def usage_view(r: Request):
+        orch.get(r.path_params["id"])                       # 404 if unknown
+        return JSONResponse(orch.usage_summary(r.path_params["id"]))
+
     async def output(r: Request):
         job = orch.get(r.path_params["id"])
         if not job.output_path or not Path(job.output_path).exists():
@@ -233,6 +238,7 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/decisions", wrap(decisions), methods=["GET"]),
         Route(f"{P}/log", wrap(log_view), methods=["GET"]),
         Route(f"{P}/timing", wrap(timing_view), methods=["GET"]),
+        Route(f"{P}/usage", wrap(usage_view), methods=["GET"]),
         Route(f"{P}/back-to-assets", wrap(back_assets), methods=["POST"]),
         Route(f"{P}/scenes", wrap(scenes_edit), methods=["PATCH"]),
         Route(f"{P}/scenes/approve", wrap(scenes_approve), methods=["POST"]),

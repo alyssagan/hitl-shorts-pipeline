@@ -67,6 +67,21 @@ each gate -- written to the decision log one final time as a `job_summary` entry
 `scripts/poc.py` prints a short version automatically. This is the "Time" and part of the "Per-project summary"
 bullets from the backlog item below; tokens/cost tracking and the Slack/notification pieces are still not started.
 
+## Done: token / $ cost provenance (2026-09-22)
+Prompted by "are we keeping track of how many tokens, how many api calls, how much cost" -- the answer at the
+time was no: every LLM call (keywords, script, relevance) discarded the `usage` block in Gemini's reply, and only
+non-LLM source API calls were logged (`sources/<source>/requests.jsonl`, unchanged). Now every LLM call, wherever
+it's made, is recorded (`pipeline/core/usage.py`, wired into the one shared `post_chat()` every call already goes
+through) as its own `llm_call` entry in the same tamper-evident decision log timing uses -- tokens in/out and an
+estimated $ cost from a price table in `config/pipeline.toml` (`$0` for the free-tier models this pipeline ships
+with, a real estimate the moment you price a paid one). `Orchestrator.usage_summary()` / `GET /jobs/<id>/usage`
+rolls this up by model, with the model's free-tier request quota alongside it for reference; written to the
+decision log one final time as a `usage_summary` entry when the job finishes or fails, same pattern as
+`job_summary` for timing. `scripts/poc.py` prints a short version automatically. See docs/LOGGING.md "Tokens /
+cost". `scripts/make_keywords.py` runs before any job exists, so it has no decision log to write into -- it
+prints its one call's tokens to the terminal instead. This finishes the "Tokens" and "Cost" bullets from the
+backlog item below; "Is it done? What's next?" (a `/status` page) and the Slack piece (item A) are still open.
+
 ## Ideas backlog (added 2026-09-20, not started)
 
 ### A. Notifications (Slack, readable on a phone)
@@ -85,13 +100,13 @@ Goal: know what the pipeline is doing without watching a terminal.
 - The review link only opens from the Mac unless the port is exposed safely (Tailscale or similar); decide before promising phone links that open.
 
 ### B. Usage, cost and time tracking
-- **Tokens**: Gemini's OpenAI-compatible replies include a `usage` block (prompt/completion/total tokens). Record it per call (keyword model,
-  script writer, make_keywords) into the project's log and a `USAGE.md`/`usage.json`: calls, tokens in and out, model, seconds.
-- **Cost**: free tier is $0, but track it anyway: tokens against the free quota (requests per minute/day) so we see how close we are; a price
-  table in config so switching to a paid model shows a real estimate.
+- **Tokens**: done, see "Done: token / $ cost provenance" above -- every LLM call is an `llm_call` decision-log entry (calls, tokens in and
+  out, model, cost) via `pipeline/core/usage.py`, `GET /jobs/<id>/usage`.
+- **Cost**: done, same feature -- a price table in `config/pipeline.toml` (`[usage.prices.<model>]`) so a paid model shows a real $ estimate;
+  free-tier quota (`[usage.free_quota.<model>]`) shown alongside for reference, though not enforced.
 - **Time**: done, see "Done: stage timing / provenance" above (`docs/LOGGING.md`, `GET /jobs/<id>/timing`).
-- **Per-project summary**: the timing half is done (`job_summary` decision-log entry); still to add: sources pulled, assets found/approved,
-  tokens, cost, render length -- and surfacing it in the Slack "done" message once notifications (item A) exist.
+- **Per-project summary**: timing and usage are both done (`job_summary` / `usage_summary` decision-log entries); still to add: sources
+  pulled, assets found/approved, render length -- and surfacing it in the Slack "done" message once notifications (item A) exist.
 - **Is it done? What's next? Anything pending?**: a `/status` page and Slack summary per job: state, what it is waiting for and who, what runs next.
 
 ### C. Several stories at the same time

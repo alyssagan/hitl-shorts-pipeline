@@ -119,14 +119,18 @@ def render(topic: str, groups: dict[str, list[str]]) -> str:
 RETRY_WAITS = (4, 10, 25, 45)          # seconds; Google's free tier says 503/429 "usually temporary"
 
 
-def call_llm(base: str, model: str, key: str, prompt: str, waits: tuple = RETRY_WAITS, sleep=time.sleep) -> str:
+def call_llm(base: str, model: str, key: str, prompt: str, waits: tuple = RETRY_WAITS, sleep=time.sleep) -> tuple[str, dict]:
+    """Returns (reply text, usage dict). This script runs before any job exists, so there's no decision log to
+    write tokens/cost into (docs/LOGGING.md "Tokens / cost" covers per-job calls made once a job is running);
+    the caller just prints this one call's usage so it isn't silently thrown away."""
     body = json.dumps({"model": model, "temperature": 0.7, "messages": [{"role": "user", "content": prompt}]}).encode()
     req = urllib.request.Request(base.rstrip("/") + "/chat/completions", data=body, method="POST",
                                  headers={"content-type": "application/json", "authorization": f"Bearer {key}"})
     for attempt in range(len(waits) + 1):
         try:
             with urllib.request.urlopen(req, timeout=90) as r:
-                return json.loads(r.read())["choices"][0]["message"]["content"]
+                reply = json.loads(r.read())
+                return reply["choices"][0]["message"]["content"], (reply.get("usage") or {})
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300]
             if e.code in (429, 500, 502, 503, 504) and attempt < len(waits):
@@ -178,9 +182,14 @@ def main() -> None:
 
     print(f"Asking {model} for {args.n} keywords about '{args.topic}'...")
     try:
-        groups, dropped = clean(parse_reply(call_llm(base, model, key, prompt)))
+        text_reply, usage = call_llm(base, model, key, prompt)
+        groups, dropped = clean(parse_reply(text_reply))
     except (ValueError, KeyError) as e:
         sys.exit(f"Couldn't read the model's answer ({e}). Run it again.")
+    if usage:
+        pt, ct, tt = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), usage.get("total_tokens", 0)
+        print(f"({model}: {tt} tokens -- {pt} in / {ct} out. Free tier, so $0; see [usage] in "
+              "config/pipeline.toml if you ever point this at a paid model.)")
     if not groups:
         sys.exit("The model returned no usable keywords. Run it again.")
     text = render(args.topic, groups)

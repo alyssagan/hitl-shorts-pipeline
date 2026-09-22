@@ -76,6 +76,25 @@ def print_timing(api: Api, job_id: str) -> None:
     print(f"  Full detail: projects/.../DECISIONS.md  or  curl {api.base}/jobs/{job_id}/timing")
 
 
+def print_usage(api: Api, job_id: str) -> None:
+    """Provenance (docs/LOGGING.md): every LLM call this job made, its tokens, and an estimated $ cost
+    (free-tier models are $0 -- see [usage] in config/pipeline.toml to price a paid model)."""
+    try:
+        u = api.call("GET", f"/jobs/{job_id}/usage")
+    except SystemExit:
+        return
+    if not u["calls"]:
+        return
+    print(f"\n  LLM usage: {u['calls']} call(s), {u['total_tokens']:,} tokens" +
+          (f", ~${u['cost_usd']:.4f}" if u["cost_usd"] else " (free tier: $0)"))
+    for model, m in sorted(u["by_model"].items(), key=lambda kv: -kv[1]["total_tokens"]):
+        quota = u.get("free_quota", {}).get(model) or {}
+        q = f", free tier: {quota['requests_per_minute']}/min {quota['requests_per_day']}/day" if quota else ""
+        print(f"    {model}: {m['calls']} call(s), {m['total_tokens']:,} tokens ({m['prompt_tokens']:,} in / "
+              f"{m['completion_tokens']:,} out){q}")
+    print(f"  Full detail: projects/.../DECISIONS.md  or  curl {api.base}/jobs/{job_id}/usage")
+
+
 def wait_for(api: Api, job_id: str, states: set[str], what: str, every: float = 3.0) -> dict:
     """Poll until the job reaches one of `states`. Exits with the reason if it fails."""
     started = time.time()
@@ -88,6 +107,7 @@ def wait_for(api: Api, job_id: str, states: set[str], what: str, every: float = 
         if job["state"] in ("failed", "cancelled"):
             print()
             print_timing(api, job_id)
+            print_usage(api, job_id)
             sys.exit(f"\nThe job {job['state']}: {job.get('error') or 'no details'}\n"
                      "Fix the problem, then retry with:\n"
                      f"  curl -X POST {api.base}/jobs/{job_id}/retry")
@@ -340,6 +360,7 @@ def main() -> None:
         print(cred.read_text())
     print(f"Every decision (yours and the machine's): projects/{job['slug']}-{job['id']}/DECISIONS.md")
     print_timing(api, job["id"])
+    print_usage(api, job["id"])
 
 
 if __name__ == "__main__":

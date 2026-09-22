@@ -24,7 +24,8 @@ from typing import Any, Callable
 
 from . import joblog
 from . import state_machine as sm
-from .decisions import Actor, actor_from, human, machine
+from . import usage
+from .decisions import Actor, actor_from, ai, human, machine
 from .models import Asset, Job, JobState, Keyword, ProviderChoice, RUNNING_STATES, Scene, _now
 from .store import JobStore
 from ..stages.base import StageContext
@@ -59,6 +60,7 @@ class Orchestrator:
         self._running: set[str] = set()
         # Optional hook, e.g. the API uses it to launch run_pending in the background.
         self.on_running: Callable[[str], None] | None = None
+        usage.configure_prices(self.settings)  # [usage] price table / free-quota info from config/pipeline.toml
 
     # ------------------------------------------------------------------ helpers
     def _who(self, reviewer: str = "", require: bool = False) -> Actor:
@@ -67,7 +69,7 @@ class Orchestrator:
             raise ValueError("a reviewer name is required for this decision (it is written to the decision log)")
         return human(name)
 
-    QUIET_ACTIONS = {"vetted_asset", "asset_kept", "asset_reviewed", "text_kept"}     # one per asset: DEBUG only
+    QUIET_ACTIONS = {"vetted_asset", "asset_kept", "asset_reviewed", "text_kept", "llm_call"}     # one per asset/call: DEBUG only
 
     def _rec(self, job_id: str, stage: str, action: str, actor: Actor, **kw: Any) -> None:
         self.store.decisions(job_id).record(job_id=job_id, stage=stage, action=action, actor=actor, **kw)
@@ -352,6 +354,7 @@ class Orchestrator:
             ctx = StageContext(assets_dir=self.store.assets_dir(job_id), settings=self.settings,
                                project_dir=self.store.job_dir(job_id))
             token = joblog.bind(self.store.job_dir(job_id))
+            usage_token = usage.bind()   # collects every LLM call's tokens/cost made during this stage (core/usage.py)
             t0 = time.monotonic()
             joblog.info("stage", f"START {state.value}", job=job_id, providers=job.providers.model_dump_json()[:200])
             # Provenance (docs/LOGGING.md "Timing"): every stage's start/finish/duration is written to the
@@ -393,22 +396,27 @@ class Orchestrator:
                     out = await stage.run(job, ctx)
                     result_job = await self._commit(job_id, state, "render_done", lambda j: self._apply_render(j, stage, out))
                 duration = round(time.monotonic() - t0, 1)
+                self._record_llm_usage(job_id, stage_category)
                 self._rec(job_id, stage_category, "stage_finished", machine("orchestrator"), decision="ok",
                           subject={"stage": state.value}, outputs={"duration_seconds": duration})
                 if result_job.state in (JobState.COMPLETED, JobState.FAILED):
                     self._write_timing_summary(job_id)
+                    self._write_usage_summary(job_id)
                 return result_job
             except Exception as exc:  # noqa: BLE001 - any stage failure must land in FAILED
                 duration = round(time.monotonic() - t0, 1)
                 joblog.error("stage", f"FAILED {state.value} after {duration:.1f}s: {type(exc).__name__}: {exc}")
                 joblog.error("stage", "traceback: " + " | ".join(traceback.format_exception(exc)).replace("\n", " ")[-1500:])
+                self._record_llm_usage(job_id, stage_category)
                 failed_job = await self._fail(job_id, state, exc, duration_seconds=duration)
                 if failed_job.state is JobState.FAILED:
                     self._write_timing_summary(job_id)
+                    self._write_usage_summary(job_id)
                 return failed_job
             finally:
                 joblog.info("stage", f"END {state.value} ({time.monotonic() - t0:.1f}s)")
                 joblog.unbind(token)
+                usage.unbind(usage_token)
         finally:
             self._running.discard(job_id)
 
@@ -631,6 +639,42 @@ class Orchestrator:
             "time_waiting_on_you_seconds": round(waiting_total, 1),
             "waits": waits,
         }
+
+    def _record_llm_usage(self, job_id: str, stage_category: str) -> None:
+        """Turns every LLM call collected (core/usage.py) during the stage that just ran into its own `llm_call`
+        decision-log entry -- tokens in/out and an estimated $ cost, next to the timing/decision entries for the
+        same stage. A stage that made no LLM calls (e.g. sourcing, rendering) writes nothing. Called on both the
+        success and the failure path, so a call made just before a stage crashed (e.g. the script writer got a
+        reply, then MoneyPrinterTurbo failed) is still counted, never silently dropped."""
+        for c in usage.collect():
+            self._rec(job_id, stage_category, "llm_call", ai(c["what"], model=c["model"]), decision="call",
+                      subject={"what": c["what"], "model": c["model"]},
+                      outputs={"prompt_tokens": c["prompt_tokens"], "completion_tokens": c["completion_tokens"],
+                               "total_tokens": c["total_tokens"], "cost_usd": c["cost_usd"]})
+
+    def usage_summary(self, job_id: str) -> dict[str, Any]:
+        """Provenance rollup for tokens and $ cost (docs/LOGGING.md "Tokens / cost"), computed on demand from
+        every `llm_call` entry this job's decision log has ever recorded -- never a separate source of truth,
+        same principle as timing_summary(). Works on a job that's still running as well as a finished one.
+        Safe to call anytime, including from the API (`GET /jobs/{id}/usage`)."""
+        entries = self.store.decisions(job_id).entries()
+        calls = [{"prompt_tokens": (e.get("outputs") or {}).get("prompt_tokens", 0),
+                  "completion_tokens": (e.get("outputs") or {}).get("completion_tokens", 0),
+                  "total_tokens": (e.get("outputs") or {}).get("total_tokens", 0),
+                  "cost_usd": (e.get("outputs") or {}).get("cost_usd", 0.0),
+                  "model": (e.get("subject") or {}).get("model", "")}
+                 for e in entries if e.get("action") == "llm_call"]
+        out = usage.rollup(calls)
+        out["free_quota"] = {model: usage.quota_for(model) for model in out["by_model"] if usage.quota_for(model)}
+        return out
+
+    def _write_usage_summary(self, job_id: str) -> None:
+        summary = self.usage_summary(job_id)
+        self._rec(job_id, "project", "usage_summary", machine("orchestrator"), decision="summary",
+                  reason="Provenance: every LLM call this job made, tokens in/out, and an estimated $ cost "
+                         "(free-tier models cost $0; see [usage] in config/pipeline.toml for the price table), "
+                         "computed from this log (docs/LOGGING.md 'Tokens / cost').",
+                  outputs=summary)
 
     def _write_timing_summary(self, job_id: str) -> None:
         summary = self.timing_summary(job_id)
