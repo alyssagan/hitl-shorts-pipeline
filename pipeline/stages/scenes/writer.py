@@ -52,7 +52,7 @@ def word_count(text: str) -> int:
 class ScriptWriter:
     def __init__(self, base_url: str, api_key: str, model: str, target_words: int = 260,
                  grounding_chars: int = 12000, timeout: float = 180,
-                 transport: httpx.AsyncBaseTransport | None = None):
+                 transport: httpx.AsyncBaseTransport | None = None, fallback: dict | None = None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
@@ -60,6 +60,7 @@ class ScriptWriter:
         self.grounding_chars = grounding_chars
         self.timeout = timeout
         self.transport = transport
+        self.fallback = fallback   # config/pipeline.toml [llm_fallback], via registry.build_llm_fallback()
         self.retry_waits: tuple[float, ...] | None = None      # None = the defaults in llm_http
 
     def sources_text(self, job: Job) -> tuple[str, list[dict]]:
@@ -95,7 +96,7 @@ class ScriptWriter:
         async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
             resp = await post_chat(client, f"{self.base_url}/chat/completions", headers,
                                    {"model": self.model, "messages": [{"role": "user", "content": prompt}]}, what="script writer",
-                                   waits=self.retry_waits)
+                                   waits=self.retry_waits, fallback=self.fallback)
         if resp.status_code != 200:
             try:
                 detail = resp.json()
@@ -108,14 +109,20 @@ class ScriptWriter:
             text = resp.json()["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, ValueError):
             raise MptError("script model returned an unexpected reply") from None
+        # What actually answered -- the primary model unless post_chat() fell back to the backup provider.
+        model_used = getattr(resp, "pipeline_model", self.model)
+        endpoint_used = self.fallback["base_url"] if getattr(resp, "pipeline_fell_back", False) and self.fallback else self.base_url
         script = clean_script(text)
         if not script:
             raise MptError("script model returned an empty script")
         n = word_count(script)
         joblog.info("script", f"got {n} words (about {round(n / WORDS_PER_SECOND)}s spoken)")
-        trace = {"writer": "own", "model": self.model, "endpoint": self.base_url, "prompt": prompt,
+        trace = {"writer": "own", "model": model_used, "endpoint": endpoint_used, "prompt": prompt,
                  "target_words": self.target_words, "words": n, "est_seconds": round(n / WORDS_PER_SECOND),
                  "grounded_on": used, "feedback_used": list(job.scene_feedback), "keywords": keywords}
+        if getattr(resp, "pipeline_fell_back", False):
+            trace["fell_back_from"] = {"model": self.model, "endpoint": self.base_url}
+            trace["provider"] = getattr(resp, "pipeline_provider", "backup")
         if n < self.target_words * 0.6:
             trace["warning"] = f"Script is well under the {self.target_words}-word target ({n} words)."
         return script, trace

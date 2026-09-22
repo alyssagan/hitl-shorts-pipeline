@@ -44,6 +44,24 @@ model = "gemini-3.6-flash"
 api_key_env = "GEMINI_API_KEY"
 count = 10
 
+[llm_fallback]
+# A single backup provider for every LLM call in the pipeline (keywords, relevance scoring, script writing).
+# When Gemini's free tier is still down after its own retries (docs/LOGGING.md: 429/500/502/503/504, waits
+# 4/10/25/45s), the SAME call is retried once more against this provider before giving up -- see docs/LOGGING.md
+# "LLM fallback provider" for exactly what gets logged when this happens.
+#
+# Off automatically until GROQ_API_KEY (or LLM_FALLBACK_API_KEY) is set in .env -- same "never a hard
+# requirement" pattern as [relevance]'s LLM step. `enabled = false` turns it off even with a key present.
+#
+# Default is Groq (api.groq.com) -- a different company from xAI's Grok, easy to mix up. Groq has a genuine
+# free developer tier (no credit card) and is an OpenAI-compatible drop-in swap, which is why the shape below
+# matches [keywords]/[relevance]/[script] exactly. Get a free key at https://console.groq.com/keys.
+enabled = true
+provider = "groq"
+base_url = "https://api.groq.com/openai/v1"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+
 [relevance]
 # Hybrid relevance scoring for asset review (docs/SCORING.md): a deterministic, local TF-IDF score (no network,
 # no rate limit, same answer every time) is computed for every pending asset. The LLM below is only asked for a

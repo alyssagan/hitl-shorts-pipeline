@@ -92,12 +92,33 @@ def parse_path_map(text: str) -> list[tuple[str, str]]:
     return out
 
 
+def build_llm_fallback(settings: dict[str, Any]) -> dict[str, Any] | None:
+    """A single backup LLM provider (config/pipeline.toml [llm_fallback], docs/LOGGING.md "LLM fallback
+    provider") that every LLM call in the pipeline -- keywords, relevance scoring, script writing -- can retry
+    against once, after its own primary provider (normally Gemini) is still failing after its normal retries.
+    Returns None (no fallback -- the pipeline's original behavior) unless a key for it is actually configured,
+    the same "never a hard requirement" pattern as relevance_scorer() below."""
+    cfg = settings.get("llm_fallback", {}) if isinstance(settings, dict) else {}
+    if not bool(cfg.get("enabled", True)):
+        return None
+    key = os.getenv("LLM_FALLBACK_API_KEY", "") or os.getenv(cfg.get("api_key_env", "GROQ_API_KEY"), "")
+    if not key:
+        return None
+    return {
+        "provider": cfg.get("provider", "groq"),
+        "base_url": os.getenv("LLM_FALLBACK_BASE_URL", cfg.get("base_url", "https://api.groq.com/openai/v1")),
+        "model": os.getenv("LLM_FALLBACK_MODEL", cfg.get("model", "llama-3.3-70b-versatile")),
+        "api_key": key,
+    }
+
+
 def build_default_registry(settings: dict[str, Any]) -> Registry:
     """Wire the built-in providers from config/pipeline.toml + environment."""
     mpt_cfg = settings.get("mpt", {})
     kw_cfg = settings.get("keywords", {})
     lib_cfg = settings.get("library", {})
     src_cfg = settings.get("sources", {})
+    fallback = build_llm_fallback(settings)
 
     def mpt() -> MptClient:
         return MptClient(
@@ -142,6 +163,7 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
             api_key=key,
             model=os.getenv("RELEVANCE_LLM_MODEL", rel_cfg.get("model", kw_cfg.get("model", "gemini-3.6-flash"))),
             batch_size=int(rel_cfg.get("batch_size", 25)),
+            fallback=fallback,
         )
 
     reg._relevance_scorer_factory = relevance_scorer
@@ -151,6 +173,7 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
         api_key=os.getenv("KEYWORD_LLM_API_KEY", "") or os.getenv(kw_cfg.get("api_key_env", "GEMINI_API_KEY"), ""),
         model=os.getenv("KEYWORD_LLM_MODEL", kw_cfg.get("model", "gpt-4o-mini")),
         count=int(kw_cfg.get("count", 10)),
+        fallback=fallback,
     ))
     script_cfg = settings.get("script", {})
 
@@ -167,6 +190,7 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
             model=os.getenv("SCRIPT_LLM_MODEL", script_cfg.get("model", "gemini-3.6-flash")),
             target_words=int(script_cfg.get("target_words", 260)),
             grounding_chars=int(script_cfg.get("grounding_chars", 12000)),
+            fallback=fallback,
         )
 
     reg.register_scenes("mpt", lambda: MptSceneStage(

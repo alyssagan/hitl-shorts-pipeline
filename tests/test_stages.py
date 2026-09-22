@@ -65,6 +65,55 @@ class KeywordTests(unittest.IsolatedAsyncioTestCase):
         out = await ManualKeywordStage().run(job, StageContext(Path(".")))
         self.assertEqual([k.term for k in out], ["Cats", "purring"])
 
+    async def test_manual_stage_with_no_seeds_traces_the_subject_fallback(self):
+        """Where the keywords came from (docs/LOGGING.md): no --keywords-file at all."""
+        stage = ManualKeywordStage()
+        await stage.run(Job(subject="true crime jack the ripper"), StageContext(Path(".")))
+        self.assertIn("no --keywords-file was given", stage.last_trace["method"])
+
+    async def test_manual_stage_surfaces_keywords_file_provenance_into_its_trace(self):
+        """A --keywords-file made by scripts/make_keywords.py carries which API/model/tokens produced it
+        (its .meta.json sidecar, read by poc.py into job.providers.options["keywords_provenance"]) all the way
+        into the decision log's `proposed_keywords` entry -- docs/LOGGING.md "Where a keywords file came from"."""
+        job = Job(subject="jack the ripper")
+        job.providers.options["seed_keywords"] = ["whitechapel 1888"]
+        job.providers.options["keywords_provenance"] = {
+            "file": "library/keywords/jack-the-ripper.txt", "provider": "primary", "model": "gemini-3.6-flash",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "generated_at": "2026-09-22T00:00:00Z",
+            "usage": {"prompt_tokens": 300, "completion_tokens": 120, "total_tokens": 420},
+        }
+        stage = ManualKeywordStage()
+        await stage.run(job, StageContext(Path(".")))
+        self.assertEqual(stage.last_trace["provider"], "primary")
+        self.assertEqual(stage.last_trace["model"], "gemini-3.6-flash")
+        self.assertEqual(stage.last_trace["usage"]["total_tokens"], 420)
+        self.assertEqual(stage.last_trace["file"], "library/keywords/jack-the-ripper.txt")
+
+    async def test_manual_stage_with_a_file_but_no_sidecar_still_traces_the_file_path(self):
+        """A hand-written keywords file (no scripts/make_keywords.py, no .meta.json) still says *where* the
+        keywords came from, even with no model/tokens to report."""
+        job = Job(subject="jack the ripper")
+        job.providers.options["seed_keywords"] = ["whitechapel 1888"]
+        job.providers.options["keywords_provenance"] = {"file": "library/keywords/hand-written.txt"}
+        stage = ManualKeywordStage()
+        await stage.run(job, StageContext(Path(".")))
+        self.assertEqual(stage.last_trace["file"], "library/keywords/hand-written.txt")
+        self.assertNotIn("model", stage.last_trace)
+
+    async def test_manual_stage_does_not_leak_trace_between_instances(self):
+        """register_keywords("manual", ManualKeywordStage) hands out a fresh instance per run (registry.py) --
+        this pins down that last_trace is per-instance, not a class attribute two jobs could share."""
+        job_a = Job(subject="a")
+        job_a.providers.options["seed_keywords"] = ["x"]
+        job_a.providers.options["keywords_provenance"] = {"file": "a.txt", "model": "model-a"}
+        job_b = Job(subject="b")
+        job_b.providers.options["seed_keywords"] = ["y"]
+        stage_a, stage_b = ManualKeywordStage(), ManualKeywordStage()
+        await stage_a.run(job_a, StageContext(Path(".")))
+        await stage_b.run(job_b, StageContext(Path(".")))
+        self.assertEqual(stage_a.last_trace.get("model"), "model-a")
+        self.assertNotIn("model", stage_b.last_trace)
+
     async def test_llm_stage_sends_feedback_and_auth(self):
         seen = {}
         def handler(req: httpx.Request):
@@ -201,3 +250,9 @@ class RenderTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManualFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_no_single_words_or_filler(self):
+        out = await ManualKeywordStage().run(Job(subject="true crime jack the ripper"), StageContext(Path(".")))
+        self.assertEqual([k.term for k in out], ["true crime jack the ripper", "jack ripper"])

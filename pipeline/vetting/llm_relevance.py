@@ -85,6 +85,7 @@ class LlmRelevanceScorer:
     timeout: float = 90
     transport: httpx.AsyncBaseTransport | None = None
     retry_waits: tuple[float, ...] | None = None
+    fallback: dict | None = None    # config/pipeline.toml [llm_fallback], via registry.build_llm_fallback()
     method: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -106,7 +107,7 @@ class LlmRelevanceScorer:
                 try:
                     resp = await post_chat(client, f"{self.base_url}/chat/completions", headers,
                                            {"model": self.model, "temperature": 0.0, "messages": [{"role": "user", "content": prompt}]},
-                                           what=f"relevance batch {n}/{len(batches)}", waits=self.retry_waits)
+                                           what=f"relevance batch {n}/{len(batches)}", waits=self.retry_waits, fallback=self.fallback)
                     if resp.status_code != 200:
                         raise ValueError(f"HTTP {resp.status_code}: {resp.text[:200]}")
                     text = resp.json()["choices"][0]["message"]["content"] or ""

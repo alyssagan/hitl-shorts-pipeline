@@ -82,6 +82,23 @@ cost". `scripts/make_keywords.py` runs before any job exists, so it has no decis
 prints its one call's tokens to the terminal instead. This finishes the "Tokens" and "Cost" bullets from the
 backlog item below; "Is it done? What's next?" (a `/status` page) and the Slack piece (item A) are still open.
 
+## Done: LLM fallback provider + keywords-file provenance (2026-09-22)
+Prompted by "if gemini doesn't work, can we use grok" and "is [the keywords script] logged -- which api, which
+model, tokens" -- checked first rather than assumed: no fallback existed (each provider only retried itself),
+and neither `GROQ_API_KEY` nor an xAI/Grok key was in `.env` (xAI's Grok API is billed per token with no free
+tier; Groq, a different company, has a genuine free developer tier and was already an idea in this file). Added
+both, scoped to free-tier-only per standing project rules:
+- **Backup provider**: `[llm_fallback]` in `config/pipeline.toml`, defaulting to Groq. Every LLM call in the
+  pipeline (keywords, relevance, script) is retried once against it after the primary is still failing after
+  its own retries (`pipeline/stages/llm_http.py::post_chat()`). Off automatically until `GROQ_API_KEY` is set.
+  See docs/LOGGING.md "LLM fallback provider" for exactly what gets logged (which provider actually answered,
+  never silently attributed to the wrong one).
+- **Keywords-file provenance**: `scripts/make_keywords.py` (which runs before any job exists) now writes a
+  `.meta.json` sidecar next to every keywords file -- provider, model, tokens, when. `poc.py` reads it when you
+  use `--keywords-file`, and `ManualKeywordStage` carries it into that job's `proposed_keywords` decision-log
+  entry, so "which API, which model, tokens, where these came from" is answered from the job's own permanent
+  record, not a terminal scrollback from weeks earlier. See docs/LOGGING.md "Where a keywords file came from".
+
 ## Ideas backlog (added 2026-09-20, not started)
 
 ### A. Notifications (Slack, readable on a phone)

@@ -113,10 +113,63 @@ totals and a per-model breakdown, the same way `/timing` rolls up stage duration
 - `scripts/poc.py` prints a short version automatically when a job finishes (success or failure), right after
   the timing summary -- nothing to print if the job made no LLM calls at all.
 - `scripts/make_keywords.py` runs *before* any job exists (it just writes a keywords file), so it has no decision
-  log to write into; it prints its one call's tokens directly to the terminal instead.
+  log to write into; it prints its one call's tokens directly to the terminal and also writes them into a
+  `.meta.json` sidecar next to the keywords file -- see "Where a keywords file came from" below for how that
+  reaches a job's decision log once the file is actually used.
 - Non-LLM API calls (Wikipedia, Commons, Pexels, Pixabay, Unsplash, NASA, Archive, LOC, Smithsonian) were already
   logged in full to `sources/<source>/requests.jsonl` -- see the table at the top of this document -- this
   section is specifically about the LLM calls, which weren't counted anywhere before.
+
+## LLM fallback provider
+Every LLM call already retries the *same* provider a few times on 429/500/502/503/504 (see the debugging
+checklist above). `[llm_fallback]` in `config/pipeline.toml` adds a second line of defense: a single backup
+provider that a call is retried against **once**, only after the primary is still failing after its own
+retries. Off automatically until a key is set (`GROQ_API_KEY`, or `LLM_FALLBACK_API_KEY` to override which env
+var), same "never a hard requirement" pattern as `[relevance]`'s LLM step -- no key, no fallback, nothing else
+changes.
+
+The default backup is **Groq** (`api.groq.com`) -- a different company from xAI's **Grok**, easy to mix up.
+Groq has a genuine free developer tier (no credit card) and is an OpenAI-compatible drop-in swap, which is why
+`[llm_fallback]`'s shape matches `[keywords]`/`[relevance]`/`[script]` exactly (`base_url`, `model`,
+`api_key_env`). Get a free key at [console.groq.com/keys](https://console.groq.com/keys) and put it in `.env`
+as `GROQ_API_KEY=...`.
+
+When it fires, you'll see it in the activity log:
+
+```
+WARN  llm  script writer: gemini-3.6-flash unavailable (503) after retries; trying backup provider groq (llama-3.3-70b-versatile)
+INFO  llm  script writer: backup provider groq (llama-3.3-70b-versatile) answered
+```
+
+and in the decision log: the `stage`'s own trace (`generated_script_and_scenes`'s `logic`, `proposed_keywords`'s
+`logic`) records `model`/`endpoint` as **whichever provider actually answered**, plus a `fell_back_from` note
+with what the primary would have been, and a `provider` field -- never silently attributed to Gemini when it
+wasn't Gemini that answered. The `llm_call` entry (see "Tokens / cost" above) is tagged the same way, with
+`what` suffixed `(fallback: groq)`, so tokens/cost are never miscounted against the wrong provider or model
+either. `scripts/make_keywords.py`, which has no decision log of its own, prints the same information and
+records it in its `.meta.json` sidecar (below) instead.
+
+## Where a keywords file came from
+`scripts/make_keywords.py` writes `<file>.meta.json` next to every keywords file it generates -- which
+provider/model answered, tokens used, and when -- since that script runs before any job exists and has nowhere
+else to put it. When you later run `poc.py --keywords manual --keywords-file <file>`, `poc.py` looks for that
+sidecar and, if it's there, passes it straight through as `job.providers.options["keywords_provenance"]`.
+`pipeline/stages/keywords/manual.py`'s `ManualKeywordStage` then puts it into its own `last_trace`, which lands
+in the `proposed_keywords` decision-log entry's `logic` -- the exact same field the LLM-generated-keywords path
+(`--keywords llm`) already uses for its own model/endpoint/prompt:
+
+```json
+{"action": "proposed_keywords", "logic": {"method": "seed keywords read from a file (--keywords-file)",
+ "file": "library/keywords/jack-the-ripper.txt", "provider": "primary", "model": "gemini-3.6-flash",
+ "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "generated_at": "2026-09-22T21:03:40Z",
+ "usage": {"prompt_tokens": 640, "completion_tokens": 210, "total_tokens": 850}}}
+```
+
+A hand-written keywords file (no `make_keywords.py`, no sidecar) still records *where* the keywords came from
+-- just the file path, with no model/tokens to report, since none were spent. No `--keywords-file` at all
+records that too (`"the subject and the subject without filler words (no --keywords-file was given)"`). Either
+way, "which API, which model, tokens, where the keywords came from" is answered by looking at one job's own
+decision log, not by remembering which terminal session generated the file weeks earlier.
 
 ## Relevance scoring and "search again"
 The `relevance` component logs, each vetting round: how many pending assets got a free, local TF-IDF baseline score; how many

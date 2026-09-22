@@ -302,10 +302,24 @@ def main() -> None:
     api = Api(args.api)
     LOG["show"], LOG["level"] = not args.quiet, "DEBUG" if args.debug else "INFO"
     file_terms: list[str] = []
+    keywords_provenance: dict | None = None
     if args.keywords_file:
         file_terms = [ln.strip().strip("\"'") for ln in Path(args.keywords_file).expanduser().read_text(encoding="utf-8").splitlines()
                       if ln.strip() and not ln.strip().startswith("#")]
         print(f"Read {len(file_terms)} keyword(s) from {args.keywords_file}")
+        # Where these keywords actually came from (docs/LOGGING.md "Where a keywords file came from"): at
+        # minimum the file path; if scripts/make_keywords.py made this file, its .meta.json sidecar next to it
+        # also has which API/model/tokens produced it, and that travels into this job's decision log below.
+        keywords_provenance = {"file": str(args.keywords_file)}
+        meta_path = Path(args.keywords_file).expanduser().with_suffix(".meta.json")
+        if meta_path.exists():
+            try:
+                keywords_provenance.update(json.loads(meta_path.read_text(encoding="utf-8")))
+                usage_bit = f", {keywords_provenance['usage']['total_tokens']} tokens" if keywords_provenance.get("usage") else ""
+                print(f"  Provenance: {keywords_provenance.get('provider', '?')}/{keywords_provenance.get('model', '?')}{usage_bit} "
+                      f"({meta_path})")
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"  (couldn't read provenance sidecar {meta_path}: {e})")
     reviewer = args.reviewer or ask("Your name (recorded in the decision log next to your choices): ")
 
     if args.resume:
@@ -322,6 +336,8 @@ def main() -> None:
         options = {"min_relevance": args.min_relevance}
         if file_terms and args.keywords == "manual":
             options["seed_keywords"] = file_terms          # Gate 1 will show exactly your file's keywords
+            if keywords_provenance:
+                options["keywords_provenance"] = keywords_provenance
         if args.urls:
             text = Path(args.urls).expanduser().read_text(encoding="utf-8")
             options["urls"] = [dict(zip(("url", "note", "position"), [p.strip() for p in ln.split("|")]))
