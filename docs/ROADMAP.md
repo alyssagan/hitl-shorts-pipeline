@@ -135,3 +135,47 @@ Goal: know what the pipeline is doing without watching a terminal.
 - Steps: (1) a jobs dashboard (state, waiting-on, age) in the browser, (2) a start-a-story form in the browser so terminals aren't needed, (3) a global
   cap on concurrent renders and LLM calls, (4) test two jobs in parallel end to end.
 - A batch mode is a natural extension of the keyword files: a list of subjects in, one job each, all waiting at Gate 1 in the dashboard.
+
+### D. Searchable logs in Postgres, with a UI (added 2026-09-22, not started)
+Goal: "show me every job where Groq was used as a fallback", "every HIGH-risk asset I approved last month",
+"every run that took over 5 minutes" -- answerable by typing into a search box, across every project's history,
+instead of grepping `decisions.jsonl` files one project folder at a time.
+
+- **Files stay the source of truth.** `decisions.jsonl` is hash-chained specifically so nothing can be edited
+  after the fact (`pipeline/core/decisions.py::verify()`) -- that property only means something if the file is
+  still the thing anyone would trust in a dispute. Postgres is a **search index built from the files**, never
+  the only copy of anything: it can be dropped and rebuilt from `projects/*/decisions.jsonl` (and the activity
+  and request logs) at any time with no data loss, the same relationship a search engine has to the documents
+  it indexes.
+- **New docker-compose service**: `postgres:16-alpine` (or newer LTS at build time) with a named volume so data
+  survives `docker compose down`/`up`. New `[postgres]` section in `config/pipeline.toml` (host/port/db/user)
+  and `POSTGRES_PASSWORD` in `.env`. Not a hard dependency of the pipeline itself -- if Postgres is down,
+  jobs still run and the files are still written; only search/the logs UI degrade, same "never a hard
+  requirement" pattern the LLM/relevance features already follow.
+- **Schema** (sketch, refine when building): one row per decision-log entry (`job_id`, `seq`, `at`, `stage`,
+  `action`, `actor_type`, `actor_name`, `actor_model`, `decision`, `reason`, and the free-form `subject`/
+  `logic`/`inputs`/`outputs` as `jsonb` columns so nothing has to be flattened ahead of time), indexed on
+  `job_id`, `at`, `stage`, `action`, `actor_type`, plus a `tsvector` generated column over `reason` + the
+  jsonb text for free-text search. Separate tables for activity-log lines and source request logs (both in
+  scope per the answer to this question), each keyed by `job_id` the same way, so a search can join across
+  "this job's decisions AND its activity log AND what it actually requested."
+- **Ingestion**: best-effort dual-write -- right after `DecisionLog.record()` (and the activity/request log
+  writers) append to their file, also upsert the same row into Postgres, wrapped so a DB hiccup can never fail
+  a job (exactly how `core/usage.py` and `core/joblog.py` already treat their own writes as "must never break a
+  run"). Plus a standalone `scripts/reindex_logs.py` that walks every `projects/*/` folder and rebuilds the
+  whole index from scratch -- the recovery path after schema changes, after Postgres was down for a while, or
+  just to sanity-check the index matches the files.
+- **UI**: a new `/logs` page in the pipeline's existing web app (same self-contained-HTML pattern as
+  `pipeline/api/review_page.py`), backed by a new `GET /logs/search` API route -- filters for job/project,
+  stage, actor type, action, date range, risk, provider/model, free-text search over reason/logic, each result
+  linking back to that job's `/review/<id>` or `/jobs/<id>/decisions?format=md`. Not a replacement for the
+  per-project `DECISIONS.md`/asset-review page, which stay -- this is the "search across everything" view they
+  don't offer.
+- **Open questions to settle when building**: whether DEBUG-level activity-log lines are worth indexing at all
+  (high volume, rarely searched -- maybe INFO and up only, same default the activity log already uses); how far
+  back "everything" reaches (all projects on disk, presumably, since there's no retention/archival policy yet);
+  whether the `/logs` page needs its own access control, given the pipeline API currently has none and is meant
+  for local/trusted-network use only.
+- Rough build order: (1) the Postgres service + schema + `reindex_logs.py` (get existing history searchable
+  first, no live-write risk yet), (2) dual-write hooks so new jobs stay indexed as they run, (3) the
+  `GET /logs/search` API, (4) the `/logs` UI page.
