@@ -139,17 +139,22 @@ Still to judge by watching and comparing runs (record in OPTIONS_TO_TRY.md):
 
 _(nothing yet)_
 
-## 16. Relevance scoring reads metadata, not the picture (updated: LLM scoring added)
-As of the semantic relevance scorer (`docs/SCORING.md`), the default scoring judges *meaning*, not just shared words, which fixes the
-worst cases of this limitation (a generic caption with the right words scoring high; a correct photo with a different wording scoring
-low). But both the LLM scorer and its keyword-matching fallback only ever see the asset's title/description/tags/page URL, never the
-image or video itself. An untitled photo (common on stock and Flickr-style sources) can't be confirmed relevant by either method, and
-a wrongly-captioned photo of the wrong place could still score well. That is why off-topic items stay numbered and approvable rather
-than being removed. A later option is a real vision check of the thumbnail (see OPTIONS_TO_TRY). Also: stock sites (Pexels, Pixabay,
-Unsplash) suit generic b-roll, not named historical events, whatever they score.
+## 16. Relevance scoring reads metadata, not the picture (updated: hybrid TF-IDF + LLM scoring)
+As of the hybrid relevance scorer (`docs/SCORING.md`), most assets are scored by a deterministic local TF-IDF match, with an
+LLM's meaning-aware judgement reserved for the borderline ones -- which fixes the worst cases of the original word-matching
+limitation (a generic caption with the right words scoring high; a correct photo with a different wording scoring low) for
+those borderline cases specifically. But every scorer here -- TF-IDF, the LLM, and the plain keyword-match last resort -- only
+ever sees the asset's title/description/tags/page URL, never the image or video itself. An untitled photo (common on stock and
+Flickr-style sources) can't be confirmed relevant by any of them, and a wrongly-captioned photo of the wrong place could still
+score well. That is why off-topic items stay numbered and approvable rather than being removed. A later option is a real
+vision check of the thumbnail (see OPTIONS_TO_TRY). Also: stock sites (Pexels, Pixabay, Unsplash) suit generic b-roll, not
+named historical events, whatever they score.
 
-## 17. LLM relevance scoring adds a dependency and (small) cost
-With `[relevance] enabled = true` (the default), asset review needs a working Gemini free-tier key and network access; without a
-key it silently falls back to keyword-matching (`relevance_method` on each asset says which one ran), so a run never fails for this
-reason, but scores get less accurate. It also adds a handful of LLM calls per run (batched, ~10 per 240 assets) and is exposed to
-the same free-tier rate limits and occasional "busy" 429/503s as keyword and script generation (auto-retried; see docs/LOGGING.md).
+## 17. LLM relevance scoring, where it's still used, adds a dependency and (small) cost
+The TF-IDF baseline (`docs/SCORING.md`) needs nothing -- no key, no network, no rate limit -- and scores every pending asset
+every round. The LLM is now only consulted for the (usually much smaller) set of borderline assets near the threshold. With
+`[relevance] enabled = true` (the default) and a borderline asset to score, that call needs a working Gemini free-tier key and
+network access; without a key it silently falls back to the TF-IDF score (`relevance_method` on each asset says which scorer
+actually ran), so a run never fails for this reason, but the borderline calls it would have refined stay unrefined. The LLM
+calls that do happen are exposed to the same free-tier rate limits and occasional "busy" 429/503s as keyword and script
+generation (auto-retried; see docs/LOGGING.md), bounded by `max_llm_per_round` even in a worst case.

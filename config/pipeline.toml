@@ -45,9 +45,12 @@ api_key_env = "GEMINI_API_KEY"
 count = 10
 
 [relevance]
-# Semantic relevance scoring for asset review (docs/SCORING.md): a free-tier LLM judges whether each asset
-# actually relates to your topic in meaning, not just shared words. Runs in batches, so a 240-asset review is
-# about 10 calls. Falls back to word-matching automatically (per asset) if disabled, unkeyed, or a batch fails.
+# Hybrid relevance scoring for asset review (docs/SCORING.md): a deterministic, local TF-IDF score (no network,
+# no rate limit, same answer every time) is computed for every pending asset. The LLM below is only asked for a
+# second opinion on assets whose TF-IDF score is "borderline" -- within `borderline_band` of `min_relevance` --
+# so most runs need only a handful of LLM calls, not one batch per asset. Falls back to word-matching (per
+# asset) if TF-IDF finds no usable text; falls back to the TF-IDF score (per asset) if the LLM is disabled,
+# unkeyed, or a batch fails.
 enabled = true
 # Leave base_url/model unset to reuse the [keywords] Gemini config above (same free tier). RELEVANCE_LLM_API_KEY
 # overrides the key from .env if set, otherwise api_key_env (defaults to the same GEMINI_API_KEY as [keywords]).
@@ -55,6 +58,13 @@ enabled = true
 # model = "gemini-3.6-flash"
 api_key_env = "GEMINI_API_KEY"
 batch_size = 25
+# How close to min_relevance (0..1) a TF-IDF score has to be to count as "borderline" and get a second LLM
+# opinion. Bigger = more LLM calls but fewer TF-IDF-only judgment calls near the threshold.
+borderline_band = 0.15
+# Hard cap on how many borderline assets get sent to the LLM in a single vetting round, even if more qualify.
+# The ones closest to the threshold (hardest to call) go first; the rest simply keep their TF-IDF score this
+# round and can still be picked up on a later "search again" round.
+max_llm_per_round = 40
 
 [script]
 # Our own script writer (longer and better grounded than MoneyPrinterTurbo's). Uses any

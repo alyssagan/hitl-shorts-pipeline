@@ -42,3 +42,17 @@ the next line has the traceback). The third column is the component: `stage`, `s
 5. Render problems: `mpt` lines show the render task's state and progress; `docker compose logs mpt` has the detail.
 
 Secrets are never written: any detail named key, api_key, token, secret, password or authorization shows as `***`, and URLs have keys stripped.
+
+## Relevance scoring and "search again"
+The `relevance` component logs, each vetting round: how many pending assets got a free, local TF-IDF baseline score; how many
+already had a good LLM score from an earlier round and were kept, not re-sent; how many TF-IDF called confidently enough to
+skip the LLM; and how many were actually borderline and sent to the LLM this round (and whether the per-round cap trimmed that
+list) -- see docs/SCORING.md "Borderline: who gets the LLM" and "Only scoring what's necessary". If you're watching the
+free-tier rate limit, the last line is the one to check: a round with no "scoring N asset(s) with ..." line made zero LLM calls.
+
+```
+INFO  relevance  tfidf baseline scored 240 of 240 pending asset(s)
+INFO  relevance  keeping 187 previously LLM-scored asset(s) from an earlier round
+INFO  relevance  41 asset(s) are clearly scored by TF-IDF (not within 0.15 of the 50% threshold), skipping the LLM for them
+INFO  relevance  scoring 12 asset(s) with gemini-3.6-flash in 1 batch(es)
+```

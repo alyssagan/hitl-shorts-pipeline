@@ -243,7 +243,7 @@ STOPWORDS = {"a", "an", "the", "of", "in", "on", "at", "and", "or", "to", "for",
              "image", "images", "picture", "pictures", "stock", "how", "why", "what", "documentary"}
 
 
-def _tokens(text: str) -> set[str]:
+def tokens(text: str) -> set[str]:
     out = set()
     for w in re.findall(r"[a-z0-9]+", text.lower()):
         out.add(w)
@@ -267,7 +267,7 @@ def asset_text(a: Asset) -> str:
 
 def relevance(a: Asset, topic_terms: list[str]) -> tuple[float | None, str]:
     """Best score over the keywords: the share of that keyword's meaningful words found in the asset's own text."""
-    have = _tokens(asset_text(a))
+    have = tokens(asset_text(a))
     best, why = None, ""
     for term in topic_terms:
         want = [w for w in re.findall(r"[a-z0-9]+", term.lower()) if w not in STOPWORDS]
@@ -281,18 +281,30 @@ def relevance(a: Asset, topic_terms: list[str]) -> tuple[float | None, str]:
 
 
 def vet_asset(a: Asset, all_assets: list[Asset], topic_terms: list[str] | None = None, min_relevance: float = RELEVANCE_MIN,
-              llm_scores: dict[str, tuple[float, str]] | None = None) -> Vetting:
+              llm_scores: dict[str, tuple[float, str]] | None = None,
+              tfidf_scores_batch: dict[str, tuple[float, str]] | None = None) -> Vetting:
     flags: list[Flag] = []
     for _rid, _desc, fn in RULES:
         flags.extend(fn(a, all_assets))
+    prev = a.vetting                              # this asset's vetting from BEFORE this call (a prior round, if any)
     method = ""
     if llm_scores and a.id in llm_scores:
         rel, rel_why = llm_scores[a.id]
         method = "llm-semantic"
+    elif prev is not None and prev.relevance_method == "llm-semantic":
+        # Already had a good semantic score from an earlier round (e.g. before a "search again") and wasn't
+        # re-sent to the LLM this time -- keep it rather than silently downgrading to a cruder score.
+        rel, rel_why, method = prev.relevance, prev.relevance_why, prev.relevance_method
+    elif tfidf_scores_batch and a.id in tfidf_scores_batch:
+        # The deterministic local baseline (docs/SCORING.md): used for every asset the LLM wasn't asked to
+        # double-check this round, either because it's off/unkeyed or because the score wasn't borderline.
+        rel, rel_why = tfidf_scores_batch[a.id]
+        method = "tfidf"
     else:
         rel, rel_why = relevance(a, topic_terms or [])
         if rel is not None:
-            method = "keyword-match" + (" (LLM unavailable/failed for this item)" if llm_scores is not None else "")
+            method = "keyword-match" + (" (algorithmic score unavailable for this item)" if tfidf_scores_batch is not None
+                                        else " (LLM unavailable/failed for this item)" if llm_scores is not None else "")
     if rel is not None and rel < min_relevance:
         flags.append(Flag(rule="RELEVANCE_LOW", severity="low",
                           message=f"Relevance score {round(rel * 100)}% is under the {round(min_relevance * 100)}% threshold, so it is probably not about your topic.",
@@ -312,6 +324,7 @@ def vet_asset(a: Asset, all_assets: list[Asset], topic_terms: list[str] | None =
 
 
 def vet_all(assets: list[Asset], topic_terms: list[str] | None = None, min_relevance: float = RELEVANCE_MIN,
-            llm_scores: dict[str, tuple[float, str]] | None = None) -> None:
+            llm_scores: dict[str, tuple[float, str]] | None = None,
+            tfidf_scores_batch: dict[str, tuple[float, str]] | None = None) -> None:
     for a in assets:
-        a.vetting = vet_asset(a, assets, topic_terms, min_relevance, llm_scores)
+        a.vetting = vet_asset(a, assets, topic_terms, min_relevance, llm_scores, tfidf_scores_batch)

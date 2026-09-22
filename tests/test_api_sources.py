@@ -130,7 +130,11 @@ class RelevanceScorerWiringTests(unittest.TestCase):
             reg.register_source("commons", lambda: CommonsSource(per_query=5))
             reg._relevance_scorer_factory = lambda: LlmRelevanceScorer(
                 "http://llm", "key", "m", transport=httpx.MockTransport(llm_handler), retry_waits=())
-            with TestClient(create_app(Orchestrator(JobStore(tmp), reg), settings={})) as client:
+            # A wide borderline band forces every asset to get the LLM's (stubbed) opinion regardless of its real
+            # TF-IDF score, so this test can check the wiring (the configured scorer is actually used and its
+            # score wins) without depending on real TF-IDF math for "cats" vs these fixtures.
+            settings = {"relevance": {"borderline_band": 1.0}}
+            with TestClient(create_app(Orchestrator(JobStore(tmp), reg, settings=settings), settings=settings)) as client:
                 r = client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
                                                "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
                 jid = r.json()["id"]

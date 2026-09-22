@@ -30,6 +30,7 @@ from ..stages.base import StageContext
 from ..stages.registry import Registry
 from ..stages.sourcing import write_credits, write_manifests
 from ..vetting.rules import RELEVANCE_MIN, RULES, SCORING_FORMULA, STOPWORDS, VERSION as VETTING_VERSION, clean_term, vet_all
+from ..vetting.tfidf_relevance import tfidf_scores
 
 VETTER = machine("vetting-rules", VETTING_VERSION)
 MATCHER = machine("clip-matcher", "1")
@@ -359,11 +360,11 @@ class Orchestrator:
                     job = await self._commit(job_id, state, "sourcing_done", lambda j: self._apply_sourcing(j, stage, res))
                     # Vetting is quick and always follows sourcing: do it right away. The relevance scorer (if
                     # configured) needs an LLM call, so it runs here, before the (sync) vetting commit.
-                    llm_scores = await self._score_relevance(job)
-                    return await self._commit(job_id, JobState.VETTING_RUNNING, "vetting_done", lambda j: self._apply_vetting(j, llm_scores))
+                    scores = await self._score_relevance(job)
+                    return await self._commit(job_id, JobState.VETTING_RUNNING, "vetting_done", lambda j: self._apply_vetting(j, scores))
                 if state is JobState.VETTING_RUNNING:
-                    llm_scores = await self._score_relevance(job)
-                    return await self._commit(job_id, state, "vetting_done", lambda j: self._apply_vetting(j, llm_scores))
+                    scores = await self._score_relevance(job)
+                    return await self._commit(job_id, state, "vetting_done", lambda j: self._apply_vetting(j, scores))
                 if state is JobState.SCENES_RUNNING:
                     stage = self.registry.scene_stage(job.providers.scenes)
                     res = await stage.run(job, ctx)
@@ -419,25 +420,74 @@ class Orchestrator:
                       subject={"title": r.title, "source": r.source},
                       outputs={"file": r.rel_path, "url": r.url, "license": r.license, "chars": r.chars})
 
-    async def _score_relevance(self, job: Job) -> dict[str, tuple[float, str]]:
-        """Semantic relevance via the configured LLM (pipeline/vetting/llm_relevance.py), scoped to assets that
-        still need a decision. Returns {} if no scorer is configured, there's nothing to score, or every batch
-        failed -- vet_all() falls back to keyword-matching per asset in that case, so this never blocks a run."""
-        scorer = self.registry.relevance_scorer()
-        pending = [a for a in job.assets if a.status == "pending"]
-        terms = [k.term for k in job.approved_keywords] + list(job.providers.options.get("extra_queries", []))
-        if scorer is None or not pending or not terms:
-            return {}
-        try:
-            return await scorer.score(job, pending, terms)
-        except Exception as exc:  # noqa: BLE001 - scoring must never fail a run; vet_all() falls back per asset
-            joblog.warn("relevance", f"LLM relevance scoring unavailable this round, using keyword-matching: {type(exc).__name__}: {exc}")
-            return {}
+    async def _score_relevance(self, job: Job) -> tuple[dict[str, tuple[float, str]], dict[str, tuple[float, str]] | None]:
+        """Two-tier relevance scoring (docs/SCORING.md): a deterministic TF-IDF baseline (pipeline/vetting/
+        tfidf_relevance.py) is computed locally, for free, for every pending asset -- no network, no rate limit,
+        no "tier" to run out of. The LLM (pipeline/vetting/llm_relevance.py), if configured, is then asked for a
+        second, meaning-aware opinion only on the assets whose TF-IDF score is "borderline": close enough to the
+        approval threshold (`[relevance] borderline_band` in config/pipeline.toml) that the cheap score alone
+        isn't a confident call. A hard per-round cap (`max_llm_per_round`) bounds free-tier calls even if many
+        assets are borderline at once; the closest-to-the-threshold ones win the cap, since those are the ones
+        the algorithm is least sure about.
 
-    def _apply_vetting(self, job: Job, llm_scores: dict[str, tuple[float, str]] | None = None) -> None:
+        As before, "search again" re-enters vetting with the same still-pending assets plus new ones, and an
+        asset that already has a good LLM score from an earlier round is never resent or silently downgraded
+        (vet_asset() in rules.py keeps its prior llm-semantic score when it isn't resent this round).
+
+        Returns (tfidf_scores, llm_scores_or_None). llm_scores is None only when no LLM scorer is configured at
+        all (vet_all() then labels every asset plain "tfidf", not framed as a failure); otherwise it's a dict
+        (possibly {}) of just the borderline assets that were actually asked -- assets missing from it, including
+        every non-borderline one, simply keep their TF-IDF score, which was always the intended outcome for them."""
+        terms = [k.term for k in job.approved_keywords] + list(job.providers.options.get("extra_queries", []))
+        pending = [a for a in job.assets if a.status == "pending"]
+        if not terms or not pending:
+            return {}, None
+        tfidf = tfidf_scores(pending, terms)
+        joblog.info("relevance", f"tfidf baseline scored {len(tfidf)} of {len(pending)} pending asset(s)")
+
+        scorer = self.registry.relevance_scorer()
+        if scorer is None:
+            return tfidf, None
+
+        rel_cfg = self.settings.get("relevance", {}) if isinstance(self.settings, dict) else {}
+        band = float(rel_cfg.get("borderline_band", 0.15))
+        cap = int(rel_cfg.get("max_llm_per_round", 40))
+        min_rel = float(job.providers.options.get("min_relevance", RELEVANCE_MIN))
+
+        need, reused, confident = [], 0, 0
+        for a in pending:
+            if a.vetting is not None and a.vetting.relevance_method == "llm-semantic":
+                reused += 1
+                continue
+            score = tfidf.get(a.id, (None, ""))[0]
+            if score is not None and abs(score - min_rel) > band:
+                confident += 1                          # TF-IDF alone is confident enough; save the LLM call
+                continue
+            need.append(a)
+        if reused:
+            joblog.info("relevance", f"keeping {reused} previously LLM-scored asset(s) from an earlier round")
+        if confident:
+            joblog.info("relevance", f"{confident} asset(s) are clearly scored by TF-IDF (not within {band} of the "
+                                     f"{round(min_rel * 100)}% threshold), skipping the LLM for them")
+        if len(need) > cap:
+            need.sort(key=lambda a: abs((tfidf.get(a.id, (min_rel, ""))[0]) - min_rel if tfidf.get(a.id) else 0.0))
+            joblog.warn("relevance", f"{len(need)} borderline asset(s) exceed the per-round cap of {cap}; scoring the "
+                                     f"{cap} closest to the threshold this round, the rest keep their TF-IDF score for now")
+            need = need[:cap]
+        if not need:
+            return tfidf, {}
+        try:
+            llm_scores = await scorer.score(job, need, terms)
+            return tfidf, llm_scores
+        except Exception as exc:  # noqa: BLE001 - scoring must never fail a run; vet_all() falls back to tfidf per asset
+            joblog.warn("relevance", f"LLM relevance scoring unavailable this round, using the TF-IDF score instead: {type(exc).__name__}: {exc}")
+            return tfidf, {}
+
+    def _apply_vetting(self, job: Job, scores: tuple[dict[str, tuple[float, str]], dict[str, tuple[float, str]] | None] | None = None) -> None:
+        tfidf_scores_batch, llm_scores = scores if scores is not None else ({}, None)
         terms = [k.term for k in job.approved_keywords] + list(job.providers.options.get("extra_queries", []))
         min_rel = float(job.providers.options.get("min_relevance", RELEVANCE_MIN))
-        vet_all(job.assets, terms, min_rel, llm_scores)
+        vet_all(job.assets, terms, min_rel, llm_scores, tfidf_scores_batch)
         by_risk: dict[str, int] = {}
         for a in job.assets:
             r = a.vetting.risk if a.vetting else "unvetted"

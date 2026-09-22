@@ -130,10 +130,16 @@ function card(a){
     : h("img",{src:`/jobs/${JOB}/assets/${a.id}/file`,loading:"lazy",alt:a.title||"",onclick:()=>lightbox(a)});
   const flags = (v.flags||[]).map(f => h("div",{class:"flag"}, h("b",{}, f.rule+" ("+f.severity+")"), ": ", f.message,
                    h("div",{class:"meta"},"evidence: "+f.evidence)));
+  const methodLabel = {
+    "llm-semantic": "scored by: LLM (judged meaning, not just shared words)",
+    "tfidf": "scored by: TF-IDF (local, deterministic match against the approved keywords)",
+  };
+  const m = (v.relevance_method||"").split(" (")[0];
+  const scoredBy = methodLabel[m] || (v.relevance_method ? `scored by: ${v.relevance_method}` : "scored by: (not scored)");
   const why = h("details",{}, h("summary",{},"Why this score and risk"),
     h("div",{class:"why"},
-      `Relevance score: ${pct(score(a))}  (threshold ${pct(minScore)})\n${v.relevance_why||"(no keyword to score against)"}\n` +
-      `Formula: best approved keyword, share of its words found in title/description/tags/page URL. See docs/SCORING.md.\n\n` +
+      `Relevance score: ${pct(score(a))}  (threshold ${pct(minScore)})\n${scoredBy}\n${v.relevance_why||"(no keyword to score against)"}\n` +
+      `See docs/SCORING.md for how each method works.\n\n` +
       `${v.summary||""}\nRules version: ${v.method||"?"}\nFound by search: "${a.query||""}"`),
     flags.length?h("div",{class:"why"}, flags):null);
   const needsNote = d==="approve" && r==="high";
