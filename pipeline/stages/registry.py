@@ -107,7 +107,10 @@ def build_llm_fallback(settings: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "provider": cfg.get("provider", "groq"),
         "base_url": os.getenv("LLM_FALLBACK_BASE_URL", cfg.get("base_url", "https://api.groq.com/openai/v1")),
-        "model": os.getenv("LLM_FALLBACK_MODEL", cfg.get("model", "llama-3.3-70b-versatile")),
+        # llama-3.3-70b-versatile moved to Groq's enterprise-only tier on 2026-08-16 (404 for a free/dev key);
+        # openai/gpt-oss-120b is Groq's own recommended free-tier replacement. This default only matters if
+        # config/pipeline.toml's [llm_fallback].model is ever missing -- the config value normally wins.
+        "model": os.getenv("LLM_FALLBACK_MODEL", cfg.get("model", "openai/gpt-oss-120b")),
         "api_key": key,
     }
 

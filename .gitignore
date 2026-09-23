@@ -8,6 +8,7 @@ library/scraped/*
 library/clips/projects
 library/clips/*
 !library/clips/.gitkeep
+library/keywords/make_keywords.log
 __pycache__/
 *.pyc
 .venv/

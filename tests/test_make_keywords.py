@@ -65,6 +65,17 @@ if __name__ == "__main__":
 
 
 class Retry(unittest.TestCase):
+    def setUp(self):
+        # call_llm() now writes every retry/fallback/outcome to mk.LOG_PATH (log_line()) -- redirect it to a
+        # throwaway temp file for every test in this class, or these would otherwise append real-looking
+        # junk lines ("asking m for keywords", fake topics/models) into the actual
+        # library/keywords/make_keywords.log this repo ships, every time the suite runs.
+        self._log_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._log_tmp.cleanup)
+        real_log_path = mk.LOG_PATH
+        mk.LOG_PATH = Path(self._log_tmp.name) / "make_keywords.log"
+        self.addCleanup(setattr, mk, "LOG_PATH", real_log_path)
+
     def _fake_urlopen(self, script):
         """`script` maps host -> a callable(attempt_n) -> a urlopen-like context manager or raises. Simplifies
         setting up primary-then-backup behavior across the two different base URLs call_llm() may hit."""
@@ -134,6 +145,51 @@ class Retry(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             mk.call_llm("http://primary", "m", "k", "p", waits=(), fallback=fallback)
         self.assertIn("Still busy", str(ctx.exception))
+
+    def test_final_error_reports_the_backups_own_failure_not_the_primarys_stale_one(self):
+        # Real bug hit in practice: primary (Gemini) 429-busy, backup (Groq) then 404s on an unknown model.
+        # The exit message used to still say "Still busy (429)" -- the PRIMARY's now-stale error -- hiding the
+        # fact the backup had actually rejected the model name. The final message must reflect whichever
+        # provider actually failed LAST.
+        import io, urllib.error
+        def script(url, n):
+            if "backup" in url:
+                raise urllib.error.HTTPError("u", 404, "not found", {},
+                                             io.BytesIO(b'{"error":{"message":"model_not_found"}}'))
+            raise urllib.error.HTTPError("u", 429, "busy", {}, io.BytesIO(b"busy"))
+        self._fake_urlopen(script)
+        fallback = {"provider": "groq", "base_url": "http://backup", "model": "backup-model", "api_key": "bk"}
+        with self.assertRaises(SystemExit) as ctx:
+            mk.call_llm("http://primary", "primary-model", "k", "p", waits=(), fallback=fallback)
+        msg = str(ctx.exception)
+        self.assertIn("404", msg)
+        self.assertIn("model_not_found", msg)
+        self.assertNotIn("Still busy", msg)    # the primary's 429 framing must not leak into the final message
+
+    def test_failed_call_is_written_to_the_persistent_log(self):
+        # scripts/make_keywords.py runs before any job/project exists, so a failed run used to leave NO record
+        # anywhere but the terminal -- gone the moment the window closed. Every retry/fallback/final-failure
+        # now goes to mk.LOG_PATH too.
+        import io, urllib.error
+        def script(url, n):
+            if "backup" in url:
+                raise urllib.error.HTTPError("u", 404, "not found", {}, io.BytesIO(b"nope"))
+            raise urllib.error.HTTPError("u", 429, "busy", {}, io.BytesIO(b"busy"))
+        self._fake_urlopen(script)
+        fallback = {"provider": "groq", "base_url": "http://backup", "model": "backup-model", "api_key": "bk"}
+        with self.assertRaises(SystemExit):
+            mk.call_llm("http://primary", "primary-model", "k", "p", waits=(), fallback=fallback, topic="corazon amurao")
+        log_text = mk.LOG_PATH.read_text(encoding="utf-8")
+        self.assertIn("ERROR", log_text)
+        self.assertIn("404", log_text)
+        self.assertIn("corazon amurao", log_text)
+
+    def test_successful_call_is_also_logged(self):
+        self._fake_urlopen(lambda url, n: self._ok("ok", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}))
+        mk.call_llm("http://x", "m", "k", "p", waits=(), topic="jack the ripper")
+        log_text = mk.LOG_PATH.read_text(encoding="utf-8")
+        self.assertIn("answered", log_text)
+        self.assertIn("jack the ripper", log_text)
 
     def test_request_carries_a_real_user_agent(self):
         # Groq/Cloudflare rejected a real request with a bare "Python-urllib/..." User-Agent as a bot

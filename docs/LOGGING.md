@@ -137,8 +137,8 @@ as `GROQ_API_KEY=...`.
 When it fires, you'll see it in the activity log:
 
 ```
-WARN  llm  script writer: gemini-3.6-flash unavailable (503) after retries; trying backup provider groq (llama-3.3-70b-versatile)
-INFO  llm  script writer: backup provider groq (llama-3.3-70b-versatile) answered
+WARN  llm  script writer: gemini-3.6-flash unavailable (503) after retries; trying backup provider groq (openai/gpt-oss-120b)
+INFO  llm  script writer: backup provider groq (openai/gpt-oss-120b) answered
 ```
 
 and in the decision log: the `stage`'s own trace (`generated_script_and_scenes`'s `logic`, `proposed_keywords`'s
@@ -152,7 +152,15 @@ records it in its `.meta.json` sidecar (below) instead.
 ## Where a keywords file came from
 `scripts/make_keywords.py` writes `<file>.meta.json` next to every keywords file it generates -- which
 provider/model answered, tokens used, and when -- since that script runs before any job exists and has nowhere
-else to put it. When you later run `poc.py --keywords manual --keywords-file <file>`, `poc.py` looks for that
+else to put it. That's the record of a SUCCESSFUL generation; a run that fails (busy free tier, a rejected key,
+an unavailable model) has no keywords file to attach a sidecar to, so it instead gets a line in
+`library/keywords/make_keywords.log` -- an append-only log in the same format `logs/pipeline.log` uses
+(timestamp, level, message, `key=val` details), covering every retry, every fallback attempt, and the final
+outcome (with the real status code and error detail, not just "it failed"). Without this, a failed run's only
+record was whatever was still visible in your terminal -- gone the moment the window closed. Gitignored, since
+it's a local operational log, not something to commit.
+
+When you later run `poc.py --keywords manual --keywords-file <file>`, `poc.py` looks for the `.meta.json`
 sidecar and, if it's there, passes it straight through as `job.providers.options["keywords_provenance"]`.
 `pipeline/stages/keywords/manual.py`'s `ManualKeywordStage` then puts it into its own `last_trace`, which lands
 in the `proposed_keywords` decision-log entry's `logic` -- the exact same field the LLM-generated-keywords path

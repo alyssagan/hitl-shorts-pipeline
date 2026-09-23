@@ -102,6 +102,39 @@ for every source adapter (`pipeline/sources/base.py::DEFAULT_USER_AGENT`, e.g. W
   that was being rejected before it even reached Groq's rate limiter. If Groq still 429s after this, that's a
   real "backup is also busy" case, not this bug.
 
+**Follow-up, same day**: fixing the User-Agent let the very next request through to Groq for real, which surfaced
+a second, unrelated problem -- `404 model_not_found` for `llama-3.3-70b-versatile`. Checked rather than guessed:
+Groq moved that model (and `llama-3.1-8b-instant`) to enterprise-only access on 2026-08-16, so a free/developer
+key gets a 404, not a graceful "busy, try later." `config/pipeline.toml`'s `[llm_fallback].model` (and the
+matching hardcoded defaults in `pipeline/stages/registry.py::build_llm_fallback()` and
+`scripts/make_keywords.py`, which only apply if the config value is ever missing) now point at
+`openai/gpt-oss-120b` -- Groq's own recommended free-tier replacement for that capability tier. `openai/gpt-oss-20b`
+is the faster/cheaper option if quality can flex. `docs/LOGGING.md`'s example log line updated to match; no test
+hardcoded the old model name. Full suite still 240 passing after the swap.
+
+**Second follow-up, same day**: prompted directly -- "are these sort of errors being logged?" -- checked rather
+than assumed, and the honest answer for `scripts/make_keywords.py` was no. Once a job/project exists, every LLM
+retry and failure is already durably logged (`logs/pipeline.log`, and a `stage_failed` decision-log entry for
+anything that kills a stage). But `make_keywords.py` runs *before* any job exists, so it had nowhere to write to
+-- both errors above (the Cloudflare block, then the Groq 404) existed only in a terminal's scrollback, gone the
+moment the window closed.
+- **New `library/keywords/make_keywords.log`**: an append-only log in the same line format
+  `pipeline/core/joblog.py` already uses (timestamp, level, message, `key=val` details), so it reads like the
+  rest of the project's logs. Every retry, every fallback attempt, and the final outcome -- success or
+  failure, with the real status code and response-body detail, not just "it failed" -- is written here now,
+  mirroring (not replacing) the existing terminal output. Gitignored (`.gitignore`): it's a local operational
+  log, not something to commit, same treatment as `projects/*`.
+- **Found and fixed a real bug while wiring this up**: when BOTH Gemini and the Groq fallback failed, the final
+  error message reported Gemini's stale first error (e.g. "Still busy (429)"), not Groq's actual last failure
+  (e.g. a 404 for an unknown model) -- `last_code`/`last_detail` were never updated after the fallback's own
+  attempt failed. Now whichever provider failed LAST is what both the terminal message and the log's ERROR line
+  report, with a regression test reproducing the exact scenario that was hit for real (Gemini 429 -> Groq 404).
+- Also now logged: no `GEMINI_API_KEY` found, the model's reply not parsing as valid JSON, and a reply with zero
+  usable keywords after cleaning -- previously terminal-only exits with no persistent trace either.
+- 4 new tests in `tests/test_make_keywords.py` (the stale-error-message bug fix; a failed call writes an ERROR
+  line with real detail; a successful call writes an INFO line; existing tests isolate `mk.LOG_PATH` to a temp
+  file via a new `setUp`, so the test suite itself never writes junk into the real log). Full suite: 243 passing.
+
 
 ## Done: drag-and-drop scene reorder + private per-scene notes (2026-09-23)
 Follow-up to the clip-matching/looping fix above. That same feedback message also raised two more things --

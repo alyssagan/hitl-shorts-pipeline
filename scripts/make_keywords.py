@@ -38,6 +38,31 @@ DEFAULT_MODEL = "gemini-3.6-flash"
 # bot signature -- a 403 unrelated to the API key or rate limit.
 USER_AGENT = "hitl-shorts-pipeline/0.1 (personal video research tool)"
 
+# This script runs before any job/project exists (docs/LOGGING.md "Tokens / cost" and the per-project
+# logs/pipeline.log both only exist once a job is running), so it keeps its own small append-only log here --
+# same line shape as pipeline/core/joblog.py's per-project activity log, so it reads the same way. Every retry,
+# fallback attempt and final outcome (success or failure) is written here, not just printed -- a failed run's
+# terminal output used to be the ONLY record of what went wrong, gone the moment the terminal scrolled or
+# closed (docs/LOGGING.md "Where a keywords file came from").
+LOG_PATH = Path("library/keywords/make_keywords.log")
+
+
+def log_line(level: str, message: str, **details) -> None:
+    """Appends one line to LOG_PATH, mirroring pipeline/core/joblog.py's format exactly (timestamp, level,
+    a pseudo-stage name, message, key=val details) so this file reads like the rest of the project's logs.
+    Never raises -- logging must not break a keyword-generation run, same rule joblog.py itself follows."""
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        parts = [f"{k}={str(v).replace(chr(10), ' ')[:300]}" for k, v in details.items() if v not in (None, "")]
+        line = f"{ts} {level.upper():<5} make_keywords  {message}"
+        if parts:
+            line += "  " + "  ".join(parts)
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
 PROMPT = """You write search keywords for a stock-footage and archive search, for a short true-crime video (a "reel") about: {topic}
 {era_line}
 The keywords will be typed into photo and video libraries: Wikipedia, Wikimedia Commons, Library of Congress, Internet Archive,
@@ -152,31 +177,37 @@ def _post_chat(base: str, model: str, key: str, prompt: str) -> tuple[str, dict]
 
 
 def call_llm(base: str, model: str, key: str, prompt: str, waits: tuple = RETRY_WAITS, sleep=time.sleep,
-            fallback: dict | None = None) -> tuple[str, dict, str, str, str]:
+            fallback: dict | None = None, topic: str = "") -> tuple[str, dict, str, str, str]:
     """Returns (reply text, usage dict, provider used, model actually used, base_url actually used). This
     script runs before any job exists, so there's no decision log to write tokens/cost into (docs/LOGGING.md
     "Tokens / cost" covers per-job calls made once a job is running) -- the caller prints this call's usage
     and provider so it isn't silently thrown away, and writes it into a .meta.json sidecar so it can still
     reach a job's decision log later, once the keywords file this call produces is actually used
-    (docs/LOGGING.md "Where a keywords file came from").
+    (docs/LOGGING.md "Where a keywords file came from"). Every retry, fallback attempt, and the final
+    outcome is ALSO written to LOG_PATH (log_line()) -- unlike the terminal, that's not lost when the window
+    closes; see docs/LOGGING.md "Where a keywords file came from" for what gets recorded and why.
 
     `fallback`, if given ({"provider", "base_url", "model", "api_key"} -- see [llm_fallback] in
     config/pipeline.toml), is tried once after the primary model is still failing after its own retries --
     same one-more-try rule as the pipeline's own post_chat() (pipeline/stages/llm_http.py)."""
-    last_code, last_detail, last_reason = None, "", ""
+    log_line("INFO", f"asking {model} for keywords", topic=topic, base_url=base)
+    last_code, last_detail, last_reason, last_who = None, "", "", model
     for attempt in range(len(waits) + 1):
         try:
             text, usage = _post_chat(base, model, key, prompt)
+            log_line("INFO", f"{model} answered", topic=topic, usage=usage)
             return text, usage, "primary", model, base
         except urllib.error.HTTPError as e:
-            last_code, last_detail = e.code, e.read().decode("utf-8", "replace")[:300]
+            last_code, last_detail, last_who = e.code, e.read().decode("utf-8", "replace")[:300], model
             if e.code in (429, 500, 502, 503, 504) and attempt < len(waits):
-                print(f"  The free tier is busy ({e.code}). Retrying in {waits[attempt]}s... ({attempt + 1}/{len(waits)})")
+                msg = f"The free tier is busy ({e.code}). Retrying in {waits[attempt]}s... ({attempt + 1}/{len(waits)})"
+                print(f"  {msg}")
+                log_line("WARN", msg, topic=topic, model=model)
                 sleep(waits[attempt])
                 continue
             break     # non-retryable, or retries exhausted -- try the backup provider (if any), below
         except urllib.error.URLError as e:
-            last_reason = str(e.reason)
+            last_reason, last_who = str(e.reason), model
             if attempt < len(waits):
                 sleep(waits[attempt])
                 continue
@@ -185,27 +216,44 @@ def call_llm(base: str, model: str, key: str, prompt: str, waits: tuple = RETRY_
     if fallback:
         provider, fb_model = fallback.get("provider", "backup"), fallback["model"]
         why = f"{last_code}" if last_code is not None else (last_reason or "unreachable")
-        print(f"  {model} still unavailable ({why}) after {len(waits)} retries. Trying backup provider {provider} ({fb_model})...")
+        msg = f"{model} still unavailable ({why}) after {len(waits)} retries. Trying backup provider {provider} ({fb_model})..."
+        print(f"  {msg}")
+        log_line("WARN", msg, topic=topic)
         try:
             text, usage = _post_chat(fallback["base_url"], fb_model, fallback["api_key"], prompt)
             print(f"  Backup provider {provider} answered.")
+            log_line("INFO", f"backup provider {provider} ({fb_model}) answered", topic=topic, usage=usage)
             return text, usage, provider, fb_model, fallback["base_url"]
         except urllib.error.HTTPError as e:
-            print(f"  Backup provider {provider} also failed ({e.code}): {e.read().decode('utf-8', 'replace')[:200]}")
+            # The fallback's own failure is the REAL final reason once a fallback was tried -- overwrite
+            # last_code/last_detail/last_who with it rather than leaving the primary's now-stale error in
+            # place, so the exit message below (and the ERROR log line) report what actually happened last,
+            # not what happened first. (Previously this was a real bug: a Gemini 429 followed by a Groq 404
+            # reported "Still busy (429)" at exit, hiding the fact Groq had actually rejected the model name.)
+            last_code, last_detail, last_who = e.code, e.read().decode("utf-8", "replace")[:300], f"backup provider {provider} ({fb_model})"
+            msg = f"Backup provider {provider} also failed ({e.code}): {last_detail}"
+            print(f"  {msg}")
+            log_line("WARN", msg, topic=topic)
         except urllib.error.URLError as e:
-            print(f"  Backup provider {provider} also unreachable ({e.reason}).")
+            last_reason, last_who = str(e.reason), f"backup provider {provider} ({fb_model})"
+            msg = f"Backup provider {provider} also unreachable ({e.reason})."
+            print(f"  {msg}")
+            log_line("WARN", msg, topic=topic)
 
     if last_code in (429, 503):
-        sys.exit(f"Still busy after {len(waits)} retries ({last_code}). This is Google's free tier being overloaded, not your setup. "
-                 "Try again in a few minutes, add a backup provider ([llm_fallback] in config/pipeline.toml -- see docs/LOGGING.md "
-                 "'LLM fallback provider'), or try another model with --model.")
-    if last_code in (401, 403):
-        sys.exit(f"The API key was refused ({last_code}). Check GEMINI_API_KEY in .env.")
-    if last_code == 404:
-        sys.exit(f"Model '{model}' not found (404). Set a current free model with --model. Details: {last_detail}")
-    if last_code is not None:
-        sys.exit(f"The LLM said no ({last_code}): {last_detail}")
-    sys.exit(f"Can't reach the LLM endpoint ({last_reason or 'unknown error'}).")
+        error_msg = (f"Still busy after {len(waits)} retries ({last_code}, from {last_who}). This is the free tier being "
+                     "overloaded, not your setup. Try again in a few minutes, add a backup provider ([llm_fallback] in "
+                     "config/pipeline.toml -- see docs/LOGGING.md 'LLM fallback provider'), or try another model with --model.")
+    elif last_code in (401, 403):
+        error_msg = f"The API key was refused ({last_code}, from {last_who}). Check your .env key for that provider."
+    elif last_code == 404:
+        error_msg = f"Model not found (404, from {last_who}). Set a current free model with --model. Details: {last_detail}"
+    elif last_code is not None:
+        error_msg = f"{last_who} said no ({last_code}): {last_detail}"
+    else:
+        error_msg = f"Can't reach {last_who} ({last_reason or 'unknown error'})."
+    log_line("ERROR", error_msg, topic=topic)
+    sys.exit(error_msg)
 
 
 def slug(text: str) -> str:
@@ -250,6 +298,7 @@ def main() -> None:
     model = args.model or cfg.get("model") or DEFAULT_MODEL
     key = os.environ.get(cfg.get("api_key_env") or "GEMINI_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
     if not key:
+        log_line("ERROR", "no GEMINI_API_KEY found in .env", topic=args.topic)
         sys.exit("No GEMINI_API_KEY found. Put your free Google AI Studio key in .env as GEMINI_API_KEY=... (never paste it in chat).")
 
     fallback = None
@@ -257,14 +306,19 @@ def main() -> None:
     if fb_cfg.get("enabled", "true").lower() != "false":
         fb_key = os.environ.get("LLM_FALLBACK_API_KEY", "") or os.environ.get(fb_cfg.get("api_key_env") or "GROQ_API_KEY", "")
         if fb_key:
+            # llama-3.3-70b-versatile moved to Groq's enterprise-only tier on 2026-08-16 (404 for a free/dev
+            # key); openai/gpt-oss-120b is Groq's own recommended free-tier replacement. This default only
+            # matters if config/pipeline.toml's [llm_fallback].model is ever missing -- the config value wins.
             fallback = {"provider": fb_cfg.get("provider", "groq"), "base_url": fb_cfg.get("base_url", "https://api.groq.com/openai/v1"),
-                        "model": fb_cfg.get("model", "llama-3.3-70b-versatile"), "api_key": fb_key}
+                        "model": fb_cfg.get("model", "openai/gpt-oss-120b"), "api_key": fb_key}
 
     print(f"Asking {model} for {args.n} keywords about '{args.topic}'...")
     try:
-        text_reply, usage, provider_used, model_used, base_used = call_llm(base, model, key, prompt, fallback=fallback)
+        text_reply, usage, provider_used, model_used, base_used = call_llm(base, model, key, prompt, fallback=fallback,
+                                                                            topic=args.topic)
         groups, dropped = clean(parse_reply(text_reply))
     except (ValueError, KeyError) as e:
+        log_line("ERROR", f"couldn't read the model's answer: {e}", topic=args.topic)
         sys.exit(f"Couldn't read the model's answer ({e}). Run it again.")
     if provider_used != "primary":
         print(f"(used backup provider {provider_used} -- {model} was unavailable)")
@@ -273,6 +327,7 @@ def main() -> None:
         print(f"({model_used}: {tt} tokens -- {pt} in / {ct} out. Free tier, so $0; see [usage] in "
               "config/pipeline.toml if you ever point this at a paid model.)")
     if not groups:
+        log_line("ERROR", "model returned no usable keywords (all dropped or empty reply)", topic=args.topic)
         sys.exit("The model returned no usable keywords. Run it again.")
     text = render(args.topic, groups)
     total = sum(len(v) for v in groups.values())
@@ -291,6 +346,7 @@ def main() -> None:
     write_provenance(out, topic=args.topic, provider=provider_used, base_url=base_used, model=model_used,
                      era=args.era, requested_count=args.n, kept_count=total, dropped_count=len(dropped), usage=usage)
 
+    log_line("INFO", f"wrote {total} keywords to {out}", topic=args.topic, provider=provider_used, model=model_used)
     print(f"Wrote {total} keywords to {out} (provenance: {out.with_suffix('.meta.json')}). Read and edit it, then:")
     print(f'  python3 scripts/poc.py "true crime {args.topic}" --keywords manual --keywords-file {out} --sources wikipedia,commons,loc,archive --reviewer "Aly"')
 

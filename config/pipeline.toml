@@ -56,10 +56,15 @@ count = 10
 # Default is Groq (api.groq.com) -- a different company from xAI's Grok, easy to mix up. Groq has a genuine
 # free developer tier (no credit card) and is an OpenAI-compatible drop-in swap, which is why the shape below
 # matches [keywords]/[relevance]/[script] exactly. Get a free key at https://console.groq.com/keys.
+#
+# model: Groq moved llama-3.3-70b-versatile (and llama-3.1-8b-instant) to enterprise-only access on
+# 2026-08-16 -- a free/developer-tier key now gets a 404 "does not exist or you do not have access to it"
+# for it, not a graceful fallback. openai/gpt-oss-120b is Groq's own recommended free-tier replacement
+# (similar capability tier); openai/gpt-oss-20b is a faster/cheaper option if quality can flex.
 enabled = true
 provider = "groq"
 base_url = "https://api.groq.com/openai/v1"
-model = "llama-3.3-70b-versatile"
+model = "openai/gpt-oss-120b"
 api_key_env = "GROQ_API_KEY"
 
 [relevance]
