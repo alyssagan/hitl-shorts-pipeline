@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-from ..core.models import Asset, Flag, ScoreContribution, Vetting
+from ..core.models import Asset, Flag, RightsStatus, ScoreContribution, Vetting
 
 VERSION = "rules-v1"
 MIN_SIDE = 480                 # the renderer (MoneyPrinterTurbo) skips anything smaller
@@ -107,6 +107,31 @@ def r_license(a: Asset, _all: list[Asset]) -> list[Flag]:
                      evidence=f"license: {lic}")]
     return [Flag(rule="LIC_PD", severity="info",
                  message="Public domain / CC0. No license restrictions on use.", evidence=f"license: {lic}")]
+
+
+def classify_rights_status(license_text: str, license_url: str) -> tuple[RightsStatus, str]:
+    """What the SOURCE'S OWN license text suggests about reuse rights -- evidence, never a legal
+    conclusion (#8: "no known restrictions" is not a definitive public-domain determination, and this
+    function does not pretend otherwise; it only records what was found and where). Returns
+    (RightsStatus, evidence string). Deliberately coarser than `_license_kind()` above (which drives risk
+    severity): CC0 and public-domain-by-law/expiry are kept apart per #8, but a restrictive license (NC/ND)
+    is folded into "unresolved" here specifically because it does NOT resolve whether this project can
+    reuse the item -- the full, exact license text is still preserved unmodified in Asset.license/
+    license_url regardless of what this coarser field says; nothing here ever replaces reading that."""
+    s = f"{license_text} {license_url}".lower()
+    if not s.strip():
+        return "unresolved", ""
+    if re.search(r"cc0|cc-zero|/zero/", s):
+        return "cc0", f"license field: {license_text or license_url}"
+    if re.search(r"[-_/ ]nc\b|noncommercial|non-commercial|by-nc|[-_/ ]nd\b|noderiv|no-deriv|by-nd", s):
+        return "unresolved", f"restrictive license, not clearly reusable here: {license_text or license_url}"
+    if re.search(r"public domain|\bpd\b|publicdomain|pdm|no known copyright|no known restrictions|government work", s):
+        return "public_domain", f"license field: {license_text or license_url}"
+    if re.search(r"cc[- ]by|by-sa|attribution|gfdl|pexels license|pixabay content license|unsplash license", s):
+        return "open_license", f"license field: {license_text or license_url}"
+    if re.search(r"\bpaid\b|licensed footage|stock license|royalty", s):
+        return "paid_license", f"license field: {license_text or license_url}"
+    return "unresolved", f"license field present but not recognized: {license_text or license_url}"
 
 
 PLATFORM_HOSTS = ("youtube.com", "youtu.be", "tiktok.com", "instagram.com", "facebook.com", "fb.watch", "twitter.com",
@@ -380,3 +405,11 @@ def vet_all(assets: list[Asset], topic_terms: list[str] | None = None, min_relev
             llm_version: str = "llm-semantic-v1", tfidf_version: str = "tfidf-v1") -> None:
     for a in assets:
         a.vetting = vet_asset(a, assets, topic_terms, min_relevance, llm_scores, tfidf_scores_batch, llm_version, tfidf_version)
+        # Evidence-based rights classification (#8), recomputed every round so a license correction upstream
+        # is picked up -- but NEVER once a human has actually signed off (rights_reviewer set): that is a real
+        # determination and outranks a re-run of this heuristic. Selection (Asset.status) never touches this
+        # at all -- only vetting does, and only up to the point a human takes it over.
+        if not a.rights_reviewer:
+            status, evidence = classify_rights_status(a.license, a.license_url)
+            a.rights_status = status
+            a.rights_evidence = evidence

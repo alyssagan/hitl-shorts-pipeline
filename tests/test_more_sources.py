@@ -45,6 +45,9 @@ class HelperTests(unittest.TestCase):
     def test_keys_are_hidden_in_urls(self):
         self.assertEqual(redact_url("https://x/api?key=SECRET123&q=cat"), "https://x/api?key=***&q=cat")
         self.assertNotIn("SECRET", redact_url("https://x/?a=1&api_key=SECRET&b=2"))
+        # Europeana's key param is "wskey", not "key" -- a plain "key=" pattern wouldn't catch it since
+        # the [?&] anchor requires the whole param name to match, not just a trailing substring of it.
+        self.assertNotIn("SECRET", redact_url("https://api.europeana.eu/record/v2/search.json?wskey=SECRET&query=x"))
 
     def test_cc_names(self):
         self.assertEqual(cc_name("https://creativecommons.org/licenses/by-sa/4.0/"), "CC BY-SA 4.0")
@@ -268,6 +271,47 @@ class UrlListTests(unittest.IsolatedAsyncioTestCase):
             res = await UrlListSource(runner=runner).fetch([], ctx)
             self.assertEqual(res.assets, [])
             self.assertIn("Video unavailable", res.trace[0]["skipped"][0]["reason"])
+
+    async def test_fetch_one_marks_manual_url_import_and_carries_a_position_hint(self):
+        # fetch_one is the synchronous single-URL path Gate 2's "Add links" (#9) and Gate 3's "drop a link on
+        # a scene" both use, outside the normal batch fetch() a sourcing round runs -- every asset it returns
+        # was a human pasting a link, never a keyword search, so import_method should say so either way.
+        async def runner(args):
+            out = args[args.index("-o") + 1].replace("%(ext)s", "mp4")
+            Path(out).write_bytes(b"video-bytes")
+            return 0, "", ""
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "urls", lambda r: httpx.Response(200, content=BYTES))
+            direct = await UrlListSource().fetch_one("https://files.example.com/clip.mp4", "b-roll", 1, ctx, position="3")
+            self.assertEqual(direct.import_method, "manual_url")
+            self.assertEqual(direct.meta["position_hint"], "3")
+            yt = await UrlListSource(runner=runner).fetch_one("https://www.youtube.com/watch?v=abc", "the escape", 2, ctx)
+            self.assertEqual(yt.import_method, "manual_url")
+            self.assertEqual(yt.meta["position_hint"], "")     # optional -- Gate 3's caller never passes one
+
+    async def test_ytdlp_error_gets_a_friendlier_hint_when_it_is_not_a_media_page(self):
+        # Requirement #9: distinguish a direct-media link from one that's just a webpage. yt-dlp's own error
+        # text already says this (it just says it cryptically) -- the fix surfaces that distinction rather
+        # than inventing a new one, so it stays honest about what actually failed.
+        async def runner(args):
+            return 1, "", "ERROR: Unsupported URL: https://example.com/article"
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "urls", lambda r: httpx.Response(404))
+            with self.assertRaises(RuntimeError) as cm:
+                await UrlListSource(runner=runner).fetch_one("https://example.com/article", "", 1, ctx)
+            self.assertIn("doesn't look like a direct video/photo link", str(cm.exception))
+            self.assertIn("Unsupported URL", str(cm.exception))    # original yt-dlp text kept, not replaced
+
+    async def test_ytdlp_error_keeps_the_original_message_for_other_failures(self):
+        async def runner(args):
+            return 1, "", "ERROR: Video unavailable"
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "urls", lambda r: httpx.Response(404))
+            with self.assertRaises(RuntimeError) as cm:
+                await UrlListSource(runner=runner).fetch_one("https://www.youtube.com/watch?v=dead", "", 1, ctx)
+            msg = str(cm.exception)
+            self.assertIn("yt-dlp could not download this link", msg)
+            self.assertNotIn("doesn't look like", msg)
 
 
 class PhotosDoNotCrowdOutVideosTests(unittest.IsolatedAsyncioTestCase):

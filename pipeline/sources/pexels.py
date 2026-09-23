@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 
-from .base import Candidate, HttpSource, SourceContext, SourceUnavailable
+from .base import Candidate, CredentialsMissing, HttpSource, SourceContext
 
 PHOTOS = "https://api.pexels.com/v1/search"
 VIDEOS = "https://api.pexels.com/videos/search"
@@ -36,7 +36,7 @@ class PexelsSource(HttpSource):
 
     async def search(self, query: str, ctx: SourceContext) -> list[Candidate]:
         if not self.key():
-            raise SourceUnavailable("PEXELS_API_KEY is not set")
+            raise CredentialsMissing("PEXELS_API_KEY is not set")
         ctx.http.headers["Authorization"] = self.key()
         out: list[Candidate] = []
         photos = await ctx.http.get_json(PHOTOS, params={

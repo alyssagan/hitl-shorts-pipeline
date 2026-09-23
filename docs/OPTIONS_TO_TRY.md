@@ -42,7 +42,7 @@ Details, keys and caveats: [ADD_A_SOURCE.md](ADD_A_SOURCE.md). Combine any of th
 | `smithsonian` | to try | Free key. CC0 museum images. Response layout unchecked. |
 | `unsplash` | to try | Free key, 50 requests an hour. Stills only. See Limitation #14. |
 | `--urls urls.txt` | to try | Your own links with notes and positions. See [URL_LIST.md](URL_LIST.md). |
-| `folder` (`library/scraped/`) | to try | Your own scraped or downloaded files, vetted like the rest. |
+| `folder` (`library/scraped/`) | to try | Your own scraped or downloaded files, vetted like the rest -- explicitly picked per job (#10), not the whole folder; see docs/ADD_A_SOURCE.md. |
 
 ## Script length and grounding (see Limitation #1)
 
@@ -86,3 +86,8 @@ you saw, and whether to keep it. Commit the file with the change.
 - Generic or lifestyle (octopus, city night): `pexels,pixabay,unsplash,nasa` work well.
 - Use specific multi-word keywords ("whitechapel 1888", "victorian london street") rather than single words like "ripper" or "letters".
 - Idea: score relevance from the thumbnail with a free vision model (Gemini) instead of only text.
+
+## Using the relevance labels
+`RELEVANCE_LABELS.jsonl` collects your Use / Irrelevant clicks with the machine's score. Ideas: report how often score and label agree and
+suggest a better threshold; learn extra filler words; skip assets whose file hash was marked irrelevant in an earlier run; use them as examples
+for a free LLM/vision relevance check.

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 
-from .base import Candidate, HttpSource, SourceContext, SourceUnavailable, strip_html
+from .base import Candidate, CredentialsMissing, HttpSource, SourceContext, strip_html
 
 SEARCH = "https://api.si.edu/openaccess/api/v1.0/search"
 
@@ -27,7 +27,7 @@ class SmithsonianSource(HttpSource):
 
     async def search(self, query: str, ctx: SourceContext) -> list[Candidate]:
         if not self.key():
-            raise SourceUnavailable("SMITHSONIAN_API_KEY is not set")
+            raise CredentialsMissing("SMITHSONIAN_API_KEY is not set")
         data = await ctx.http.get_json(SEARCH, params={
             "api_key": self.key(), "q": f'{query} AND online_media_type:"Images"', "rows": self.per_query * 3, "start": (ctx.page - 1) * self.per_query * 3},
             purpose=f"search Smithsonian Open Access for '{query}'")

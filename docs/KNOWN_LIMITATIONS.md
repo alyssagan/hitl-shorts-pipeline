@@ -114,6 +114,14 @@ Still to judge by watching and comparing runs (record in OPTIONS_TO_TRY.md):
 - **What:** Pixabay, NASA, Internet Archive, Library of Congress, Unsplash and the URL list follow the
   services' public API docs and are tested with hand-written mock replies. Smithsonian's layout
   (`response.rows[].content.descriptiveNonRepeating`) is from memory, because its docs page could not be read.
+- **As of 2026-09-23**, five more sources were added the same way: Openverse's and DPLA's response fields
+  were confirmed against their real published docs before writing the code, so those two are lower-risk.
+  Chronicling America's and Europeana's field names (`image_url`, `edmPreview`/`edmIsShownAt`/`rights`) could
+  not be checked against a live response (both APIs 403'd every fetch attempt from here) -- they're modeled
+  on the closest proven pattern in this codebase (loc.py for Chronicling America, since both hit the same
+  www.loc.gov backend) or on public docs (Europeana), but if either comes back empty across several
+  different searches, that's the first thing worth checking, not the keywords. Flickr's API is old,
+  extremely well-documented and stable, so it's treated as low-risk despite the same lack of a live test.
 - **Effect:** the first live search on each may reveal a difference. `sources/<name>/requests.jsonl` shows
   exactly what was asked and what status came back; a source that fails is skipped without stopping the others.
 - **Also:** Library of Congress and, as of 2026-09-23, Internet Archive both leave items without a clear rights

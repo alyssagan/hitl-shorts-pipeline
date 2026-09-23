@@ -29,6 +29,12 @@ Runner = Callable[[list[str]], Awaitable[tuple[int, str, str]]]
 DIRECT_EXT = {"mp4": "video/mp4", "webm": "video/webm", "mov": "video/quicktime",
               "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}
 CC_LABEL = re.compile(r"creative commons", re.I)
+# Substrings yt-dlp's own error text uses when a link simply isn't a video/audio page at all (a plain
+# webpage, an article, a login/paywall wall, ...) rather than a download that failed for some other reason
+# (network error, deleted video, geo-block). Used only to add a friendlier hint alongside yt-dlp's own
+# message -- never to replace it, since the heuristic can be wrong and the original error is the ground truth.
+NOT_MEDIA_HINTS = ("unsupported url", "unable to extract", "no video formats found",
+                    "requested format is not available", "no media found", "unable to download webpage")
 
 
 async def run_subprocess(args: list[str], timeout: float = 900) -> tuple[int, str, str]:
@@ -74,13 +80,14 @@ class UrlListSource:
         self.max_mb = max_mb
         self.max_height = max_height
 
-    async def fetch_one(self, url: str, note: str, n: int, ctx: SourceContext) -> Asset:
+    async def fetch_one(self, url: str, note: str, n: int, ctx: SourceContext, position: str = "") -> Asset:
         """Extract a single URL (direct file or yt-dlp) into an Asset, outside the normal batch `fetch()` loop.
-        Used by the Gate 3 "drag a link onto a scene" endpoint (pipeline/core/orchestrator.add_scene_asset via
-        pipeline/api/app.py's scene_from_url), which adds one asset to a job that's already past sourcing rather
-        than running a whole sourcing round. `n` numbers the downloaded file so it doesn't collide with files
-        this source has already written for this project."""
-        e = normalize({"url": url, "note": note}, 0)
+        Used by Gate 3's "drag a link onto a scene" endpoint (pipeline/core/orchestrator.add_scene_asset via
+        pipeline/api/app.py's scene_from_url) and Gate 2's "Add links" endpoint (add_reviewable_asset via
+        assets_add_url), each of which adds one asset to a job outside a normal sourcing round. `n` numbers the
+        downloaded file so it doesn't collide with files this source has already written for this project.
+        `position` is the same scene-number/"intro"/"end" hint the batch URL list supports (see module docstring)."""
+        e = normalize({"url": url, "note": note, "position": position}, 0)
         return await (self._direct(url, n, e, ctx) if self._is_direct(url) else self._ytdlp(url, n, e, ctx))
 
     async def fetch(self, queries: list[str], ctx: SourceContext) -> SourceResult:
@@ -90,7 +97,7 @@ class UrlListSource:
             raise SourceUnavailable("no URLs were provided for this job (add them with --urls FILE)")
         result = SourceResult()
         seen_urls, seen_hashes = set(ctx.known_urls), set(ctx.known_hashes)
-        note: dict[str, Any] = {"source": self.name, "query": "(your URL list)", "found": len(entries), "kept": 0, "skipped": []}
+        note: dict[str, Any] = {"source": self.name, "query": "(your URL list)", "found": len(entries), "kept": 0, "skipped": [], "kind": "media"}
         for e in entries:
             url = e["url"]
             if urlparse(url).scheme not in ("http", "https"):
@@ -137,7 +144,8 @@ class UrlListSource:
             source=self.name, kind="video" if mime.startswith("video") else "image", path=str(dest),
             rel_path=os.path.relpath(dest, ctx.project_dir), source_url=url, page_url=url, title=name.replace("-", " "),
             description=e["note"], query="(url list)", author=host, license="", license_url="",
-            attribution=f"{url}", mime=mime, sha256=sha, meta=self._meta(e, host=host))
+            attribution=f"{url}", mime=mime, sha256=sha, meta=self._meta(e, host=host),
+            import_method="manual_url")
 
     async def _ytdlp(self, url: str, n: int, e: dict[str, Any], ctx: SourceContext) -> Asset:
         files = ctx.dir / "files"
@@ -157,7 +165,11 @@ class UrlListSource:
             raise SourceUnavailable("yt-dlp is not installed (pip install yt-dlp)")
         media = sorted(p for p in files.glob(f"{stem}.*") if p.suffix.lower() in (".mp4", ".webm", ".mov", ".jpg", ".jpeg", ".png"))
         if code != 0 or not media:
-            raise RuntimeError(f"yt-dlp could not download this link ({err.strip().splitlines()[-1][:200] if err.strip() else 'no output'})")
+            tail = err.strip().splitlines()[-1][:200] if err.strip() else "no output"
+            if any(h in tail.lower() for h in NOT_MEDIA_HINTS):
+                raise RuntimeError(f"this doesn't look like a direct video/photo link -- yt-dlp couldn't find "
+                                    f"any downloadable media on that page ({tail})")
+            raise RuntimeError(f"yt-dlp could not download this link ({tail})")
         path = media[0]
         info: dict[str, Any] = {}
         info_file = files / f"{stem}.info.json"
@@ -181,4 +193,5 @@ class UrlListSource:
             license=lic, license_url="", attribution=f'"{title}" by {who}: {page}',
             width=info.get("width"), height=info.get("height"), duration=info.get("duration"), mime=mime, sha256=sha,
             meta=self._meta(e, uploader=who, upload_date=info.get("upload_date", ""), extractor=info.get("extractor_key", ""),
-                            platform_license_label=label, info_file=f"info/{info_file.name}"))
+                            platform_license_label=label, info_file=f"info/{info_file.name}"),
+            import_method="manual_url")

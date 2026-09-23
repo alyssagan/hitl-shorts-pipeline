@@ -8,13 +8,46 @@
                                         duplicate_of_asset_id?}}, reviewer}    GATE 2 per asset
   POST /jobs/{id}/assets/approve      {reviewer, note?}                        GATE 2 done -> scenes
   POST /jobs/{id}/assets/reject       {feedback, extra_queries?, max_queries?, per_query?, videos_per_query?,
-                                        extra_urls_text?, reviewer}   GATE 2 search again / next batch
-                                        (max_queries alone, no feedback, just pulls more keywords) / more
-                                        photos per keyword / add links (one per line, "url | note | position")
+                                        extra_urls_text?, folder_files?, reviewer}   GATE 2 search again / next
+                                        batch (max_queries alone, no feedback, just pulls more keywords) / more
+                                        photos per keyword. extra_urls_text queues links (one per line, "url |
+                                        note | position") for the NEXT sourcing round -- no per-link feedback;
+                                        prefer /assets/add-url below for anything the UI does. folder_files
+                                        queues specific relative paths from the server's own-footage folder
+                                        (#10, see GET /jobs/{id}/folder-files) for the next round, each a plain
+                                        path or {path, note} -- explicit per-job selection, not the whole folder.
+  POST /jobs/{id}/assets/add-url      {url, note?, position?, reviewer}   GATE 2 "Add links": download and add
+                                        ONE link synchronously (#9), same yt-dlp/direct pattern Gate 3's
+                                        from-url uses, with an immediate success/failure result. The asset
+                                        lands `pending`, same as a searched one -- never auto-approved.
+  GET  /jobs/{id}/folder-files        what's currently in the server's configured own-footage folder (#10),
+                                        each with whether it's already selected for this job -- read-only,
+                                        pick from this list for assets/reject's folder_files.
   POST /jobs/{id}/assets/label        {asset_id, label, reviewer, reason?, note?, duplicate_of_asset_id?}
                                         save a Use/Duplicate/Irrelevant label any time, any job state (docs/EVALUATION.md)
+  POST /jobs/{id}/assets/{asset_id}/identity   {status, depicts?, case_connection?, identity_evidence?, notes?,
+                                        reviewer}   #7/#13: record a human identity determination (unverified/
+                                        verified/disputed) -- the only thing that ever moves it. Any job state.
+  POST /jobs/{id}/assets/{asset_id}/rights     {status, evidence?, notes?, reviewer}   #8/#13: record a human
+                                        rights determination (public_domain/cc0/open_license/paid_license/
+                                        unresolved), independent of identity/decision. Any job state.
+  POST /jobs/{id}/assets/{asset_id}/category   {category, reviewer}   #7/#13: move an asset's category --
+                                        promoting to verified_case or flagging reconstruction is always this
+                                        explicit action, never inferred. Any job state.
+  GET  /jobs/{id}/asset-report        #13: per-source photo/video/research counts, category/identity/rights
+                                        breakdowns, and the job's running LLM cost (same numbers as /usage).
   GET  /methods                        what each relevance-scoring method+version does (docs/SCORING_CHANGELOG.md)
   GET  /label-reasons                  the three labels and the suggested (extensible) reason list
+  POST /jobs/{id}/case-reference       {canonical_name, reviewer}     set the case's canonical name (#6)
+  POST /jobs/{id}/case-reference/facts {kind, text, detail?, source_links?, status?, conflict_note?, reviewer}
+                                        add one fact -- always human-entered, never written by search/vetting
+  PATCH /jobs/{id}/case-reference/facts/{fact_id}   {any subset of the above fields, reviewer}   edit a fact
+  POST /jobs/{id}/case-reference/facts/{fact_id}/remove   {reviewer}   remove a fact
+  POST /jobs/{id}/visual-checklist/generate   {reviewer}   seed DRAFT items from approved keywords'
+                                        visual_needed/entity text (skips terms already linked to an item)
+  POST /jobs/{id}/visual-checklist     {label, linked_keyword_term?, group?, reviewer}   add an item by hand
+  PATCH /jobs/{id}/visual-checklist/{item_id}   {status?, note?, asset_id?, reviewer}   edit an item
+  POST /jobs/{id}/visual-checklist/{item_id}/remove   {reviewer}   remove an item
   PATCH /jobs/{id}/scenes             {order?, edits?, reviewer}               reorder / edit
   POST /jobs/{id}/scenes/{scene_id}/upload         multipart: file, note?, reviewer?   GATE 3 drag a file
                                         from your computer onto a scene (adds it as an asset, assigns it if
@@ -50,10 +83,11 @@ from starlette.routing import Route
 
 from ..core import joblog
 from ..core import state_machine as sm
-from ..core.models import Job, ProviderChoice
+from ..core.models import Job, JobState, ProviderChoice
 from ..core.orchestrator import LABELS, Orchestrator, SUGGESTED_LABEL_REASONS
 from ..core.store import JobNotFound, JobStore
 from ..sources.base import LoggedHttp, SourceContext
+from ..sources.folder import list_available as list_folder_files, normalize_selection as normalize_folder_entry
 from ..sources.upload import asset_from_upload
 from ..sources.urls import UrlListSource
 from ..stages.registry import Registry, build_default_registry
@@ -180,17 +214,47 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         if not url:
             raise HTTPException(400, "url is required")
         job = orch.get(job_id)                       # 404 if unknown, before spending time on a download
+        known_urls = {a.source_url for a in job.assets if a.source == "urls"}
+        if url in known_urls:
+            raise HTTPException(422, "that link is already in this project")
         project_dir = orch.store.job_dir(job_id)
         src_dir = project_dir / "sources" / "urls"
         (src_dir / "files").mkdir(parents=True, exist_ok=True)
         ctx = SourceContext(project_dir=project_dir, dir=src_dir, http=LoggedHttp(src_dir, "urls"), subject=job.subject,
-                            known_urls={a.source_url for a in job.assets if a.source == "urls"},
-                            known_hashes={a.sha256 for a in job.assets if a.sha256})
+                            known_urls=known_urls, known_hashes={a.sha256 for a in job.assets if a.sha256})
         try:
             asset = await UrlListSource().fetch_one(url, d.get("note", ""), len(job.assets) + 1, ctx)
         except Exception as exc:
             raise HTTPException(422, f"couldn't get that link: {type(exc).__name__}: {exc}") from None
         return await orch.add_scene_asset(job_id, scene_id, asset, reviewer=d.get("reviewer", ""), note=d.get("note", ""))
+
+    async def assets_add_url(r: Request):
+        """Gate 2's "Add links" (#9): download ONE video/photo URL synchronously (same UrlListSource.fetch_one
+        Gate 3's scene_from_url above uses) and add it as a normal pending asset for Gate 2 review. The frontend
+        calls this once per pasted line so each link gets its own immediate success/failure result, instead of
+        the old fire-and-forget behaviour where a whole batch was queued for the next sourcing round with no
+        per-link feedback at all. JSON: {url, note?, position?, reviewer}."""
+        job_id = r.path_params["id"]
+        d = await body(r)
+        url = (d.get("url") or "").strip()
+        if not url:
+            raise HTTPException(400, "url is required")
+        job = orch.get(job_id)                       # 404 if unknown, before spending time on a download
+        if job.state is not JobState.ASSETS_REVIEW:
+            raise HTTPException(409, f"links can only be added during asset review (job is '{job.state.value}')")
+        known_urls = {a.source_url for a in job.assets if a.source == "urls"}
+        if url in known_urls:
+            raise HTTPException(422, "that link is already in this project")
+        project_dir = orch.store.job_dir(job_id)
+        src_dir = project_dir / "sources" / "urls"
+        (src_dir / "files").mkdir(parents=True, exist_ok=True)
+        ctx = SourceContext(project_dir=project_dir, dir=src_dir, http=LoggedHttp(src_dir, "urls"), subject=job.subject,
+                            known_urls=known_urls, known_hashes={a.sha256 for a in job.assets if a.sha256})
+        try:
+            asset = await UrlListSource().fetch_one(url, d.get("note", ""), len(job.assets) + 1, ctx, position=d.get("position", ""))
+        except Exception as exc:
+            raise HTTPException(422, f"couldn't get that link: {type(exc).__name__}: {exc}") from None
+        return await orch.add_reviewable_asset(job_id, asset, reviewer=d.get("reviewer", ""), note=d.get("note", ""))
 
     async def scene_approve_pending(r: Request):
         d = await body(r)
@@ -215,6 +279,70 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
                                        reviewer=d.get("reviewer", ""), reason=d.get("reason", ""), note=d.get("note", ""),
                                        duplicate_of_asset_id=d.get("duplicate_of_asset_id", ""))
 
+    async def asset_identity(r: Request):
+        d = await body(r)
+        return await orch.set_asset_identity(r.path_params["id"], r.path_params["asset_id"], status=d.get("status", ""),
+                                              depicts=d.get("depicts", ""), case_connection=d.get("case_connection", ""),
+                                              identity_evidence=d.get("identity_evidence", ""), notes=d.get("notes", ""),
+                                              reviewer=d.get("reviewer", ""))
+
+    async def asset_rights(r: Request):
+        d = await body(r)
+        return await orch.set_asset_rights(r.path_params["id"], r.path_params["asset_id"], status=d.get("status", ""),
+                                            evidence=d.get("evidence", ""), notes=d.get("notes", ""), reviewer=d.get("reviewer", ""))
+
+    async def asset_category(r: Request):
+        d = await body(r)
+        return await orch.set_asset_category(r.path_params["id"], r.path_params["asset_id"], category=d.get("category", ""),
+                                              reviewer=d.get("reviewer", ""))
+
+    async def asset_report_view(r: Request):
+        orch.get(r.path_params["id"])                       # 404 if unknown
+        return JSONResponse(orch.asset_report(r.path_params["id"]))
+
+    async def case_reference_name(r: Request):
+        d = await body(r)
+        return await orch.set_case_canonical_name(r.path_params["id"], d.get("canonical_name", ""),
+                                                    reviewer=d.get("reviewer", ""))
+
+    async def case_reference_fact_add(r: Request):
+        d = await body(r)
+        return await orch.add_case_fact(r.path_params["id"], d.get("kind", "other"), d.get("text", ""),
+                                         detail=d.get("detail", ""), source_links=d.get("source_links"),
+                                         status=d.get("status", "confirmed"), conflict_note=d.get("conflict_note", ""),
+                                         reviewer=d.get("reviewer", ""))
+
+    async def case_reference_fact_edit(r: Request):
+        d = await body(r)
+        return await orch.edit_case_fact(r.path_params["id"], r.path_params["fact_id"], text=d.get("text"),
+                                          detail=d.get("detail"), source_links=d.get("source_links"),
+                                          status=d.get("status"), conflict_note=d.get("conflict_note"),
+                                          reviewer=d.get("reviewer", ""))
+
+    async def case_reference_fact_remove(r: Request):
+        d = await body(r)
+        return await orch.remove_case_fact(r.path_params["id"], r.path_params["fact_id"], reviewer=d.get("reviewer", ""))
+
+    async def visual_checklist_generate(r: Request):
+        d = await body(r)
+        return await orch.generate_visual_checklist(r.path_params["id"], reviewer=d.get("reviewer", ""))
+
+    async def visual_checklist_add(r: Request):
+        d = await body(r)
+        return await orch.add_checklist_item(r.path_params["id"], d.get("label", ""),
+                                              linked_keyword_term=d.get("linked_keyword_term", ""),
+                                              group=d.get("group", "historical"), reviewer=d.get("reviewer", ""))
+
+    async def visual_checklist_update(r: Request):
+        d = await body(r)
+        return await orch.update_checklist_item(r.path_params["id"], r.path_params["item_id"],
+                                                  status=d.get("status"), note=d.get("note"),
+                                                  asset_id=d.get("asset_id"), reviewer=d.get("reviewer", ""))
+
+    async def visual_checklist_remove(r: Request):
+        d = await body(r)
+        return await orch.remove_checklist_item(r.path_params["id"], r.path_params["item_id"], reviewer=d.get("reviewer", ""))
+
     async def methods_view(_: Request) -> JSONResponse:
         return JSONResponse(method_definitions_json())
 
@@ -230,7 +358,20 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         return await orch.reject_assets(r.path_params["id"], d.get("feedback", ""), d.get("extra_queries"),
                                          reviewer=d.get("reviewer", ""), max_queries=d.get("max_queries"),
                                          per_query=d.get("per_query"), videos_per_query=d.get("videos_per_query"),
-                                         extra_urls_text=d.get("extra_urls_text", ""))
+                                         extra_urls_text=d.get("extra_urls_text", ""), folder_files=d.get("folder_files"))
+
+    async def folder_files_list(r: Request):
+        """What's currently sitting in the server's configured `library/scraped` folder (#10), for a human to
+        pick specific files from for THIS job -- read-only, imports nothing by itself. See folder.py's
+        list_available() and module docstring for why this exists (the folder used to be imported whole into
+        any job listing `folder` as a source, with no per-job filtering at all)."""
+        job = orch.get(r.path_params["id"])                       # 404 if unknown
+        root = Path((settings.get("sources") or {}).get("folder_path", "library/scraped"))
+        selected = {normalize_folder_entry(e)["path"] for e in job.providers.options.get("folder_files", [])}
+        files = list_folder_files(root)
+        for f in files:
+            f["selected_for_this_job"] = f["path"] in selected
+        return JSONResponse({"folder": str(root), "files": files})
 
     async def back(r: Request):
         d = await body(r)
@@ -296,6 +437,14 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
     async def review_page(_: Request):
         return HTMLResponse(PAGE)
 
+    async def http_exception_json(_: Request, exc: HTTPException) -> JSONResponse:
+        # Starlette's own default for a directly-raised HTTPException is a PLAIN TEXT body, not JSON --
+        # every handler above (and the review page's api() helper, which reads body.error) assumes the
+        # {"error": ...} shape wrap() below produces for ValueError/JobNotFound/etc. Without this, a
+        # message like "couldn't get that link: ..." (#9) never reaches the UI: the frontend's fetch
+        # can't parse it as JSON and silently falls back to the generic HTTP status text instead.
+        return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
+
     P = "/jobs/{id}"
     routes = [
         Route("/review", review_page, methods=["GET"]),
@@ -311,8 +460,22 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/assets/review", wrap(assets_review), methods=["POST"]),
         Route(f"{P}/assets/approve", wrap(assets_approve), methods=["POST"]),
         Route(f"{P}/assets/reject", wrap(assets_reject), methods=["POST"]),
+        Route(f"{P}/assets/add-url", wrap(assets_add_url), methods=["POST"]),
+        Route(f"{P}/folder-files", wrap(folder_files_list), methods=["GET"]),
         Route(f"{P}/assets/label", wrap(assets_label), methods=["POST"]),
+        Route(f"{P}/assets/{{asset_id}}/identity", wrap(asset_identity), methods=["POST"]),
+        Route(f"{P}/assets/{{asset_id}}/rights", wrap(asset_rights), methods=["POST"]),
+        Route(f"{P}/assets/{{asset_id}}/category", wrap(asset_category), methods=["POST"]),
+        Route(f"{P}/asset-report", wrap(asset_report_view), methods=["GET"]),
         Route(f"{P}/assets/{{asset_id}}/file", wrap(asset_file), methods=["GET"]),
+        Route(f"{P}/case-reference", wrap(case_reference_name), methods=["POST"]),
+        Route(f"{P}/case-reference/facts", wrap(case_reference_fact_add), methods=["POST"]),
+        Route(f"{P}/case-reference/facts/{{fact_id}}", wrap(case_reference_fact_edit), methods=["PATCH"]),
+        Route(f"{P}/case-reference/facts/{{fact_id}}/remove", wrap(case_reference_fact_remove), methods=["POST"]),
+        Route(f"{P}/visual-checklist/generate", wrap(visual_checklist_generate), methods=["POST"]),
+        Route(f"{P}/visual-checklist", wrap(visual_checklist_add), methods=["POST"]),
+        Route(f"{P}/visual-checklist/{{item_id}}", wrap(visual_checklist_update), methods=["PATCH"]),
+        Route(f"{P}/visual-checklist/{{item_id}}/remove", wrap(visual_checklist_remove), methods=["POST"]),
         Route("/methods", methods_view, methods=["GET"]),
         Route("/label-reasons", label_reasons_view, methods=["GET"]),
         Route(f"{P}/decisions", wrap(decisions), methods=["GET"]),
@@ -331,7 +494,7 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/retry", wrap(retry), methods=["POST"]),
         Route(f"{P}/output", wrap(output), methods=["GET"]),
     ]
-    return Starlette(routes=routes, lifespan=lifespan)
+    return Starlette(routes=routes, lifespan=lifespan, exception_handlers={HTTPException: http_exception_json})
 
 
 def app_factory() -> Starlette:  # uvicorn --factory pipeline.api.app:app_factory

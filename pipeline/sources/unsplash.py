@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 
-from .base import Candidate, HttpSource, SourceContext, SourceUnavailable
+from .base import Candidate, CredentialsMissing, HttpSource, SourceContext
 
 SEARCH = "https://api.unsplash.com/search/photos"
 LICENSE = "Unsplash License"
@@ -30,7 +30,7 @@ class UnsplashSource(HttpSource):
 
     async def search(self, query: str, ctx: SourceContext) -> list[Candidate]:
         if not self.key():
-            raise SourceUnavailable("UNSPLASH_ACCESS_KEY is not set")
+            raise CredentialsMissing("UNSPLASH_ACCESS_KEY is not set")
         ctx.http.headers["Authorization"] = f"Client-ID {self.key()}"
         data = await ctx.http.get_json(SEARCH, params={
             "query": query, "per_page": self.per_query, "orientation": "portrait", "page": ctx.page},

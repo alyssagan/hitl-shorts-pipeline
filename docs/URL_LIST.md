@@ -1,5 +1,9 @@
 # Pulling videos from your own list of URLs
 
+For the interactive equivalent -- pasting links into the review page at Gate 2, with an immediate per-link
+result -- see "Add links" in docs/REVIEW_UI.md. This page covers the `--urls FILE` command-line flag, which
+uses the same downloader underneath.
+
 Put links in a text file, one per line. Optionally add a note and where it should go in the video,
 separated by `|`:
 
@@ -42,6 +46,12 @@ Every video from a social or video platform is flagged **high risk** (`PLATFORM_
 not own the rights, and the platform's terms may forbid downloading. To approve one you must write a note,
 which is saved in the decision log. Links that go to a plain file (`.mp4`, `.jpg`) have no license unless
 you know it, so they are flagged high risk for unknown license too. The risk stays with you, as with RankReel.
+
+A link yt-dlp can't turn into a downloadable video or photo at all -- most often because it's just a webpage
+(an article, a listing page, a login/paywall wall) rather than a media link -- fails with yt-dlp's own error
+plus a plain-language "this doesn't look like a direct video/photo link" hint when the error text matches a
+known "not a media page" pattern. Nothing is retried or bypassed on your behalf: a paywalled or login-gated
+link fails here exactly as it would running yt-dlp yourself.
 
 ## Limits
 

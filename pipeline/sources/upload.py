@@ -39,4 +39,4 @@ def asset_from_upload(data: bytes, filename: str, dest_dir: Path, project_dir: P
         path=str(dest), rel_path=os.path.relpath(dest, project_dir),
         source_url=f"upload://{filename}", page_url="", title=filename, description=note,
         query="(dragged in)", author="", license="", license_url="", attribution="",
-        mime=mime, sha256=sha, meta={"uploaded_filename": filename})
+        mime=mime, sha256=sha, meta={"uploaded_filename": filename}, import_method="scene_upload")

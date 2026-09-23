@@ -26,11 +26,15 @@ from . import joblog
 from . import state_machine as sm
 from . import usage
 from .decisions import Actor, actor_from, ai, human, machine
-from .models import Asset, Job, JobState, Keyword, ProviderChoice, RUNNING_STATES, Scene, _now
+from .models import (
+    Asset, CaseFact, ChecklistStatus, FactKind, FactStatus, Job, JobState, Keyword, ProviderChoice,
+    QueryGroup, RUNNING_STATES, Scene, VisualChecklistItem, _now,
+)
 from .store import JobStore
 from ..stages.base import RenderResult, StageContext
 from ..stages.registry import Registry
 from ..stages.sourcing import write_credits, write_manifests
+from ..sources.folder import normalize_selection as normalize_folder_entry
 from ..sources.urls import UrlListSource, normalize as normalize_url_entry, parse_url_lines
 from ..vetting.rules import RELEVANCE_MIN, RULES, STOPWORDS, VERSION as VETTING_VERSION, asset_text, clean_term, vet_all, vet_asset
 from ..vetting.tfidf_relevance import VERSION as TFIDF_VERSION, tfidf_scores
@@ -318,6 +322,120 @@ class Orchestrator:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+    async def set_asset_identity(self, job_id: str, asset_id: str, *, status: str, depicts: str = "",
+                                  case_connection: str = "", identity_evidence: str = "", notes: str = "",
+                                  reviewer: str = "") -> Job:
+        """Record a human's identity determination for one asset (#7, #13): whether it actually shows who/what
+        it's claimed to, kept fully independent of relevance score, rights and your use/reject decision. This
+        is the ONLY thing that ever moves `identity_status` -- a keyword match, an AI similarity score, or a
+        `case`-group search finding it never does, by design. Works at any job state, same as label_asset(),
+        so identity review isn't locked to the Gate 2 window; a later pass at this material (or a fact check
+        against the case reference sheet, docs/CASE_REFERENCE.md) can still update it."""
+        actor = self._who(reviewer, require=True)
+        if status not in ("unverified", "verified", "disputed"):
+            raise ValueError("status must be one of unverified/verified/disputed")
+
+        def fn(job: Job) -> None:
+            a = next((x for x in job.assets if x.id == asset_id), None)
+            if a is None:
+                raise ValueError(f"unknown asset id {asset_id}")
+            before = a.identity_status
+            a.identity_status = status
+            if depicts.strip():
+                a.depicts = depicts.strip()
+            if case_connection.strip():
+                a.case_connection = case_connection.strip()
+            if identity_evidence.strip():
+                a.identity_evidence = identity_evidence.strip()
+            if notes.strip():
+                a.identity_notes = notes.strip()
+            a.identity_reviewer, a.identity_reviewed_at = actor.name, _now()
+            self._rec(job.id, "assets", "identity_set", actor, decision=status,
+                      reason=notes.strip() or identity_evidence.strip() or "(no note)",
+                      subject={"asset_id": a.id, "title": a.title, "source": a.source},
+                      logic={"before": before, "after": status})
+        return await self._mutate(job_id, fn)
+
+    async def set_asset_rights(self, job_id: str, asset_id: str, *, status: str, evidence: str = "",
+                                notes: str = "", reviewer: str = "") -> Job:
+        """Record a human's rights determination for one asset (#8, #13) -- independent of identity and of
+        your use/reject decision. Otherwise `rights_status` is only ever a machine reading of the source's own
+        license text (classify_rights_status() in pipeline/vetting/rules.py); this is the one thing that turns
+        it into a human-signed-off determination (rights_reviewer/rights_reviewed_at). Never a legal
+        conclusion -- just what a human looked at and decided, with their evidence recorded next to it."""
+        actor = self._who(reviewer, require=True)
+        valid = ("public_domain", "cc0", "open_license", "paid_license", "unresolved")
+        if status not in valid:
+            raise ValueError(f"status must be one of {valid}")
+
+        def fn(job: Job) -> None:
+            a = next((x for x in job.assets if x.id == asset_id), None)
+            if a is None:
+                raise ValueError(f"unknown asset id {asset_id}")
+            before = a.rights_status
+            a.rights_status = status
+            if evidence.strip():
+                a.rights_evidence = evidence.strip()
+            if notes.strip():
+                a.rights_notes = notes.strip()
+            a.rights_reviewer, a.rights_reviewed_at = actor.name, _now()
+            self._rec(job.id, "assets", "rights_set", actor, decision=status,
+                      reason=notes.strip() or evidence.strip() or "(no note)",
+                      subject={"asset_id": a.id, "title": a.title, "source": a.source},
+                      logic={"before": before, "after": status})
+        return await self._mutate(job_id, fn)
+
+    async def set_asset_category(self, job_id: str, asset_id: str, *, category: str, reviewer: str = "") -> Job:
+        """Move an asset's category (#7, #13). Sourcing may propose unverified_case_candidate/
+        historical_context/illustrative_stock from the search group that found it (never verified_case) --
+        promoting something to `verified_case`, or flagging it as a `reconstruction`, is always this explicit
+        human action, never inferred from a score or a search group."""
+        actor = self._who(reviewer, require=True)
+        valid = ("verified_case", "unverified_case_candidate", "historical_context", "illustrative_stock", "reconstruction")
+        if category not in valid:
+            raise ValueError(f"category must be one of {valid}")
+
+        def fn(job: Job) -> None:
+            a = next((x for x in job.assets if x.id == asset_id), None)
+            if a is None:
+                raise ValueError(f"unknown asset id {asset_id}")
+            before = a.category
+            a.category = category
+            self._rec(job.id, "assets", "category_set", actor, decision=category,
+                      subject={"asset_id": a.id, "title": a.title, "source": a.source},
+                      logic={"before": before, "after": category})
+        return await self._mutate(job_id, fn)
+
+    def asset_report(self, job_id: str) -> dict[str, Any]:
+        """Per-job/per-source breakdown for Gate 2 (#13): how many photos/videos/research items each source
+        actually contributed (so "kept: 4" from one source can't be misread as 4 photos when some are video or
+        research-only), where every asset currently stands on category/identity/rights, and the job's running
+        LLM cost (usage_summary()) -- so "how much has this job cost so far" lives next to everything else you'd
+        check at Gate 2 rather than a separate report you have to remember exists. Read-only, computed on
+        demand from the job and its decision log; nothing here is a separate source of truth."""
+        job = self.get(job_id)
+
+        def counts(field: str) -> dict[str, int]:
+            out: dict[str, int] = {}
+            for a in job.assets:
+                key = getattr(a, field) or "(none)"
+                out[key] = out.get(key, 0) + 1
+            return out
+
+        by_source: dict[str, dict[str, int]] = {}
+        for a in job.assets:
+            row = by_source.setdefault(a.source, {"photos": 0, "videos": 0, "research": 0})
+            row["photos" if a.kind == "image" else "videos"] += 1
+        for r in job.references:
+            row = by_source.setdefault(r.source, {"photos": 0, "videos": 0, "research": 0})
+            row["research"] += 1
+        return {
+            "total_assets": len(job.assets), "total_references": len(job.references),
+            "by_source": by_source, "by_category": counts("category"),
+            "by_identity_status": counts("identity_status"), "by_rights_status": counts("rights_status"),
+            "usage": self.usage_summary(job_id),
+        }
+
     async def approve_assets(self, job_id: str, *, reviewer: str = "", note: str = "") -> Job:
         actor = self._who(reviewer, require=True)
 
@@ -332,7 +450,8 @@ class Orchestrator:
 
     async def reject_assets(self, job_id: str, feedback: str = "", extra_queries: list[str] | None = None, *,
                              reviewer: str = "", max_queries: int | None = None, per_query: int | None = None,
-                             videos_per_query: int | None = None, extra_urls_text: str = "") -> Job:
+                             videos_per_query: int | None = None, extra_urls_text: str = "",
+                             folder_files: list | None = None) -> Job:
         """Send the batch back to sourcing, optionally with new search terms and/or new per-job overrides:
         `max_queries` (how many approved keywords the next round, and every round after it, searches) and
         `per_query`/`videos_per_query` (how many photos/videos each source keeps PER keyword) -- see
@@ -346,7 +465,19 @@ class Orchestrator:
         "urls" source is added to job.providers.sources if this job wasn't already pulling from it -- so a
         job that started with only keyword-based sources can still have a link pasted into it mid-review. The
         next sourcing round re-runs every configured source as usual; UrlListSource's own dedup (known_urls)
-        means already-downloaded links are skipped, not re-fetched."""
+        means already-downloaded links are skipped, not re-fetched.
+
+        `folder_files` is the same idea for your own scraped/uploaded material (#10): a list of relative paths
+        (each a plain string, or {"path": ..., "note": ...}) under the server's configured `library/scraped`
+        folder -- see `pipeline.sources.folder.list_available()` / `GET /jobs/{id}/folder-files` for what's
+        available to pick from. Merged into job.providers.options["folder_files"] the same way (deduped by
+        path, existing notes kept), and "folder" is added to job.providers.sources if needed. Unlike a pasted
+        URL, nothing is downloaded here -- these files already sit on disk -- so the same "queue for the next
+        round" approach that's fine for URLs (`base.HttpSource`'s per-source trace note reports what was kept/
+        skipped) is fine here too; there's no network failure mode that needs synchronous feedback. Every
+        matching file is imported as `owner_submitted=True` with your note as `owner_note` -- picking it for
+        this job IS the explicit "this is mine" action (pipeline/sources/folder.py's FolderSource no longer
+        imports a folder's entire contents into any job that merely lists `folder` as a source)."""
         actor = self._who(reviewer, require=True)
 
         def fn(job: Job) -> None:
@@ -372,11 +503,24 @@ class Orchestrator:
                 job.providers.options["urls"] = existing
                 if "urls" not in job.providers.sources:
                     job.providers.sources = [*job.providers.sources, "urls"]
+            new_files = [normalize_folder_entry(e) for e in (folder_files or [])]
+            new_files = [e for e in new_files if e["path"]]
+            if new_files:
+                existing_f = list(job.providers.options.get("folder_files", []))
+                seen_f = {normalize_folder_entry(e)["path"] for e in existing_f}
+                for e in new_files:
+                    if e["path"] not in seen_f:
+                        existing_f.append(e)
+                        seen_f.add(e["path"])
+                job.providers.options["folder_files"] = existing_f
+                if "folder" not in job.providers.sources:
+                    job.providers.sources = [*job.providers.sources, "folder"]
             sm.apply(job, "reject_assets", note=feedback)
             self._rec(job.id, "assets", "rejected_asset_pool", actor, decision="reject",
                       reason=feedback or "(no reason given)",
                       outputs={"extra_queries": extra, "max_queries": max_queries, "per_query": per_query,
-                               "videos_per_query": videos_per_query, "extra_urls": [e["url"] for e in new_urls] or None})
+                               "videos_per_query": videos_per_query, "extra_urls": [e["url"] for e in new_urls] or None,
+                               "folder_files": [e["path"] for e in new_files] or None})
         return await self._mutate(job_id, fn)
 
     # ------------------------------------------------------------------ gate 3: scenes
@@ -473,6 +617,34 @@ class Orchestrator:
                       outputs={"risk": asset.vetting.risk, "assigned": True})
         return await self._mutate(job_id, fn)
 
+    async def add_reviewable_asset(self, job_id: str, asset: Asset, *, reviewer: str = "", note: str = "") -> Job:
+        """Add one asset -- already downloaded by the caller (pipeline/api/app.py's assets_add_url; see
+        UrlListSource.fetch_one) -- to the Gate 2 pool for normal review (#9). This is the backend for Gate 2's
+        "Add links": it runs the SAME vet_asset() every sourced asset gets, so a pasted link doesn't skip the
+        risk check a searched one would get, only the sourcing round -- same principle as add_scene_asset(),
+        just one gate earlier.
+
+        Unlike add_scene_asset(), this never auto-approves or assigns anything: Gate 2 IS the review step, so
+        the asset always lands `pending` and flows through the normal Use/Duplicate/Irrelevant review below,
+        whatever its risk. `note` is only recorded in the decision log here, not written to the asset -- that
+        happens when you actually decide on it via review_assets(), same as every sourced asset. Only allowed
+        while the job is waiting in ASSETS_REVIEW."""
+        actor = self._who(reviewer, require=True)
+
+        def fn(job: Job) -> None:
+            if job.state is not JobState.ASSETS_REVIEW:
+                raise sm.TransitionError("links can only be added during asset review")
+            terms = [k.term for k in job.approved_keywords]
+            min_rel = float(job.providers.options.get("min_relevance", RELEVANCE_MIN))
+            asset.vetting = vet_asset(asset, job.assets + [asset], terms, min_rel)
+            job.assets.append(asset)             # always pending -- Gate 2 itself is the review, see docstring
+            self._rec(job.id, "assets", "added_gate2_asset", actor, decision="add",
+                      reason=note.strip() or "(no note)",
+                      subject={"asset_id": asset.id, "source": asset.source, "url": asset.source_url},
+                      outputs={"risk": asset.vetting.risk if asset.vetting else None,
+                               "usable": asset.vetting.usable if asset.vetting else None})
+        return await self._mutate(job_id, fn)
+
     async def approve_pending_scene_asset(self, job_id: str, asset_id: str, scene_id: str, *,
                                            reviewer: str = "", note: str = "") -> Job:
         """Finish approving an asset add_scene_asset() left pending (high risk, no note yet) and assign it to
@@ -555,6 +727,161 @@ class Orchestrator:
         def fn(job: Job) -> None:
             sm.apply(job, "retry")
             self._rec(job.id, "project", "retried", self._who(reviewer), decision="retry")
+        return await self._mutate(job_id, fn)
+
+    # ------------------------------------------------------------------ case reference sheet (#6)
+    # Ground truth about the case, entirely separate from the pipeline's state machine -- editable at any
+    # point in the job's life, never written to by sourcing/vetting/scoring. A search result or an AI
+    # similarity score is never treated as confirmation of a fact; only these methods, called by a human
+    # through the API, ever create or change one.
+    async def set_case_canonical_name(self, job_id: str, canonical_name: str, *, reviewer: str = "") -> Job:
+        actor = self._who(reviewer, require=True)
+
+        def fn(job: Job) -> None:
+            job.case_reference.canonical_name = canonical_name.strip()
+            job.case_reference.updated_at = _now()
+            self._rec(job.id, "case_reference", "canonical_name_set", actor, decision="set",
+                      subject={"canonical_name": job.case_reference.canonical_name})
+        return await self._mutate(job_id, fn)
+
+    async def add_case_fact(self, job_id: str, kind: str, text: str, *, detail: str = "",
+                            source_links: list[str] | None = None, status: str = "confirmed",
+                            conflict_note: str = "", reviewer: str = "") -> Job:
+        actor = self._who(reviewer, require=True)
+        text = text.strip()
+        if not text:
+            raise ValueError("fact text is required")
+        if kind not in FactKind.__args__:
+            raise ValueError(f"kind must be one of {FactKind.__args__}")
+        if status not in FactStatus.__args__:
+            raise ValueError(f"status must be one of {FactStatus.__args__}")
+
+        def fn(job: Job) -> None:
+            fact = CaseFact(kind=kind, text=text, detail=detail.strip(), source_links=list(source_links or []),
+                            status=status, conflict_note=conflict_note.strip(), added_by=actor.name)
+            job.case_reference.facts.append(fact)
+            job.case_reference.updated_at = _now()
+            self._rec(job.id, "case_reference", "fact_added", actor, decision="add",
+                      subject={"fact_id": fact.id, "kind": kind, "text": text}, reason=conflict_note.strip() or None)
+        return await self._mutate(job_id, fn)
+
+    async def edit_case_fact(self, job_id: str, fact_id: str, *, text: str | None = None, detail: str | None = None,
+                             source_links: list[str] | None = None, status: str | None = None,
+                             conflict_note: str | None = None, reviewer: str = "") -> Job:
+        actor = self._who(reviewer, require=True)
+        if status is not None and status not in FactStatus.__args__:
+            raise ValueError(f"status must be one of {FactStatus.__args__}")
+
+        def fn(job: Job) -> None:
+            fact = next((f for f in job.case_reference.facts if f.id == fact_id), None)
+            if fact is None:
+                raise ValueError(f"unknown case fact id {fact_id}")
+            if text is not None:
+                stripped = text.strip()
+                if not stripped:
+                    raise ValueError("fact text cannot be blanked out -- remove the fact instead")
+                fact.text = stripped
+            if detail is not None:
+                fact.detail = detail.strip()
+            if source_links is not None:
+                fact.source_links = list(source_links)
+            if status is not None:
+                fact.status = status
+            if conflict_note is not None:
+                fact.conflict_note = conflict_note.strip()
+            fact.updated_by = actor.name
+            fact.updated_at = _now()
+            job.case_reference.updated_at = _now()
+            self._rec(job.id, "case_reference", "fact_edited", actor, decision="edit", subject={"fact_id": fact.id})
+        return await self._mutate(job_id, fn)
+
+    async def remove_case_fact(self, job_id: str, fact_id: str, *, reviewer: str = "") -> Job:
+        actor = self._who(reviewer, require=True)
+
+        def fn(job: Job) -> None:
+            fact = next((f for f in job.case_reference.facts if f.id == fact_id), None)
+            if fact is None:
+                raise ValueError(f"unknown case fact id {fact_id}")
+            job.case_reference.facts = [f for f in job.case_reference.facts if f.id != fact_id]
+            job.case_reference.updated_at = _now()
+            self._rec(job.id, "case_reference", "fact_removed", actor, decision="remove",
+                      subject={"fact_id": fact.id, "text": fact.text})
+        return await self._mutate(job_id, fn)
+
+    # ------------------------------------------------------------------ visual checklist (#6)
+    # What the video still needs a visual for. generate_visual_checklist() seeds DRAFT items from approved
+    # keywords' visual_needed/entity text -- a starting point, not a claim anything was found -- and every
+    # item stays fully human-editable afterward. Nothing here is ever marked "fulfilled"/"not_available" by
+    # an automated process; finding candidates only moves a status to "candidates_found" at most.
+    async def generate_visual_checklist(self, job_id: str, *, reviewer: str = "") -> Job:
+        actor = self._who(reviewer, require=True)
+
+        def fn(job: Job) -> None:
+            existing_terms = {i.linked_keyword_term for i in job.visual_checklist if i.linked_keyword_term}
+            added = []
+            for k in job.approved_keywords:
+                if k.term in existing_terms:
+                    continue   # don't duplicate an item a previous generate (or a human) already made for this term
+                label = k.visual_needed.strip() or k.term
+                item = VisualChecklistItem(label=label, linked_keyword_term=k.term, group=k.group, added_by=actor.name)
+                job.visual_checklist.append(item)
+                existing_terms.add(k.term)
+                added.append(item.id)
+            self._rec(job.id, "case_reference", "visual_checklist_generated", actor, decision="generate",
+                      subject={"added_count": len(added)}, logic={"added_item_ids": added})
+        return await self._mutate(job_id, fn)
+
+    async def add_checklist_item(self, job_id: str, label: str, *, linked_keyword_term: str = "",
+                                 group: str = "historical", reviewer: str = "") -> Job:
+        actor = self._who(reviewer, require=True)
+        label = label.strip()
+        if not label:
+            raise ValueError("label is required")
+        if group not in QueryGroup.__args__:
+            raise ValueError(f"group must be one of {QueryGroup.__args__}")
+
+        def fn(job: Job) -> None:
+            item = VisualChecklistItem(label=label, linked_keyword_term=linked_keyword_term.strip(),
+                                       group=group, added_by=actor.name)
+            job.visual_checklist.append(item)
+            self._rec(job.id, "case_reference", "visual_checklist_item_added", actor, decision="add",
+                      subject={"item_id": item.id, "label": label})
+        return await self._mutate(job_id, fn)
+
+    async def update_checklist_item(self, job_id: str, item_id: str, *, status: str | None = None,
+                                    note: str | None = None, asset_id: str | None = None, reviewer: str = "") -> Job:
+        actor = self._who(reviewer, require=True)
+        if status is not None and status not in ChecklistStatus.__args__:
+            raise ValueError(f"status must be one of {ChecklistStatus.__args__}")
+
+        def fn(job: Job) -> None:
+            item = next((i for i in job.visual_checklist if i.id == item_id), None)
+            if item is None:
+                raise ValueError(f"unknown visual checklist item id {item_id}")
+            if asset_id and not any(a.id == asset_id for a in job.assets):
+                raise ValueError(f"asset_id '{asset_id}' is not a known asset in this job")
+            if status is not None:
+                item.status = status
+            if note is not None:
+                item.note = note.strip()
+            if asset_id is not None:
+                item.asset_id = asset_id
+            item.updated_by = actor.name
+            item.updated_at = _now()
+            self._rec(job.id, "case_reference", "visual_checklist_item_updated", actor, decision="update",
+                      subject={"item_id": item.id, "status": item.status})
+        return await self._mutate(job_id, fn)
+
+    async def remove_checklist_item(self, job_id: str, item_id: str, *, reviewer: str = "") -> Job:
+        actor = self._who(reviewer, require=True)
+
+        def fn(job: Job) -> None:
+            item = next((i for i in job.visual_checklist if i.id == item_id), None)
+            if item is None:
+                raise ValueError(f"unknown visual checklist item id {item_id}")
+            job.visual_checklist = [i for i in job.visual_checklist if i.id != item_id]
+            self._rec(job.id, "case_reference", "visual_checklist_item_removed", actor, decision="remove",
+                      subject={"item_id": item.id, "label": item.label})
         return await self._mutate(job_id, fn)
 
     # ------------------------------------------------------------------ machine work

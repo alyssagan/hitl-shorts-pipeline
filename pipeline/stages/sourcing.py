@@ -17,7 +17,11 @@ import httpx
 from ..core.decisions import machine
 from ..core import joblog
 from ..core.models import Asset, Job, TextRef
-from ..sources.base import DEFAULT_USER_AGENT, LoggedHttp, SourceAdapter, SourceContext, SourceUnavailable
+from ..sources.base import (
+    DEFAULT_USER_AGENT, CredentialsMissing, LoggedHttp, ProviderError, RateLimited,
+    ResponseParseError, SourceAdapter, SourceContext, SourceUnavailable,
+)
+from ..sources.groups import GROUP_ASSET_CATEGORY, GROUP_POOLS, QUERYLESS_SOURCES
 from .base import StageContext
 
 
@@ -43,6 +47,38 @@ def queries_for(job: Job, limit: int = 5) -> list[str]:
         if n.get("query") and not n.get("error") and not n.get("skipped_source"):
             done[n["query"]] = done.get(n["query"], 0) + 1
     return sorted(terms, key=lambda t: done.get(t, 0))[:limit]
+
+
+def _term_groups(job: Job) -> dict[str, str]:
+    """term -> the approved keyword's QueryGroup that produced it. A term missing here (an `extra_queries`
+    entry a reviewer typed in at Gate 2, or a legacy term for some other reason) has no group of its own."""
+    return {k.term: k.group for k in job.approved_keywords}
+
+
+def _routing_is_informative(job: Job) -> bool:
+    """Whether this job's approved keywords actually carry meaningful QueryGroup diversity (i.e. the LLM
+    keyword stage's structured plan populated them, #3/#18) or every term is sitting at Keyword's bare
+    default ("historical", e.g. the manual keyword stage, or reused-library terms that never claimed to be
+    more than a search phrase). Routing only filters queries per source when it's informative -- otherwise
+    every configured source gets every term, exactly like before this feature existed (#1: preserve existing
+    work), rather than silently starving a stock/archive source of queries because of an unpopulated field."""
+    groups = {k.group for k in job.approved_keywords}
+    return bool(groups) and groups != {"historical"}
+
+
+def route_queries(candidate_terms: list[str], source_name: str, term_group: dict[str, str],
+                  informative: bool) -> list[str]:
+    """Which of `candidate_terms` this particular source should actually be asked to search for, this round
+    (#3: route per-source, preserve query+source provenance). `folder`/`urls` ignore queries entirely
+    already (pipeline/sources/groups.py QUERYLESS_SOURCES), so routing is a no-op for them either way."""
+    if source_name in QUERYLESS_SOURCES or not informative:
+        return candidate_terms
+    routed = [t for t in candidate_terms if source_name in GROUP_POOLS.get(term_group.get(t, "historical"), set())]
+    # A term with no known group (an extra_queries entry a reviewer typed in at Gate 2, never LLM-classified)
+    # always reaches every configured source -- an explicit human addition is never silently withheld by
+    # routing meant for machine-suggested terms.
+    routed += [t for t in candidate_terms if t not in term_group and t not in routed]
+    return routed
 
 
 class SourcingStage:
@@ -97,6 +133,13 @@ class SourcingStage:
             if n.get("source") and n.get("query") and not n.get("error") and not n.get("skipped_source"):
                 key = f"{n['source']}|{n['query']}"
                 prior[key] = prior.get(key, 0) + 1
+        # #3/#18: route each source only the queries whose QueryGroup actually pools to it (a "case"-group
+        # term like "Corazon Amurao interview" never reaches a stock site; a "stock"-group term like "empty
+        # hospital hallway" never reaches an archive) -- but only when the job's keywords actually carry
+        # group information at all (_routing_is_informative), so a manual-keyword job keeps working exactly
+        # as it always did (#1: preserve existing work) instead of every source but "historical"'s going quiet.
+        term_group = _term_groups(job)
+        informative_routing = _routing_is_informative(job)
         problems = 0
         for name in job.providers.sources:
             adapter = self.adapters.get(name)
@@ -104,6 +147,16 @@ class SourcingStage:
                 joblog.error("sourcing", f"unknown source '{name}'")
                 out.trace.append({"source": name, "error": f"unknown source '{name}'"})
                 problems += 1
+                continue
+            source_queries = route_queries(queries, name, term_group, informative_routing)
+            if not source_queries and name not in QUERYLESS_SOURCES:
+                # Not an error or a "zero results" search -- this source simply wasn't asked anything this
+                # round, because none of this round's terms are in a group that routes to it. Recorded
+                # explicitly (#4) rather than silently calling fetch([]) and letting it look like a search
+                # that happened to find nothing.
+                joblog.info("sourcing", f"{name}: no queries this round route to it (their group doesn't pool here)")
+                out.trace.append({"source": name, "skipped_source": "no queries this round belong to a group that "
+                                  "routes to this source", "outcome": "no_queries_routed"})
                 continue
             src_dir = ctx.project_dir / "sources" / name
             (src_dir / "files").mkdir(parents=True, exist_ok=True)
@@ -114,27 +167,71 @@ class SourcingStage:
                 known_urls={a.source_url for a in known} | {r.url for r in job.references if r.source == name},
                 known_hashes={a.sha256 for a in job.assets if a.sha256},
             )
-            joblog.info("sourcing", f"pulling from {name}", queries=queries, known_assets=len(known))
+            joblog.info("sourcing", f"pulling from {name}", queries=source_queries, known_assets=len(known))
             t0 = time.monotonic()
             try:
-                res = await adapter.fetch(queries, sctx)
+                res = await adapter.fetch(source_queries, sctx)
+            # #4: never lump every "couldn't run" reason into one undifferentiated "skipped" bucket --
+            # a missing API key, a provider rate-limit, a network/5xx failure and an unexpected response
+            # shape all need different follow-up, so each gets its own `outcome` on the trace note.
+            # Order matters: these are all subclasses of SourceUnavailable, so the specific ones must
+            # be checked first or the bare `except SourceUnavailable` below would catch them all.
+            except CredentialsMissing as exc:
+                joblog.warn("sourcing", f"{name} skipped (missing/invalid credentials): {exc}")
+                out.trace.append({"source": name, "skipped_source": str(exc), "outcome": "credentials_missing"})
+                problems += 1
+                continue
+            except RateLimited as exc:
+                joblog.warn("sourcing", f"{name} skipped (rate-limited): {exc}")
+                out.trace.append({"source": name, "skipped_source": str(exc), "outcome": "rate_limited",
+                                   "retry_after": exc.retry_after})
+                problems += 1
+                continue
+            except ProviderError as exc:
+                joblog.warn("sourcing", f"{name} skipped (provider/network error): {exc}")
+                out.trace.append({"source": name, "skipped_source": str(exc), "outcome": "network_error"})
+                problems += 1
+                continue
+            except ResponseParseError as exc:
+                joblog.warn("sourcing", f"{name} skipped (response didn't match expected shape): {exc}")
+                out.trace.append({"source": name, "skipped_source": str(exc), "outcome": "parse_error"})
+                problems += 1
+                continue
             except SourceUnavailable as exc:
                 joblog.warn("sourcing", f"{name} skipped: {exc}")
-                out.trace.append({"source": name, "skipped_source": str(exc)})
+                out.trace.append({"source": name, "skipped_source": str(exc), "outcome": "skipped_other"})
                 problems += 1
                 continue
             except Exception as exc:
                 joblog.error("sourcing", f"{name} failed: {type(exc).__name__}: {exc}")
-                out.trace.append({"source": name, "error": f"{type(exc).__name__}: {exc}"})
+                out.trace.append({"source": name, "error": f"{type(exc).__name__}: {exc}", "outcome": "unknown_error"})
                 problems += 1
                 continue
             for t in res.trace:
                 if t.get("error"):
-                    joblog.warn("sourcing", f"{name} query failed: {t.get('query')}", error=t["error"])
+                    joblog.warn("sourcing", f"{name} query failed: {t.get('query')}", error=t["error"], outcome=t.get("outcome"))
                 else:
-                    joblog.info("sourcing", f"{name} '{t.get('query')}'", found=t.get("found"), kept=t.get("kept"),
-                                skipped=len(t["skipped"]) if isinstance(t.get("skipped"), list) else t.get("skipped"), page=t.get("page"))
+                    # "found"/"kept" count different things for different sources (photos/video vs.
+                    # Wikipedia articles) -- say the unit in the message itself, not just the source
+                    # name, so "kept: 1" can't be misread as one photo when it's one article (or vice
+                    # versa) by anyone skimming the log without cross-referencing which source is which.
+                    unit = "article(s)" if t.get("kind") == "text" else "item(s)"
+                    joblog.info("sourcing", f"{name} '{t.get('query')}': found {t.get('found')} {unit}, kept {t.get('kept')}",
+                                kind=t.get("kind"), found=t.get("found"), kept=t.get("kept"),
+                                skipped=len(t["skipped"]) if isinstance(t.get("skipped"), list) else t.get("skipped"),
+                                page=t.get("page"), outcome=t.get("outcome"))
             joblog.info("sourcing", f"{name} done in {time.monotonic() - t0:.1f}s", new_assets=len(res.assets), new_references=len(res.references))
+            if informative_routing:
+                # #7/#18: stamp each new asset with the AssetCategory its own originating query's group
+                # implies -- never "verified_case" (that's always an explicit human decision, see
+                # GROUP_ASSET_CATEGORY) and never overwriting a category an earlier round or a human
+                # already set. A term with no known group (see route_queries) simply isn't stamped --
+                # `category` stays None, the same "not yet categorized" state as before this feature.
+                for a in res.assets:
+                    if a.category is None:
+                        cat = GROUP_ASSET_CATEGORY.get(term_group.get(a.query, ""))
+                        if cat:
+                            a.category = cat
             out.assets.extend(res.assets)
             out.references.extend(res.references)
             out.trace.extend(res.trace)
@@ -223,10 +320,14 @@ def write_sources_md(job: Job, project_dir: Path) -> Path:
     notes = job.source_notes
     searched = [n for n in notes if "query" in n and not n.get("skipped_source")]
     if searched:
+        # "Kind" makes explicit what Found/Kept are counting -- photos/video ("media") vs. Wikipedia
+        # article text ("text") -- so a reader can't mistake one unit for the other when skimming rows
+        # from different sources with the same column headers.
         lines += ["## What was searched", "",
-                  "| Source | Search | Results page | Found | Kept | Not kept | Problem |", "|---|---|---|---|---|---|---|"]
+                  "| Source | Kind | Search | Results page | Found | Kept | Not kept | Problem |", "|---|---|---|---|---|---|---|---|"]
         for n in searched:
-            lines.append(f"| {cell(n.get('source'))} | {cell(n.get('query'))} | {n.get('page', 1)} | {n.get('found', 0)} | {n.get('kept', 0)} | "
+            kind = "Article(s)" if n.get("kind") == "text" else "Photo/video"
+            lines.append(f"| {cell(n.get('source'))} | {kind} | {cell(n.get('query'))} | {n.get('page', 1)} | {n.get('found', 0)} | {n.get('kept', 0)} | "
                          f"{len(n.get('skipped') or [])} | {cell(n.get('error'))} |")
         lines.append("")
     unavailable = [n for n in notes if n.get("skipped_source") or (n.get("error") and "query" not in n)]

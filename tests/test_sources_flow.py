@@ -12,7 +12,7 @@ from pipeline.core.models import Asset, Job, JobState as S, ProviderChoice
 from pipeline.core.orchestrator import Orchestrator
 from pipeline.core.store import JobStore
 from pipeline.sources.commons import CommonsSource
-from pipeline.sources.folder import FolderSource
+from pipeline.sources.folder import FolderSource, list_available, normalize_selection
 from pipeline.sources.pexels import PexelsSource
 from pipeline.sources.wikipedia import WikipediaSource
 from pipeline.vetting.rules import vet_asset
@@ -70,7 +70,12 @@ class Base(unittest.IsolatedAsyncioTestCase):
         return Orchestrator(self.store, reg, {"review": {}})
 
     async def to_assets_review(self, orch, sources=("wikipedia", "commons", "pexels", "folder")):
-        job = await orch.create_job("Cute cats!", ProviderChoice(keywords="fake", scenes="fake", render="fake", sources=list(sources)))
+        # FolderSource only imports files explicitly selected for this job (#10) -- select the one test file
+        # the folder is seeded with (self.make()) up front, the same way a real job would via reject_assets
+        # after browsing GET /jobs/{id}/folder-files, just done at creation since this helper only runs one round.
+        options = {"folder_files": [{"path": "sub/x.jpg", "note": "test fixture"}]} if "folder" in sources else {}
+        job = await orch.create_job("Cute cats!", ProviderChoice(keywords="fake", scenes="fake", render="fake",
+                                                                   sources=list(sources), options=options))
         await orch.start(job.id)
         job = await orch.run_pending(job.id)
         job = await orch.review_keywords(job.id, [job.keywords[0].id], reviewer="Aly")
@@ -129,6 +134,33 @@ class DecisionLogTests(unittest.TestCase):
             self.assertEqual(log.verify(), (False, 0))
 
 
+class FolderListAvailableTests(unittest.TestCase):
+    """list_available()/normalize_selection() -- the read-only browse side of #10, used by
+    GET /jobs/{id}/folder-files so a human can see what's there before picking anything."""
+    def test_normalize_selection_accepts_a_bare_string_or_a_dict(self):
+        self.assertEqual(normalize_selection("sub/x.jpg"), {"path": "sub/x.jpg", "note": ""})
+        self.assertEqual(normalize_selection({"path": " sub/x.jpg ", "note": " mine "}), {"path": "sub/x.jpg", "note": "mine"})
+        self.assertEqual(normalize_selection({"path": "/abs/leading/slash.jpg"}), {"path": "abs/leading/slash.jpg", "note": ""})
+
+    def test_list_available_reports_kind_title_and_unsupported_formats(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "sub").mkdir()
+            (root / "sub" / "x.jpg").write_bytes(IMG)
+            (root / "sub" / "x.jpg.json").write_text(json.dumps({"title": "A cat"}))
+            (root / "clip.mp4").write_bytes(b"fake-mp4")
+            (root / "notes.txt").write_bytes(b"not media")
+            files = {f["path"]: f for f in list_available(root)}
+            self.assertEqual(set(files), {"sub/x.jpg", "clip.mp4", "notes.txt"})
+            self.assertEqual(files["sub/x.jpg"], {"path": "sub/x.jpg", "size": len(IMG), "kind": "image",
+                                                    "usable": True, "title": "A cat", "has_sidecar": True})
+            self.assertEqual(files["clip.mp4"]["kind"], "video")
+            self.assertFalse(files["notes.txt"]["usable"])   # unsupported extension, still listed so nothing is hidden
+
+    def test_list_available_on_a_missing_folder_is_just_empty(self):
+        self.assertEqual(list_available(Path("/no/such/folder/at/all")), [])
+
+
 class SourceAdapterTests(Base):
     async def test_layout_logs_and_flags(self):
         orch = self.make()
@@ -158,8 +190,46 @@ class SourceAdapterTests(Base):
         self.assertEqual(risks["Cat sleeping"], "medium")  # SA
         self.assertEqual(risks["Tiny cat"], "high")        # low res
         self.assertEqual(by_src["folder"][0].vetting.risk, "high")   # no license
+        # #10: an asset pulled from the folder is stamped as your own explicitly-selected material.
+        self.assertEqual(by_src["folder"][0].import_method, "local_folder")
+        self.assertTrue(by_src["folder"][0].owner_submitted)
+        self.assertEqual(by_src["folder"][0].owner_note, "test fixture")
         # Nothing was filtered out for risk.
         self.assertTrue(any(not a.vetting.usable for a in job.assets))
+
+    async def test_folder_source_imports_nothing_without_an_explicit_per_job_selection(self):
+        # #10: listing "folder" as a source used to import the WHOLE folder into any job. Now it imports
+        # nothing until this job's providers.options["folder_files"] says which files to use -- paired here
+        # with "commons" (which does have something to find) so the job can still reach assets_review; a
+        # job whose ONLY source finds nothing is a separate, pre-existing "nothing could be sourced" failure
+        # mode (see SourcingError in pipeline/stages/sourcing.py), not what this test is about.
+        orch = self.make()
+        job = await orch.create_job("Cute cats!", ProviderChoice(keywords="fake", scenes="fake", render="fake",
+                                                                   sources=["commons", "folder"]))   # no folder_files
+        await orch.start(job.id)
+        job = await orch.run_pending(job.id)
+        job = await orch.review_keywords(job.id, [job.keywords[0].id], reviewer="Aly")
+        job = await orch.run_pending(job.id)
+        self.assertEqual(job.state, S.ASSETS_REVIEW)
+        self.assertEqual([a for a in job.assets if a.source == "folder"], [])
+        note = next(n for n in job.source_notes if n.get("source") == "folder")
+        self.assertIn("no files were selected", note.get("error", ""))
+
+    async def test_folder_files_merged_in_via_reject_assets_are_imported_next_round(self):
+        # Mirrors extra_urls_text (#9) for your own material (#10): queue a specific file mid-review,
+        # "folder" is added to the job's sources automatically, and it's pulled on the very next round.
+        orch = self.make()
+        job = await self.to_assets_review(orch, sources=("commons",))
+        self.assertNotIn("folder", job.providers.sources)
+        job = await orch.reject_assets(job.id, folder_files=[{"path": "sub/x.jpg", "note": "mine"}], reviewer="Aly")
+        self.assertEqual(job.state, S.SOURCING_RUNNING)
+        self.assertIn("folder", job.providers.sources)
+        job = await orch.run_pending(job.id)
+        self.assertEqual(job.state, S.ASSETS_REVIEW)
+        folder_assets = [a for a in job.assets if a.source == "folder"]
+        self.assertEqual(len(folder_assets), 1)
+        self.assertTrue(folder_assets[0].owner_submitted)
+        self.assertEqual(folder_assets[0].owner_note, "mine")
 
     async def test_missing_pexels_key_is_logged_not_fatal(self):
         orch = self.make(keys=False)
@@ -216,6 +286,11 @@ class FlowTests(Base):
         self.assertIn("Tiny cat", sources_md)                 # every pulled item is listed, approved or not
         self.assertIn("https://commons.wikimedia.org/wiki/File:Cat", sources_md)
         self.assertIn("## What was searched", sources_md)
+        # #2: the search table disambiguates photo/video counts from Wikipedia article counts by an
+        # explicit Kind column, not just by eyeballing which row's Source cell says "wikipedia".
+        self.assertIn("| Kind |", sources_md)
+        self.assertRegex(sources_md, r"\| wikipedia \| Article\(s\) \|")
+        self.assertRegex(sources_md, r"\| commons \| Photo/video \|")
         self.assertIn("## Found but not kept", sources_md)   # the svg the renderer can't use is listed with its reason
         self.assertIn("can't be used by the renderer", sources_md)
         self.assertRegex(sources_md, r"Cat photo.*\| approved \|")       # your decision is recorded per file

@@ -34,17 +34,52 @@ docs/SCORING_CHANGELOG.md), every risk rule that fired with its evidence, and wh
   moves on to scenes. You only need to click Use on the ones you want. Anything left undecided (or hidden below the threshold) is
   recorded as rejected with a note saying it had no decision -- and is NOT counted as a label, since you didn't judge it. The button
   is disabled only if nothing is approved or a HIGH-risk item is missing its note.
-- **Get more** (bottom): three ways to pull more assets without leaving the page, all send you back to sourcing then
-  straight back here when the round finishes. **Next batch** is the one-click option -- pick a batch size (defaults to 10,
-  or the job's current `max_queries`) and it searches that many of your already-approved keywords that haven't been
-  searched yet; no feedback needed. It also sets that batch size as the job's `max_queries` for every round after this
-  one (see "Many keywords: batches" in docs/RUNNING.md), so once you've picked a comfortable size you don't have to
-  reset it each round. **Search again** is for steering it: add specific new search terms and/or say what was wrong;
-  fetches the next page of results without repeats. **Add links** (below the other two) is for a specific video/photo
-  you already have a URL for -- paste one or more, one per line, same `url | note | position` format as `scripts/poc.py
-  --urls`. A YouTube/TikTok/X/Vimeo/Instagram/news link is pulled with yt-dlp; a direct `.mp4`/`.jpg`/... link is
-  downloaded as-is. Works even on a job that didn't start with any URLs -- the `urls` source is added automatically.
-  Platform videos are flagged high risk by vetting the same as everything else, so approving one still needs a note.
+- **Get more** (bottom): three ways to pull more assets without leaving the page. **Next batch** and **Search again**
+  send you back to sourcing then straight back here when the round finishes. **Next batch** is the one-click option --
+  pick a batch size (defaults to 10, or the job's current `max_queries`) and it searches that many of your
+  already-approved keywords that haven't been searched yet; no feedback needed. It also sets that batch size as the
+  job's `max_queries` for every round after this one (see "Many keywords: batches" in docs/RUNNING.md), so once you've
+  picked a comfortable size you don't have to reset it each round. **Search again** is for steering it: add specific
+  new search terms and/or say what was wrong; fetches the next page of results without repeats.
+- **Add links** (below the other two, #9) is for a specific video/photo you already have a URL for -- paste one or
+  more, one per line, same `url | note | position` format as `scripts/poc.py --urls`. Unlike Next batch/Search again,
+  each line downloads **right away**, one at a time, and shows its own result underneath the box as it finishes --
+  a green line for "added, pending review below", a red one with the actual reason if it failed (an unsupported/bad
+  link, or one already in the project), so a typo in line 3 doesn't leave you guessing what happened to it. Failed
+  lines stay in the box so you can fix and resubmit without retyping the ones that worked. A YouTube/TikTok/X/Vimeo/
+  Instagram/news link is pulled with yt-dlp; a direct `.mp4`/`.jpg`/... link is downloaded as-is. yt-dlp's own error
+  is shown as-is, with a plain-language hint added when it looks like the link is a webpage rather than an actual
+  video/photo (no login/paywall is ever bypassed -- a link behind one just fails here the way it would for yt-dlp on
+  its own). Every added link lands as a normal **pending** card above, same as anything found by search -- it is
+  never auto-approved, so it still goes through the same Use/Duplicate/Irrelevant review and the same high-risk-needs-
+  a-note rule as everything else. (The older behaviour -- queuing links into the job's URL list for the *next* sourcing
+  round with no per-link feedback -- still exists as `extra_urls_text` on `POST /assets/reject` for scripts, just not
+  from this box anymore.)
+- **Add your own footage** (below Add links, #10) opens onto a list of whatever's currently sitting in the server's
+  `library/scraped/` folder -- your own scraper's output, or anything you dropped there yourself. Nothing here is
+  added to any job by itself: tick the specific files this job should use (each gets an optional note, e.g. why
+  it's yours to use), then **Add selected files**. Unlike Add links, these aren't downloaded -- they're already on
+  disk -- so they're queued the same way Next batch is (pulled on the next sourcing round; `folder` is added to
+  the job's sources automatically) rather than added synchronously one at a time. A ticked-and-added file is
+  marked "already selected" if you open the panel again. Every file added this way is recorded as your own
+  submitted material (`owner_submitted`), not inferred from anything about the file itself.
+- **Category / identity / rights badges** (#13) sit alongside the score/risk badges on every card: which of the five
+  categories it's in (`verified case`, `unverified case candidate`, `historical context`, `illustrative stock`,
+  `reconstruction`, or "not categorized" until someone sets one), its identity status (`unverified`/`verified`/
+  `disputed`), and its rights status (`public domain`/`CC0`/`open license`/`paid license`/`unresolved`). These three
+  are independent of relevance and of each other -- nothing (not scoring, not the Use/Duplicate/Irrelevant labels, not
+  keyword matching) ever sets them for you; they only move when a person opens "Case connection & rights" on a card
+  and saves a value. That panel also shows who set each one and when, plus any depicts/case-connection/evidence/notes
+  text recorded with it, and how the asset entered this job (search / manual URL / your own footage / a Gate-3 scene
+  upload). Setting identity and rights are separate saves -- changing one never touches the other (#8) -- and both
+  work on a card at any point, not just while the job happens to be sitting at Gate 2, the same way labelling already
+  did, since a person may want to record who's actually pictured, or where the usage rights stand, well after the
+  asset was approved or rejected.
+- **"Sources & rights so far"** (#13, above the grid) is a per-job summary: a table of photo/video/research counts by
+  source, then how the whole pool currently breaks down by category, by identity status, and by rights status, plus
+  the LLM labeling cost run up so far for this job (calls and an estimated dollar figure, from the same usage rollup
+  the terminal's cost reporting already used -- not a second calculation). It's collapsed by default and only loads
+  when opened, so it costs nothing on a page that's just being used to click through cards.
 
 In the terminal, after submitting in the browser, type `web` at the asset prompt so the script carries on.
 

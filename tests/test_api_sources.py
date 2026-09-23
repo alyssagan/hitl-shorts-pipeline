@@ -2,11 +2,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from starlette.testclient import TestClient
 
 from pipeline.api.app import create_app
+from pipeline.core.models import Asset
 from pipeline.core.orchestrator import Orchestrator
 from pipeline.core.store import JobStore
 from pipeline.sources.commons import CommonsSource
@@ -98,6 +100,158 @@ class LabelTests(ApiSourcesTests):
         self.assertIn("machine_score", rows[0])
         self.assertIn("scoring_method", rows[0])
         self.assertIn("method_version", rows[0])
+
+
+class AssetsAddUrlEndpointTests(ApiSourcesTests):
+    """POST /jobs/{id}/assets/add-url -- Gate 2's "Add links" (#9): a synchronous, per-link add so a bad
+    or duplicate link fails right away with a reason, rather than being silently queued for the next sourcing
+    round. The actual download is mocked (UrlListSource.fetch_one) the same way an orchestrator-level test
+    would construct an already-fetched Asset -- no real network/yt-dlp involved."""
+    def to_assets_review(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        jid = r.json()["id"]
+        self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        j = self.wait(jid, "keywords_review")
+        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        j = self.wait(jid, "assets_review")
+        return jid, j
+
+    def fake_asset(self, **kw):
+        base = dict(source="urls", kind="video", path="/tmp/w.mp4", rel_path="w.mp4", source_url="https://files.example.com/w.mp4",
+                    title="w.mp4", license="CC0", width=1920, height=1080, sha256="httpurl1", import_method="manual_url")
+        base.update(kw)
+        return Asset(**base)
+
+    def test_url_is_required(self):
+        jid, _ = self.to_assets_review()
+        r = self.client.post(f"/jobs/{jid}/assets/add-url", json={"reviewer": "Aly"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_wrong_job_state_is_a_409_before_any_download_is_attempted(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake"}})
+        jid = r.json()["id"]      # still keywords_running/keywords_review, not assets_review
+        r = self.client.post(f"/jobs/{jid}/assets/add-url", json={"url": "https://files.example.com/w.mp4", "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 409)
+
+    def test_successful_add_lands_pending_with_the_right_provenance(self):
+        jid, _ = self.to_assets_review()
+        with patch("pipeline.api.app.UrlListSource") as cls:
+            cls.return_value.fetch_one = AsyncMock(return_value=self.fake_asset())
+            r = self.client.post(f"/jobs/{jid}/assets/add-url", json={"url": "https://files.example.com/w.mp4", "note": "b-roll", "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 200, r.text)
+        added = next(a for a in r.json()["assets"] if a["source_url"] == "https://files.example.com/w.mp4")
+        self.assertEqual(added["status"], "pending")        # never auto-approved -- Gate 2 IS the review
+        self.assertEqual(added["import_method"], "manual_url")
+
+    def test_duplicate_url_is_a_422_and_does_not_download_again(self):
+        jid, _ = self.to_assets_review()
+        with patch("pipeline.api.app.UrlListSource") as cls:
+            cls.return_value.fetch_one = AsyncMock(return_value=self.fake_asset())
+            first = self.client.post(f"/jobs/{jid}/assets/add-url", json={"url": "https://files.example.com/w.mp4", "reviewer": "Aly"})
+            self.assertEqual(first.status_code, 200)
+            second = self.client.post(f"/jobs/{jid}/assets/add-url", json={"url": "https://files.example.com/w.mp4", "reviewer": "Aly"})
+            self.assertEqual(second.status_code, 422)
+            self.assertEqual(cls.return_value.fetch_one.await_count, 1)   # no second download attempted
+        after = self.client.get(f"/jobs/{jid}").json()
+        self.assertEqual(sum(a["source_url"] == "https://files.example.com/w.mp4" for a in after["assets"]), 1)
+
+    def test_download_failure_is_a_422_with_the_reason(self):
+        jid, _ = self.to_assets_review()
+        with patch("pipeline.api.app.UrlListSource") as cls:
+            cls.return_value.fetch_one = AsyncMock(side_effect=RuntimeError("this doesn't look like a direct video/photo link"))
+            r = self.client.post(f"/jobs/{jid}/assets/add-url", json={"url": "https://files.example.com/article", "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("doesn't look like a direct video/photo link", r.json()["error"])
+
+
+class FolderFilesEndpointTests(unittest.TestCase):
+    """GET /jobs/{id}/folder-files (#10): browse-only listing of the server's own-footage folder, with
+    which files (if any) are already queued for this specific job."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.scraped = Path(self.tmp.name) / "scraped"
+        (self.scraped / "sub").mkdir(parents=True)
+        (self.scraped / "sub" / "x.jpg").write_bytes(b"\xff\xd8\xff-fake-jpeg-")
+        reg, _ = fake_registry()
+        settings = {"sources": {"folder_path": str(self.scraped)}}
+        self.client = TestClient(create_app(Orchestrator(JobStore(self.tmp.name + "/projects"), reg, settings), settings=settings))
+        self.client.__enter__()
+        self.addCleanup(self.client.__exit__, None, None, None)
+
+    def test_lists_files_and_reflects_this_jobs_selection(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake",
+                                                          "sources": [], "options": {"folder_files": ["sub/x.jpg"]}}})
+        jid = r.json()["id"]
+        out = self.client.get(f"/jobs/{jid}/folder-files").json()
+        self.assertEqual(out["files"], [{"path": "sub/x.jpg", "size": 14, "kind": "image", "usable": True,
+                                         "title": "", "has_sidecar": False, "selected_for_this_job": True}])
+
+    def test_unselected_job_shows_nothing_selected(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": []}})
+        jid = r.json()["id"]
+        out = self.client.get(f"/jobs/{jid}/folder-files").json()
+        self.assertFalse(out["files"][0]["selected_for_this_job"])
+
+    def test_unknown_job_is_404(self):
+        self.assertEqual(self.client.get("/jobs/nope/folder-files").status_code, 404)
+
+
+class AssetIdentityRightsCategoryReportEndpointTests(ApiSourcesTests):
+    """#13's write/read paths over HTTP: identity/rights/category edits and the per-job asset report."""
+    def setup_job_in_assets_review(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        jid = r.json()["id"]
+        self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        j = self.wait(jid, "keywords_review")
+        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        j = self.wait(jid, "assets_review")
+        return jid, j
+
+    def test_identity_rights_category_round_trip_and_show_in_the_asset(self):
+        jid, j = self.setup_job_in_assets_review()
+        aid = j["assets"][0]["id"]
+        r = self.client.post(f"/jobs/{jid}/assets/{aid}/identity",
+                              json={"status": "verified", "depicts": "the victim", "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.post(f"/jobs/{jid}/assets/{aid}/rights", json={"status": "cc0", "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.post(f"/jobs/{jid}/assets/{aid}/category", json={"category": "verified_case", "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 200, r.text)
+        after = self.client.get(f"/jobs/{jid}").json()
+        a = next(x for x in after["assets"] if x["id"] == aid)
+        self.assertEqual((a["identity_status"], a["depicts"], a["rights_status"], a["category"]),
+                         ("verified", "the victim", "cc0", "verified_case"))
+
+    def test_bad_status_is_a_422(self):
+        jid, j = self.setup_job_in_assets_review()
+        aid = j["assets"][0]["id"]
+        r = self.client.post(f"/jobs/{jid}/assets/{aid}/identity", json={"status": "pretty_sure", "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("status must be one of", r.json()["error"])
+
+    def test_missing_reviewer_is_a_422(self):
+        jid, j = self.setup_job_in_assets_review()
+        aid = j["assets"][0]["id"]
+        r = self.client.post(f"/jobs/{jid}/assets/{aid}/rights", json={"status": "cc0"})
+        self.assertEqual(r.status_code, 422)
+
+    def test_asset_report_breaks_down_by_source_and_includes_usage(self):
+        jid, j = self.setup_job_in_assets_review()
+        out = self.client.get(f"/jobs/{jid}/asset-report").json()
+        self.assertEqual(out["total_assets"], len(j["assets"]))
+        self.assertIn("commons", out["by_source"])
+        self.assertIn("cost_usd", out["usage"])
+        self.assertEqual(out["by_identity_status"].get("unverified"), len(j["assets"]))
+
+    def test_unknown_job_is_404_for_report_and_edits(self):
+        self.assertEqual(self.client.get("/jobs/nope/asset-report").status_code, 404)
+        self.assertEqual(self.client.post("/jobs/nope/assets/x/identity", json={"status": "verified", "reviewer": "Aly"}).status_code, 404)
 
 
 class LogEndpointTests(ApiSourcesTests):

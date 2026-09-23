@@ -16,6 +16,9 @@ max_queries = 8          # how many approved keywords to search with
 per_query = 8            # photos to keep per keyword, per source
 videos_per_query = 4     # videos to keep per keyword, per source (counted separately from photos)
 wikipedia_articles = 2
+# Characters of each Wikipedia article kept on disk (sources/wikipedia/files/*.txt), before the script
+# writer's own, usually smaller, [script] grounding_chars further limits how much of it gets read.
+wikipedia_max_chars = 30000
 pexels_videos = true
 pixabay_videos = true
 nasa_videos = true
@@ -24,6 +27,10 @@ nasa_videos = true
 # silently dropped from search results. Set true to go back to only keeping explicitly-licensed items.
 archive_require_license = false
 archive_max_mb = 60
+# Flickr: which license ids to search (comma-separated). Default is every license except 0 = "All Rights
+# Reserved" -- includes Flickr Commons ("no known copyright restrictions", id 7), the main reason to use it.
+# https://www.flickr.com/services/api/flickr.photos.licenses.getInfo.html has the full id list.
+flickr_licenses = "1,2,3,4,5,6,7,8,9,10"
 # URL list (yt-dlp): biggest download and tallest video to accept.
 url_max_mb = 200
 url_max_height = 1080

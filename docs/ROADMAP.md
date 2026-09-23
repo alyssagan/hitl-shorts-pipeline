@@ -39,6 +39,53 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: five more public sources -- Openverse, DPLA, Flickr, Europeana, Chronicling America (2026-09-23)
+Added after "not getting good results" / wanting real case-related photos beyond what Wikipedia+Commons alone turn up.
+`--sources` now also accepts `openverse` and `chronicling_america` (no key), and `dpla`/`flickr`/`europeana` (free keys,
+see `.env.example`). All five are treated as archive-style sources by the keyword prompt (docs/RUNNING.md "More
+sources for real case photos"). Flickr Commons and Openverse in particular are aimed at real historical/archival
+photos, not generic stock. Also flagged clearly (and in the new RUNNING.md section) that none of these -- old or
+new -- will surface actual mugshots/crime-scene/victim photos, which are almost always copyrighted news/police
+material, not in any free public archive.
+
+Also clarified: "add a video/photo manually by URL" already existed at Gate 2 asset review (the "Add links" box,
+`docs/REVIEW_UI.md`) before this change -- nothing new was needed there, just pointed out since it wasn't obvious.
+
+
+## Done: LLM keyword prompt rewritten for photo/video search, not SEO (2026-09-23)
+Prompted directly, after a real run: Aly's "The Dyatlov Pass Incident" job pulled 74 assets and only ONE
+cleared the asset review's default 50% relevance threshold. Traced it to the actual keywords approved --
+`--keywords llm`'s prompt asked the model to act as "an SEO analyst for short-form vertical video," so it
+returned phrases like "dyatlov pass explained," "... TikTok," "... 2024 update" -- good for making a finished
+video findable on YouTube, useless for finding EXISTING photos: no stock photo or Wikipedia image is ever
+captioned that way, so the relevance scorer's word-overlap check came back 0% for 73 of 74 assets. Not a bug
+in the scorer or the vetting -- the prompt was asking the model to solve the wrong problem.
+
+- `pipeline/stages/keywords/llm.py`'s `PROMPT` is rewritten around "these are SEARCH QUERIES for photo/video
+  libraries, not SEO," with explicit do's (2-6 words, name a place/object/scene/activity/weather/era a camera
+  could show) and don'ts (never "explained"/"documentary"/"TikTok"/"short video"/"2024 update"/"facts"/"top
+  10" -- those describe a video ABOUT the topic, not a photo OF something).
+- New `_source_guidance()` tailors the prompt to `job.providers.sources`: historical-archive sources
+  (Wikipedia, Commons, Internet Archive, LOC, Smithsonian) get told to include era/place/document specifics;
+  modern generic-stock sources (Pexels, Pixabay, Unsplash, NASA) get told the OPPOSITE -- favor generic,
+  timeless visual subjects, since a stock site has nothing event-specific; a job with no web sources at all
+  gets guidance aimed at matching local `library/clips/` filenames instead. Mixed source lists get both
+  pieces of applicable guidance.
+- `search_volume`/`difficulty` stay in the output schema (nothing downstream changes -- `Keyword` model,
+  `poc.py`'s `vol~` display, the decision log are all untouched), but the prompt now says explicitly they're
+  "context only, never a reason to phrase `term` differently," so that framing can't leak back into how
+  phrases get worded.
+- `last_trace` (and so the `proposed_keywords` decision-log entry, and the new `keywords_proposed.json` from
+  the entry above) now also records `sources_this_round`, so which library-tailored guidance actually applied
+  to a given round is part of the permanent record, not just implied by the prompt text.
+- Couldn't validate against a live model call from this sandbox (its network egress blocks direct API calls
+  the same way it blocks PyPI -- confirmed while trying); validated instead by rendering the actual prompt
+  for Aly's real job (archive+stock mix, stock-only, archive-only, and no-sources cases) and reading it end to
+  end, plus 7 new tests (`tests/test_stages.py`) covering every `_source_guidance()` branch, that the old "SEO
+  analyst" framing is gone, and that `PROMPT.format()` never raises for any real source combination.
+- **Not done**: no change to `scripts/make_keywords.py`'s own prompt -- it was already written this way
+  (true-crime-archive-specific, never had the SEO framing) and wasn't the source of the problem. Full suite:
+  280 passing, no regressions.
 
 ## Done: keyword files, always -- proposed/approved always saved, manual edits get a real file, subjects get a reusable library (2026-09-23)
 Prompted directly, after asking where keyword generation happens: Aly wanted a file created every time,
@@ -693,3 +740,115 @@ than being four separate point fixes:
   scene-to-asset matching only (replace/augment `AssetClipSource`'s word-overlap scoring with an LLM judging
   the existing approved pool against each scene's narration) -- no new sourcing round, no stage reorder, and it
   directly targets "the photos don't fit the script" without deciding the bigger architecture question yet.
+
+## In progress: major overhaul for authentic case material vs. historical/stock/reconstruction (2026-09-23 --)
+
+Working through Aly's 15-section requirements doc (goal: "find more relevant photos and footage, especially
+authentic material connected to a specific true-crime case, while clearly distinguishing it from historical
+context, generic stock, and reconstructions"). Repository assessment first (verified, not assumed, what the
+prior code actually did), then staged implementation, without promising every case will have accessible,
+reusable photos or footage. Stage 1 (data model + sourcing foundations) done so far:
+
+- **Data model** (`pipeline/core/models.py`): `Asset` gained `category` (verified_case/unverified_case_candidate/
+  historical_context/illustrative_stock/reconstruction, never auto-promoted to verified_case -- always a human
+  decision), a full identity-evidence block (`identity_status`, `depicts`, `case_connection`, `media_date` vs.
+  `event_date`, ...) kept fully independent of a separate rights-evidence block (`rights_status`, distinguishing
+  public_domain/cc0/open_license/paid_license/unresolved -- never "no known restrictions" treated as a legal
+  conclusion) and of `status` (your use/reject decision) -- identity, relevance, rights and selection stay 4
+  independent axes, per the requirements doc. `Keyword`/`TextRef` gained a `QueryGroup` (research/case/
+  historical/stock, docs/SEARCH_PLANNING.md) plus entity/aliases/dates/locations/essential for a structured
+  search plan.
+- **Source error taxonomy** (`pipeline/sources/base.py`, docs/SOURCE_ERRORS.md): `CredentialsMissing`/
+  `RateLimited` (respects a provider's `Retry-After`)/`ProviderError`/`ResponseParseError` replace one
+  undifferentiated `SourceUnavailable` bucket, each source adapter updated to raise the specific one, and every
+  per-query/per-source trace note now carries an `outcome` (ok_kept/ok_zero_matches/ok_no_downloadable/
+  parse_error/credentials_missing/rate_limited/network_error/skipped_other/unknown_error) -- a technical failure
+  is never shown as "searched, found nothing."
+- **Wikipedia reporting fixed** (`pipeline/sources/wikipedia.py`): saved-article character cap is now
+  configurable (`wikipedia_max_chars`, was hardcoded), a filename-collision bug that could silently overwrite
+  one article's saved file with another's is fixed, and every trace note/log line/SOURCES.md row is tagged
+  `kind: "text"` vs. `"media"` so "kept: 1" can't be misread as a photo when it's an article (or vice versa).
+- **Query-group routing** (`pipeline/sources/groups.py`, `pipeline/stages/sourcing.py`,
+  `pipeline/stages/keywords/llm.py`, docs/SEARCH_PLANNING.md): the LLM keyword prompt now asks for a group per
+  term with the exact required examples ("Corazon Amurao interview" / "Chicago residential streets 1960s" /
+  "empty hospital hallway" -- explicitly as search examples, never a claim material exists), and sourcing routes
+  each term only to the sources its group pools to (case/historical -> archives except Wikipedia; research ->
+  Wikipedia only; stock -> generic stock sites), stamping each new asset's `category` from the group that found
+  it. A manual-keyword job (no group diversity) keeps broadcasting every term to every source exactly as before
+  -- routing only activates once the LLM's structured plan actually populates groups, so nothing regresses for
+  existing jobs/workflows.
+- **Case reference sheet & visual checklist** (`Job.case_reference`/`Job.visual_checklist`, docs/CASE_REFERENCE.md):
+  a canonical name, atomic facts (person/alias/date/location/address/institution/event, each `confirmed`/
+  `unresolved`/`conflicting` with its own source links) and a generated-but-always-human-moved visual checklist,
+  entirely separate from anything sourcing/vetting/scoring writes -- the one place in a job that only ever
+  contains what a human actually entered or confirmed. Editable at any job state via 8 orchestrator methods/API
+  routes; nothing cross-checks a search term against it yet (see "What this doesn't do yet" in that doc).
+- **Deferred from Stage 1** (see docs/SEARCH_PLANNING.md's last section and docs/KNOWN_LIMITATIONS.md):
+  per-provider query syntax/operators beyond a plain-text phrase; automatic query broadening/alternatives when a
+  `case` search comes up empty; cross-checking a search term against the case reference sheet's facts;
+  NARA/Prelinger/NYPL/Europeana-rights-specific historical media work (Stage 3); query-sequence refinement and
+  query-construction transparency in the UI (Stage 4).
+
+Stage 2 (Gate 2 UI, manual-URL-import parity, local-clip inclusion, pre-render coverage check) is in progress:
+
+- **Gate 2 "Add links" fixed (#9)** (`pipeline/core/orchestrator.py::add_reviewable_asset`, `pipeline/api/app.py::
+  assets_add_url`, `POST /jobs/{id}/assets/add-url`): the old behaviour queued pasted URLs into the job's URL list
+  and downloaded them on the *next* sourcing round, with no per-link feedback at all -- a typo or a dead link
+  just silently produced nothing, or a plain webpage link failed with a raw yt-dlp stderr tail. Each pasted line
+  now downloads synchronously, one at a time (same `UrlListSource.fetch_one` Gate 3's "drop a link on a scene"
+  already used), and reports its own success or a specific, readable failure -- "that link is already in this
+  project" for a duplicate, or a plain-language "this doesn't look like a direct video/photo link" hint alongside
+  yt-dlp's own error when the link is evidently a webpage rather than media (`pipeline/sources/urls.py`'s
+  `NOT_MEDIA_HINTS` -- the hint is added next to yt-dlp's own text, never in place of it, since the heuristic can
+  be wrong). Every added asset lands `pending`, exactly like a searched one -- Gate 2 is itself the review step,
+  so nothing added this way is ever auto-approved, unlike Gate 3's drop-onto-a-scene (`add_scene_asset`), which
+  auto-approves a low-risk clip because it's already past review. No login/paywall is bypassed either way; a link
+  behind one just fails the same way it would for yt-dlp on its own. The old `extra_urls_text`/`POST /assets/
+  reject` bulk-queue mechanism still exists (for scripted/CLI use), it's just no longer what the review page's
+  "Add links" box calls.
+- **Provenance now actually recorded (#9/#10, partial)**: `Asset.import_method` (`search`/`manual_url`/
+  `local_folder`/`scene_upload`) existed on the model since Stage 1 but nothing ever set it to anything but the
+  default `"search"` -- a folder-imported or dragged-in asset was indistinguishable from a keyword-search result
+  in its own metadata. `pipeline/sources/urls.py`, `pipeline/sources/upload.py` and `pipeline/sources/folder.py`
+  now stamp the correct value. `FolderSource` still imports the *entire* `library/scraped/` folder into any job
+  listing `folder` as a source with no per-job filtering, and `owner_submitted`/`owner_note` are still never set
+  by anything -- that per-job-inclusion piece of #10 is not done yet (next up).
+- **A real API bug fixed along the way**: an `HTTPException` raised directly in a route handler (as several
+  Gate 2/3 handlers do for a 400/409/422) came back as a **plain-text** body, not the `{"error": ...}` JSON shape
+  the review page's `api()` helper and every other endpoint assume -- so a specific failure message like the new
+  "doesn't look like a direct video/photo link" hint would silently never have reached the page; the frontend's
+  `fetch` can't parse plain text as JSON and falls back to the generic HTTP status text instead. Fixed with one
+  `exception_handlers` entry in `pipeline/api/app.py::create_app`, which fixes it for every existing handler that
+  raises `HTTPException` directly, not just the new one.
+- **Explicit per-job local-clip inclusion (#10)** (`pipeline/sources/folder.py`, `Orchestrator.reject_assets`'s
+  `folder_files` param, `GET /jobs/{id}/folder-files`, review page's "Add your own footage" panel): `FolderSource`
+  no longer imports `library/scraped/`'s entire contents into every job that lists `folder` as a source -- it
+  imports nothing until the job's `providers.options["folder_files"]` names specific relative paths, picked
+  after browsing what's actually there (`list_available()`). Queued the same way a pasted URL list is (merged
+  in, `folder` added to `providers.sources` if needed, pulled on the next sourcing round) rather than
+  synchronously like #9's links -- these are already-local files with no download/network failure mode, so
+  there's nothing that needs per-file success/failure feedback the way a URL fetch does. Every file picked this
+  way is `owner_submitted=True` with your note as `owner_note`: picking it for a job IS the explicit "this is
+  mine" action, never inferred.
+- **Identity/rights/category write path (#7/#8, groundwork for #13)** (`Orchestrator.set_asset_identity`/
+  `set_asset_rights`/`set_asset_category`, `POST /jobs/{id}/assets/{asset_id}/identity|rights|category`): Stage 1
+  built the `category`/`identity_status`/`rights_status` fields onto `Asset` but never built anything that could
+  actually set them past their defaults -- there was no way for a human to record "this is Jane Doe, per the
+  caption" or "checked, this is CC0" anywhere, which made the whole identity/rights half of the data model dead
+  weight. Each setter works the same way `label_asset` already does: at any job state, not just while sitting at
+  Gate 2, since a person may want to record who's pictured or where rights stand well after the asset was
+  approved or rejected; requires a named reviewer, stamps `*_reviewer`/`*_reviewed_at`; validates its status
+  against the model's literal values; and the three axes are fully independent saves -- setting one never touches
+  another. Logged to the decision log with before/after like every other mutation.
+- **Gate 2 UI surfacing (#13)** (`pipeline/api/review_page.py`): every card now shows category/identity/rights as
+  badges next to the existing score/risk ones ("not categorized" until someone sets one; identity/rights badges
+  colored only when they land somewhere unambiguous -- verified identity or a clear open rights status green,
+  disputed identity red, unresolved rights amber), and a "Case connection & rights" panel (read-only summary --
+  who set what, when, with what evidence/notes -- plus three inline save forms) that's independent of the
+  existing "Why this score and risk" panel and never auto-fills from it. `GET /jobs/{id}/asset-report`
+  (`Orchestrator.asset_report`) feeds a collapsible "Sources & rights so far" panel above the grid: per-source
+  photo/video/research counts, category/identity/rights breakdowns across the whole pool, and the labeling cost
+  run up so far for the job (reusing the existing `usage_summary` rollup, not a second cost calculation) --
+  collapsed and lazily loaded so it costs nothing when not opened. Backend: 17 new tests across
+  `tests/test_asset_identity_rights.py` and `tests/test_api_sources.py`, full suite at 417, all passing.
+- **Not done yet**: the pre-render visual coverage check (#12).

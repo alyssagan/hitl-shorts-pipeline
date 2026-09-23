@@ -94,6 +94,14 @@ let job=null, decisions={}, notes={}, labels={}, labelSaved={}, labelForms={}, d
 let sceneNarration={}, sceneOrder=null, sceneClipOverride={}, sceneNotes={}, dragSceneId=null;
 let dragAssetPath=null, pendingIntent={};   // pendingIntent: assetId -> scene id it was dragged onto, while it's still high-risk/pending
 let methodDefs={}, labelReasons=[];
+let folderFiles=null, folderFilesOpen=false, folderSelection={};   // path -> note draft, own-footage panel (#10)
+let catForms={}, idForms={}, rightsForms={};   // per-asset draft values for the "Case connection & rights" editor (#13)
+let assetReport=null, assetReportOpen=false;   // per-job/per-source summary panel (#13)
+const CATEGORY_LABELS = {verified_case:"verified case", unverified_case_candidate:"unverified case candidate",
+  historical_context:"historical context", illustrative_stock:"illustrative stock", reconstruction:"reconstruction"};
+const IDENTITY_LABELS = {unverified:"unverified", verified:"verified", disputed:"disputed"};
+const RIGHTS_LABELS = {public_domain:"public domain", cc0:"CC0", open_license:"open license",
+  paid_license:"paid license", unresolved:"unresolved"};
 
 async function loadStatic(){
   // Job-independent, small and unchanging within a session -- fetched once (docs/EVALUATION.md, docs/REVIEW_UI.md).
@@ -190,6 +198,111 @@ function counts(){
   return {use, rej, und, hidden};
 }
 
+async function saveCategory(a){
+  const cat = (catForms[a.id]||{}).value || a.category;
+  if (!cat) return;
+  busy=true; error=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    await api("POST", `/jobs/${JOB}/assets/${a.id}/category`, {category:cat, reviewer});
+    delete catForms[a.id];
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function saveIdentity(a){
+  const f = idForms[a.id]||{};
+  busy=true; error=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    await api("POST", `/jobs/${JOB}/assets/${a.id}/identity`, {
+      status: f.status || a.identity_status || "unverified",
+      depicts: f.depicts!=null?f.depicts:(a.depicts||""), case_connection: f.case_connection!=null?f.case_connection:(a.case_connection||""),
+      identity_evidence: f.identity_evidence!=null?f.identity_evidence:(a.identity_evidence||""),
+      notes: f.notes||"", reviewer});
+    delete idForms[a.id];
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function saveRights(a){
+  const f = rightsForms[a.id]||{};
+  busy=true; error=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    await api("POST", `/jobs/${JOB}/assets/${a.id}/rights`, {
+      status: f.status || a.rights_status || "unresolved",
+      evidence: f.evidence!=null?f.evidence:(a.rights_evidence||""), notes: f.notes||"", reviewer});
+    delete rightsForms[a.id];
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+function caseRightsPanel(a){
+  // #7/#8/#13: identity and rights are independent axes from relevance/decision, and NEVER move except
+  // through this explicit save -- a keyword match or AI score never sets them by itself.
+  const catForm = catForms[a.id]||{}, idForm = idForms[a.id]||{}, rForm = rightsForms[a.id]||{};
+  return h("details",{}, h("summary",{},"Case connection & rights"),
+    h("div",{class:"why"},
+      `Category: ${a.category?(CATEGORY_LABELS[a.category]||a.category):"(not categorized)"}\n`+
+      `Identity: ${IDENTITY_LABELS[a.identity_status]||a.identity_status}` +
+        (a.identity_reviewer?` -- set by ${a.identity_reviewer} (${a.identity_reviewed_at})`:" -- not yet reviewed") + "\n" +
+      (a.depicts?`  depicts: ${a.depicts}\n`:"") + (a.case_connection?`  case connection: ${a.case_connection}\n`:"") +
+      (a.identity_evidence?`  evidence: ${a.identity_evidence}\n`:"") + (a.identity_notes?`  notes: ${a.identity_notes}\n`:"") +
+      `Rights: ${RIGHTS_LABELS[a.rights_status]||a.rights_status}` +
+        (a.rights_reviewer?` -- set by ${a.rights_reviewer} (${a.rights_reviewed_at})`:" -- not yet reviewed") + "\n" +
+      (a.rights_evidence?`  evidence: ${a.rights_evidence}\n`:"") + (a.rights_notes?`  notes: ${a.rights_notes}\n`:"") +
+      `Entered this job via: ${a.import_method||"search"}` +
+        (a.owner_submitted?` (your own material${a.owner_note?": "+a.owner_note:""})`:"")),
+    h("div",{class:"labelform"}, h("div",{class:"meta"},"Set category"),
+      h("select",{onchange:e=>{catForms[a.id]=Object.assign({},catForm,{value:e.target.value});}},
+        [["","(choose)"],...Object.entries(CATEGORY_LABELS)]
+          .map(([val,t])=>h("option",{value:val,selected:val===(catForm.value||a.category||"")},t))),
+      h("button",{disabled:busy,onclick:()=>saveCategory(a)},"Save category")),
+    h("div",{class:"labelform"}, h("div",{class:"meta"},"Set identity"),
+      h("select",{onchange:e=>{idForms[a.id]=Object.assign({},idForm,{status:e.target.value});}},
+        Object.entries(IDENTITY_LABELS).map(([val,t])=>h("option",{value:val,selected:val===(idForm.status||a.identity_status||"unverified")},t))),
+      h("input",{type:"text",placeholder:"depicts (who/what this shows)",value:idForm.depicts!=null?idForm.depicts:(a.depicts||""),
+        oninput:e=>{idForms[a.id]=Object.assign({},idForm,{depicts:e.target.value});}}),
+      h("input",{type:"text",placeholder:"case connection",value:idForm.case_connection!=null?idForm.case_connection:(a.case_connection||""),
+        oninput:e=>{idForms[a.id]=Object.assign({},idForm,{case_connection:e.target.value});}}),
+      h("input",{type:"text",placeholder:"evidence (the source's own caption/record text)",
+        value:idForm.identity_evidence!=null?idForm.identity_evidence:(a.identity_evidence||""),
+        oninput:e=>{idForms[a.id]=Object.assign({},idForm,{identity_evidence:e.target.value});}}),
+      h("input",{type:"text",placeholder:"notes",value:idForm.notes!=null?idForm.notes:"",
+        oninput:e=>{idForms[a.id]=Object.assign({},idForm,{notes:e.target.value});}}),
+      h("button",{disabled:busy,onclick:()=>saveIdentity(a)},"Save identity")),
+    h("div",{class:"labelform"}, h("div",{class:"meta"},"Set rights"),
+      h("select",{onchange:e=>{rightsForms[a.id]=Object.assign({},rForm,{status:e.target.value});}},
+        Object.entries(RIGHTS_LABELS).map(([val,t])=>h("option",{value:val,selected:val===(rForm.status||a.rights_status||"unresolved")},t))),
+      h("input",{type:"text",placeholder:"evidence",value:rForm.evidence!=null?rForm.evidence:(a.rights_evidence||""),
+        oninput:e=>{rightsForms[a.id]=Object.assign({},rForm,{evidence:e.target.value});}}),
+      h("input",{type:"text",placeholder:"notes",value:rForm.notes!=null?rForm.notes:"",
+        oninput:e=>{rightsForms[a.id]=Object.assign({},rForm,{notes:e.target.value});}}),
+      h("button",{disabled:busy,onclick:()=>saveRights(a)},"Save rights")));
+}
+function assetReportPanel(){
+  // "Sources & rights so far" (#13): per-source photo/video/research counts, plus how much of the pool is
+  // categorized/identity-checked/rights-cleared so far, and the LLM labeling cost estimate -- reusing the
+  // existing usage rollup (usage_summary) rather than a second cost calculation.
+  const r = assetReport;
+  const bd = (obj, labelMap) => Object.entries(obj||{}).map(([k,v]) =>
+      h("div",{class:"meta"}, `${(labelMap&&labelMap[k])||k}: ${v}`));
+  return h("div",{class:"panel"},
+    h("details",{open:assetReportOpen,ontoggle:e=>{assetReportOpen=e.target.open; if(assetReportOpen) loadAssetReport();}},
+      h("summary",{},"Sources & rights so far"),
+      !assetReportOpen ? null :
+      !r ? h("div",{class:"sub"},"Loading…") :
+      h("div",{style:"margin-top:8px;display:flex;flex-direction:column;gap:10px"},
+        h("div",{},
+          h("div",{class:"meta"}, h("b",{},`${r.total_assets} asset(s), ${r.total_references} research reference(s)`)),
+          h("table",{style:"border-collapse:collapse;margin-top:4px;font-size:12.5px"},
+            h("tr",{}, ["source","photos","videos","research"].map(t=>h("th",{style:"text-align:left;padding:2px 10px 2px 0;color:var(--mute)"},t))),
+            Object.entries(r.by_source||{}).map(([src,row])=>
+              h("tr",{}, [src,row.photos,row.videos,row.research].map(t=>h("td",{style:"padding:2px 10px 2px 0"},String(t))))))),
+        h("div",{}, h("div",{class:"meta"}, h("b",{},"By category")), bd(r.by_category, CATEGORY_LABELS)),
+        h("div",{}, h("div",{class:"meta"}, h("b",{},"By identity status")), bd(r.by_identity_status, IDENTITY_LABELS)),
+        h("div",{}, h("div",{class:"meta"}, h("b",{},"By rights status")), bd(r.by_rights_status, RIGHTS_LABELS)),
+        h("div",{}, h("div",{class:"meta"}, h("b",{},"Labeling cost so far")),
+          h("div",{class:"meta"}, `${(r.usage||{}).calls||0} call(s), ~$${((r.usage||{}).cost_usd||0).toFixed(4)}`)))));
+}
 function card(a){
   const v = a.vetting||{}, d = decisions[a.id], r = risk(a), lbl = labels[a.id];
   const media = a.kind==="video"
@@ -238,13 +351,20 @@ function card(a){
         h("span",{class:"b "+({high:"hi",medium:"med",low:"lo"}[r])}, "risk "+r),
         h("span",{class:"b"}, a.source), h("span",{class:"b"}, a.kind),
         below(a)?h("span",{class:"b"},"below threshold"):null,
-        v.usable===false?h("span",{class:"b hi"},"can't be used (too small)"):null),
+        v.usable===false?h("span",{class:"b hi"},"can't be used (too small)"):null,
+        a.category?h("span",{class:"b"}, CATEGORY_LABELS[a.category]||a.category):h("span",{class:"b"},"not categorized"),
+        h("span",{class:"b"+(a.identity_status==="verified"?" lo":a.identity_status==="disputed"?" hi":"")},
+          "identity: "+(IDENTITY_LABELS[a.identity_status]||a.identity_status)),
+        h("span",{class:"b"+(["public_domain","cc0","open_license"].includes(a.rights_status)?" lo":a.rights_status==="unresolved"?" med":"")},
+          "rights: "+(RIGHTS_LABELS[a.rights_status]||a.rights_status)),
+        lbl==="duplicate"?h("span",{class:"b med"},"marked duplicate"):null),
       h("div",{class:"title"}, a.title||a.id),
       h("div",{class:"meta"}, "license: "+(a.license||"(none found)")+" · by: "+(a.author||"(unknown)")),
       h("div",{class:"meta"}, a.page_url||a.source_url ? h("a",{href:a.page_url||a.source_url,target:"_blank",rel:"noopener"},"open original page") : "no source page recorded",
          a.width?` · ${a.width}×${a.height}`:"", a.duration?` · ${Math.round(a.duration)}s`:""),
       a.description?h("div",{class:"meta"}, a.description.slice(0,260)):null,
       why,
+      caseRightsPanel(a),
       needsNote?h("textarea",{class:"note",placeholder:"HIGH risk: why is it OK to use this? (required)",
           oninput:e=>{notes[a.id]=e.target.value; updateSubmit();}}, notes[a.id]||""):null,
       labelForm),
@@ -322,22 +442,39 @@ async function searchAgain(){
     busy=false; await load();
   }catch(e){ busy=false; error=String(e.message||e); render(); }
 }
+let urlAddStatus = [];   // {url, ok, message} for the most recent "Add links" batch -- one per pasted line
+function parseUrlLines(text){
+  // Same "url | note | position" format scripts/poc.py's --urls file uses. Blank lines and # comments skipped.
+  return text.split("\n").map(l=>l.trim()).filter(l=>l && !l.startsWith("#")).map(line=>{
+    const parts = line.split("|").map(s=>s.trim());
+    return {line, url: parts[0], note: parts[1]||"", position: parts[2]||""};
+  });
+}
 async function addUrls(){
-  // Gate 2's "Add links" box: paste one or more URLs (like RankReel's link import), same "url | note | position"
-  // format scripts/poc.py's --urls file uses. Backed by the same /assets/reject endpoint as Search again/Next
-  // batch (extra_urls_text), so it saves your picks first and re-runs sourcing -- yt-dlp/direct-download for
-  // whatever's new, nothing already pulled gets re-fetched.
+  // Gate 2's "Add links" box: paste one or more URLs (like RankReel's link import). Each line is downloaded
+  // one at a time via /assets/add-url (#9) -- the same synchronous yt-dlp/direct pattern Gate 3's "drop a
+  // link on a scene" uses -- so every link gets its own immediate success/failure result as it happens,
+  // instead of being queued for a later sourcing round with no feedback at all.
   const ta = document.getElementById("urlsbox");
-  const text = ta.value;
-  if (!text.trim()){ error="Paste at least one URL first."; render(); return; }
+  const entries = parseUrlLines(ta.value);
+  if (!entries.length){ error="Paste at least one URL first."; render(); return; }
   const missing = missingHighRiskNotes();
   if (missing){ error = `${missing} high-risk Use pick(s) need a note before adding links -- add the note, or un-pick them.`; render(); return; }
-  busy=true; error=""; render();
+  busy=true; error=""; urlAddStatus=[]; render();
   try{
     const reviewer = (store.get("reviewer")||"").trim();
     await persistDecisions(reviewer);
-    await api("POST",`/jobs/${JOB}/assets/reject`,{extra_urls_text:text, reviewer});
-    ta.value = "";
+    for (const e of entries){
+      try{
+        await api("POST", `/jobs/${JOB}/assets/add-url`, {url:e.url, note:e.note, position:e.position, reviewer});
+        urlAddStatus.push({url:e.url, line:e.line, ok:true, message:"added -- pending review below"});
+      }catch(err){
+        urlAddStatus.push({url:e.url, line:e.line, ok:false, message:String(err.message||err)});
+      }
+      render();   // one line at a time, so progress shows up as each link finishes rather than all at once
+    }
+    const failed = urlAddStatus.filter(s=>!s.ok).map(s=>s.line);
+    ta.value = failed.join("\n");   // keep only the failed lines, so a fix-and-retry doesn't re-add the rest
     busy=false; await load();
   }catch(e){ busy=false; error=String(e.message||e); render(); }
 }
@@ -351,6 +488,46 @@ async function nextBatch(){
     const reviewer = (store.get("reviewer")||"").trim();
     await persistDecisions(reviewer);
     await api("POST",`/jobs/${JOB}/assets/reject`,{max_queries: Math.max(1, Number(batchSize)||10), reviewer});
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function loadAssetReport(){
+  // Per-job/per-source summary (#13) -- photo/video/research counts, category/identity/rights breakdowns,
+  // and the labeling cost estimate (reusing the existing usage rollup, not a separate cost calculation).
+  // Fetched lazily, same pattern as the activity log and the own-footage folder listing above.
+  try{ assetReport = await api("GET", `/jobs/${JOB}/asset-report`); }
+  catch(e){ error=String(e.message||e); }
+  render();
+}
+async function loadFolderFiles(){
+  // What's currently sitting in the server's own-footage folder (#10) -- read-only, imports nothing by
+  // itself. Fetched lazily (only once the panel is opened), same pattern as the activity log below.
+  try{ folderFiles = await api("GET", `/jobs/${JOB}/folder-files`); }
+  catch(e){ folderFiles = {folder:"", files:[]}; error=String(e.message||e); }
+  render();
+}
+function toggleFolderFile(path, checked){
+  if (checked) folderSelection[path] = folderSelection[path] || "";
+  else delete folderSelection[path];
+  render();
+}
+async function addFolderFiles(){
+  // Picking a file here IS the explicit "this is my own material" action (#10) -- nothing in the server's
+  // folder is ever added to a job without this. Queued via the same /assets/reject path Next batch/Search
+  // again use (not downloaded synchronously like Add links' /assets/add-url): these are already local files
+  // with no network failure mode, so there's nothing that needs immediate per-file feedback.
+  const paths = Object.keys(folderSelection);
+  if (!paths.length){ error="Pick at least one file first."; render(); return; }
+  const missing = missingHighRiskNotes();
+  if (missing){ error = `${missing} high-risk Use pick(s) need a note before adding footage -- add the note, or un-pick them.`; render(); return; }
+  busy=true; error=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    await persistDecisions(reviewer);
+    const folder_files = paths.map(p => ({path:p, note: folderSelection[p]||""}));
+    await api("POST", `/jobs/${JOB}/assets/reject`, {folder_files, reviewer});
+    folderSelection = {};
+    folderFiles = null;      // refetched next time the panel opens, so it reflects the new "already selected" state
     busy=false; await load();
   }catch(e){ busy=false; error=String(e.message||e); render(); }
 }
@@ -559,6 +736,33 @@ function sceneCard(s, i, n){
         oninput:e=>{sceneNotes[s.id]=e.target.value;}}, sceneNotes[s.id]!=null?sceneNotes[s.id]:(s.note||"")));
 }
 
+function folderFilesPanel(){
+  // "Add your own footage" (#10): a file here is only ever added to THIS job because you explicitly ticked
+  // it -- nothing in the server's own-footage folder reaches any job on its own.
+  return h("div",{style:"margin-top:12px;padding-top:12px;border-top:1px solid var(--line)"},
+    h("details",{open:folderFilesOpen,ontoggle:e=>{folderFilesOpen=e.target.open; if(folderFilesOpen) loadFolderFiles();}},
+      h("summary",{},"Or add your own footage from the server's folder"),
+      h("div",{class:"sub",style:"margin-top:6px"},"Files your own scraper (or you) dropped on the server (e.g. "+
+        "library/scraped/) -- nothing here is ever added to a job automatically; tick specific files for THIS "+
+        "job. Queued for the next sourcing round, like Next batch, rather than added immediately -- these are "+
+        "already local files, so there's no download that can fail."),
+      !folderFilesOpen ? null :
+      !folderFiles ? h("div",{class:"sub"},"Loading…") :
+      folderFiles.files.length===0 ? h("div",{class:"sub"},`No files found in ${folderFiles.folder}.`) :
+      h("div",{},
+        h("div",{style:"display:flex;flex-direction:column;gap:4px;margin-top:6px"},
+          folderFiles.files.map(f => h("div",{style:"display:flex;gap:8px;align-items:center;flex-wrap:wrap"},
+            h("input",{type:"checkbox", disabled: f.selected_for_this_job || !f.usable,
+                checked: f.selected_for_this_job || (f.path in folderSelection),
+                onchange:e=>toggleFolderFile(f.path, e.target.checked)}),
+            h("span",{class:"meta"}, f.path + (f.title?` (${f.title})`:"") +
+                (f.selected_for_this_job?" — already selected for this job":"") +
+                (!f.usable?" — unsupported format":"")),
+            (f.path in folderSelection) ? h("input",{type:"text", placeholder:"note (optional, e.g. why it's yours to use)",
+                style:"flex:1;min-width:160px", oninput:e=>{folderSelection[f.path]=e.target.value;}}) : null))),
+        h("div",{class:"bar",style:"margin-top:8px"},
+          h("button",{class:"primary",disabled:busy,onclick:addFolderFiles},"Add selected files")))));
+}
 function render(){
   if(!job) return;
   const c = counts(), reviewing = job.state==="assets_review", inScenes = job.state==="scenes_review";
@@ -608,11 +812,17 @@ function render(){
       h("div",{style:"margin-top:12px;padding-top:12px;border-top:1px solid var(--line)"},
         h("div",{class:"sub"},"Or add links -- a YouTube/TikTok/X/Vimeo/Instagram/news link (pulled with yt-dlp) or a direct "+
           ".mp4/.jpg/... link, one per line. Optionally \"URL | note | position\" (position: a scene number or intro/end). "+
-          "Platform videos are flagged high-risk by vetting -- approving one needs a written reason, same as everywhere else."),
+          "Each link downloads right away and shows its own result below. Platform videos are flagged high-risk by "+
+          "vetting -- approving one needs a written reason, same as everywhere else. No login/paywall is ever bypassed: "+
+          "a link behind one will just fail here, same as it would for yt-dlp on its own."),
         h("textarea",{id:"urlsbox",class:"note",style:"min-height:70px;font-family:monospace",
             placeholder:"https://www.youtube.com/watch?v=... | crime-scene b-roll | 3\nhttps://example.com/clip.mp4"}),
         h("div",{class:"bar",style:"margin-top:6px"},
-          h("button",{class:"primary",disabled:busy,onclick:addUrls},"Add links")))) : null);
+          h("button",{class:"primary",disabled:busy,onclick:addUrls},"Add links")),
+        urlAddStatus.length ? h("div",{style:"margin-top:8px;display:flex;flex-direction:column;gap:3px"},
+          urlAddStatus.map(s => h("div",{class:"meta", style:"color:"+(s.ok?"var(--ok)":"var(--no)")},
+            (s.ok?"✓ ":"✗ ")+s.url+" — "+s.message))) : null),
+      folderFilesPanel()) : null);
   $app.replaceChildren(top, body);
   updateSubmit();
   document.querySelectorAll("video").forEach(v=>v.muted=true);
@@ -622,6 +832,7 @@ function assetReviewBody(xs){
     h("div",{class:"sub",style:"margin-bottom:10px"},
       `Showing ${xs.length} of ${job.assets.length}. Score = share of a keyword's words found in the item's own title/description/tags (docs/SCORING.md). `+
       `Items under ${pct(minScore)} are hidden. Anything you leave undecided or hidden when you submit is not used (logged as rejected with a note) and is NOT counted as a training label. Only your Use / Duplicate / Irrelevant clicks are saved as labels, immediately, one per click (RELEVANCE_LABELS.jsonl in the project folder) -- separately from "Save and continue", which records the approve/reject decision.`),
+    assetReportPanel(),
     h("div",{class:"grid"}, xs.map(card)));
 }
 function sceneReviewBody(){

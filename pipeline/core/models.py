@@ -46,6 +46,20 @@ REVIEW_STATES = {JobState.KEYWORDS_REVIEW, JobState.ASSETS_REVIEW, JobState.SCEN
 TERMINAL_STATES = {JobState.COMPLETED, JobState.CANCELLED}
 
 
+QueryGroup = Literal["research", "case", "historical", "stock"]
+# What each group is FOR (see docs/SEARCH_PLANNING.md):
+#   research   background for narration -- routed only to text/reference sources (Wikipedia), never
+#              treated as an image/video search and never produces an Asset, only TextRefs.
+#   case       verified names, aliases, addresses, institutions, dates, interviews, proceedings --
+#              routed to archive-capable sources; produces Assets with category="unverified_case_candidate"
+#              (never auto-promoted to "verified_case" -- that always needs an explicit human decision).
+#   historical relevant places, periods, architecture, everyday life -- same source pool as "case", but
+#              produces Assets with category="historical_context" since it isn't claiming to show the
+#              actual people/events, just the era.
+#   stock      generic description of what should appear onscreen -- routed only to generic stock sites;
+#              produces Assets with category="illustrative_stock".
+
+
 class Keyword(BaseModel):
     id: str = Field(default_factory=_id)
     term: str
@@ -55,6 +69,21 @@ class Keyword(BaseModel):
     rank: int | None = None                 # ranking position, if the provider has one
     meta: dict[str, Any] = Field(default_factory=dict)
     approved: bool = False
+
+    # --- structured search plan (docs/SEARCH_PLANNING.md) -------------------------------------------
+    # Populated by the LLM keyword stage's structured plan output, or left at defaults for `manual`/
+    # reused-library keywords (which never claimed to be more than a search phrase to begin with).
+    # `group` decides which sources this term is even sent to (see QueryGroup above) and what category
+    # an asset found by it gets stamped with -- it is the single field the new sourcing routing reads.
+    group: QueryGroup = "historical"
+    visual_needed: str = ""                 # the actual visual this term is trying to find, in plain words
+    scene_ref: str = ""                     # which planned scene/beat this supports, if known
+    entity: str = ""                        # target person/place/object/event, if this is entity-specific
+    aliases: list[str] = Field(default_factory=list)     # verified alternate names/spellings for `entity`
+    dates: list[str] = Field(default_factory=list)
+    locations: list[str] = Field(default_factory=list)
+    essential: bool = True                  # False = a nice-to-have/optional detail, not a hard requirement
+    alternatives: list[str] = Field(default_factory=list)  # other phrasings to try if this one comes up empty
 
 
 Severity = Literal["info", "low", "medium", "high"]
@@ -104,6 +133,17 @@ class Vetting(BaseModel):
     contributions: list[ScoreContribution] = Field(default_factory=list)
 
 
+AssetCategory = Literal["verified_case", "unverified_case_candidate", "historical_context", "illustrative_stock", "reconstruction"]
+IdentityStatus = Literal["unverified", "verified", "disputed"]
+# What the available evidence suggests about REUSE RIGHTS -- never a definitive legal determination, and
+# never auto-derived from "found no rights_advisory" alone (docs/RIGHTS.md). "public_domain" and "cc0" are
+# kept separate on purpose: CC0 is an explicit dedication by the rights holder, public-domain-by-law/expiry
+# (LOC "no known restrictions", NASA, a US government work) is a different kind of claim with different
+# evidence behind it, and #8 explicitly asks these stay distinguishable rather than being merged.
+RightsStatus = Literal["public_domain", "cc0", "open_license", "paid_license", "unresolved"]
+ImportMethod = Literal["search", "manual_url", "local_folder", "scene_upload"]
+
+
 class Asset(BaseModel):
     id: str = Field(default_factory=_id)
     source: str                             # adapter name: wikipedia_commons, pexels, ...
@@ -115,35 +155,79 @@ class Asset(BaseModel):
     title: str = ""
     description: str = ""
     query: str = ""                         # search that found it
-    author: str = ""
-    license: str = ""
-    license_url: str = ""
+    author: str = ""                        # creator/photographer/agency/uploader, whichever the source gives
+    license: str = ""                       # the reuse claim AS STATED by the source -- never edited to match
+    license_url: str = ""                   # a later rights determination; see rights_* below for that.
     attribution: str = ""                   # ready-to-paste credit line
     width: int | None = None
     height: int | None = None
     duration: float | None = None
     mime: str = ""
     sha256: str = ""
-    fetched_at: str = Field(default_factory=_now)
+    fetched_at: str = Field(default_factory=_now)       # when THIS PIPELINE retrieved the file -- not when
+                                             # the photo/video was made or the event happened; see media_date/
+                                             # event_date below, which are about the real world, not retrieval.
     meta: dict[str, Any] = Field(default_factory=dict)   # raw source metadata
     vetting: Vetting | None = None
     status: Literal["pending", "approved", "rejected"] = "pending"
-    decision_note: str = ""
+    decision_note: str = ""                 # the approve/reject decision's own note -- independent of
+                                             # identity_notes/rights_notes below (#8: these axes never collapse)
     reviewer: str = ""
     reviewed_at: str = ""
 
+    # --- provenance (#9, #10) ------------------------------------------------------------------------
+    import_method: ImportMethod = "search"  # how this asset entered the job: a keyword search, a pasted
+                                             # URL at Gate 2, an already-downloaded file from library/scraped
+                                             # (the `folder` source), or a Gate-3 scene upload/drop.
+    owner_submitted: bool = False           # you explicitly marked this as your own footage/photo (#10) --
+                                             # never inferred, always an explicit action.
+    owner_note: str = ""                    # your note on why/how this is your own material, if owner_submitted.
+
+    # --- case connection: separate from relevance and separate from rights (#7, #8) ------------------
+    # `category` is never set to "verified_case" by any automated process -- sourcing/vetting/relevance
+    # scoring may propose "unverified_case_candidate" (from a `case`-group search, docs/SEARCH_PLANNING.md)
+    # or "historical_context"/"illustrative_stock" (from their matching search groups); moving something to
+    # "verified_case" or "reconstruction" is always an explicit human action (see identity_status below).
+    # None = not yet categorized at all (legacy assets, or a source/path that doesn't feed the new routing).
+    category: AssetCategory | None = None
+    depicts: str = ""                       # who/what this item is CLAIMED to show
+    case_connection: str = ""               # what specifically connects it to the case
+    identity_evidence: str = ""             # the source's own caption/record text supporting that connection
+    identity_status: IdentityStatus = "unverified"   # a keyword match or AI similarity score NEVER moves this
+                                             # by itself (#7) -- only an explicit reviewer action does.
+    identity_reviewer: str = ""
+    identity_reviewed_at: str = ""
+    identity_notes: str = ""
+    media_date: str = ""                    # when the photo/video was actually made, if known
+    event_date: str = ""                    # when the depicted event happened, if known and different --
+                                             # e.g. a later interview about an earlier event (#7): keep both.
+
+    # --- rights: independent of identity and of your use/reject selection (#8) -----------------------
+    # rights_status is derived, when it is set at all, from the license/license_url the source itself
+    # reports (see classify_rights_status() in pipeline/vetting/rules.py) -- it is evidence, not a legal
+    # conclusion. rights_reviewer/rights_reviewed_at are the ONLY way this becomes a human-signed-off
+    # determination; approving an asset for use (Asset.status) never touches any rights_* field.
+    rights_status: RightsStatus = "unresolved"
+    rights_evidence: str = ""               # the exact text/record that supports rights_status (a rights
+                                             # advisory string, a license URL, a note about a permission email)
+    rights_reviewer: str = ""
+    rights_reviewed_at: str = ""
+    rights_notes: str = ""
+
 
 class TextRef(BaseModel):
-    """Text pulled from a source (e.g. a Wikipedia article) to ground the script."""
+    """Research material for narration (e.g. a Wikipedia article) -- NOT a visual asset (#2). Always
+    reported and counted separately from Asset; never appears in the asset review gate."""
     id: str = Field(default_factory=_id)
     source: str
     title: str
-    url: str
+    url: str                                # kept even across rounds/dedup -- see wikipedia.py
     path: str
     rel_path: str = ""
     license: str = ""
     license_url: str = ""
     query: str = ""
+    group: QueryGroup = "research"
     chars: int = 0
     retrieved_at: str = Field(default_factory=_now)
 
@@ -168,6 +252,60 @@ class Event(BaseModel):
     kind: str                               # "transition", "note", "error"
     message: str
     data: dict[str, Any] = Field(default_factory=dict)
+
+
+FactKind = Literal["person", "alias", "date", "location", "address", "institution", "event", "other"]
+FactStatus = Literal["confirmed", "unresolved", "conflicting"]
+
+
+class CaseFact(BaseModel):
+    """One atomic fact for the case reference sheet (#6: canonical name, people/aliases, dates/locations,
+    addresses/institutions/events, source links, unresolved/conflicting facts). Always human-entered or
+    human-confirmed -- nothing in sourcing, vetting or relevance scoring ever creates or edits one of these.
+    A search finding something that LOOKS like it matches a fact is not confirmation of that fact (#6);
+    the reverse direction is what identity_evidence/case_connection on Asset are for."""
+    id: str = Field(default_factory=_id)
+    kind: FactKind = "other"
+    text: str                               # the fact itself, e.g. "Corazon Amurao" or "July 14, 1966"
+    detail: str = ""                        # optional context, e.g. "night-shift student nurse, sole survivor"
+    source_links: list[str] = Field(default_factory=list)
+    status: FactStatus = "confirmed"
+    conflict_note: str = ""                 # what the conflict/uncertainty actually is, required in spirit
+                                             # (not enforced) whenever status != "confirmed"
+    added_by: str = ""
+    added_at: str = Field(default_factory=_now)
+    updated_by: str = ""
+    updated_at: str = ""
+
+
+class CaseReferenceSheet(BaseModel):
+    """Ground truth for the case (#6), built and edited by a human through the orchestrator's
+    case-reference API. Nothing here is ever written by an automated process."""
+    canonical_name: str = ""                # the case's canonical name, e.g. "The Dyatlov Pass Incident"
+    facts: list[CaseFact] = Field(default_factory=list)
+    updated_at: str = Field(default_factory=_now)
+
+
+ChecklistStatus = Literal["needed", "candidates_found", "fulfilled", "not_available", "skipped"]
+
+
+class VisualChecklistItem(BaseModel):
+    """One thing the video still needs a visual for (#6: editable generated visual checklist). A fresh
+    round can be seeded from approved keywords' visual_needed/entity text as a DRAFT starting point, but
+    every field here is human-editable afterward, and nothing automated ever marks one "fulfilled" or
+    "not_available" -- finding search candidates for it only moves it to "candidates_found" (#6: never
+    treat a search result as confirmation that a need is met); moving to "fulfilled" is always explicit."""
+    id: str = Field(default_factory=_id)
+    label: str                              # what's needed on screen, e.g. "a period photo of Corazon Amurao"
+    linked_keyword_term: str = ""           # which approved keyword's term generated this, if any
+    group: QueryGroup = "historical"
+    status: ChecklistStatus = "needed"
+    note: str = ""
+    asset_id: str = ""                      # which approved Asset fulfills this, once a human says so
+    added_by: str = ""
+    added_at: str = Field(default_factory=_now)
+    updated_by: str = ""
+    updated_at: str = ""
 
 
 class ProviderChoice(BaseModel):
@@ -206,6 +344,12 @@ class Job(BaseModel):
     keyword_feedback: list[str] = Field(default_factory=list)
     asset_feedback: list[str] = Field(default_factory=list)
     scene_feedback: list[str] = Field(default_factory=list)
+
+    # Case ground truth (#6) -- edited only through Orchestrator's case-reference/visual-checklist API,
+    # never written by sourcing/vetting/scoring. Available and editable at any point in the job's life,
+    # not gated behind a particular state -- it's reference material about the case, not pipeline output.
+    case_reference: CaseReferenceSheet = Field(default_factory=CaseReferenceSheet)
+    visual_checklist: list[VisualChecklistItem] = Field(default_factory=list)
 
     error: str | None = None
     failed_from: JobState | None = None     # running state to resume on retry

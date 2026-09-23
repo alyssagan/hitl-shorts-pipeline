@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 
-from .base import Candidate, HttpSource, SourceContext, SourceUnavailable
+from .base import Candidate, CredentialsMissing, HttpSource, SourceContext
 
 PHOTOS = "https://pixabay.com/api/"
 VIDEOS = "https://pixabay.com/api/videos/"
@@ -32,7 +32,7 @@ class PixabaySource(HttpSource):
 
     async def search(self, query: str, ctx: SourceContext) -> list[Candidate]:
         if not self.key():
-            raise SourceUnavailable("PIXABAY_API_KEY is not set")
+            raise CredentialsMissing("PIXABAY_API_KEY is not set")
         q = query[:100]
         out: list[Candidate] = []
         photos = await ctx.http.get_json(PHOTOS, params={

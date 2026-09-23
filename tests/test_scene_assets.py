@@ -161,6 +161,49 @@ class AddSceneAssetTests(Base):
             await orch.add_scene_asset(job.id, "whatever", self.asset(), reviewer="Aly")
 
 
+class AddReviewableAssetTests(Base):
+    """add_reviewable_asset -- the backend for Gate 2's "Add links" (#9): unlike add_scene_asset (Gate 3), an
+    asset added here is NEVER auto-approved or assigned to anything -- Gate 2 itself is the review step, so it
+    always lands `pending` and flows through the ordinary Use/Duplicate/Irrelevant review, whatever its risk."""
+    def asset(self, **kw):
+        base = dict(source="urls", kind="video", path="/tmp/z.mp4", rel_path="z.mp4", source_url="https://files.example.com/z.mp4",
+                    title="z.mp4", license="", width=1920, height=1080, sha256="urlasset1", import_method="manual_url")
+        base.update(kw)
+        return Asset(**base)
+
+    async def test_low_risk_asset_still_lands_pending_not_auto_approved(self):
+        orch = self.make()
+        job = await self.to_assets_review(orch)
+        job = await orch.add_reviewable_asset(job.id, self.asset(sha256="u1", license="CC0"), reviewer="Aly")
+        new = next(a for a in job.assets if a.sha256 == "u1")
+        self.assertEqual(new.vetting.risk, "low")
+        self.assertEqual(new.status, "pending")             # Gate 2 IS the review -- never auto-approved here
+        self.assertEqual(new.import_method, "manual_url")
+
+    async def test_high_risk_asset_lands_pending_with_no_note_required_up_front(self):
+        orch = self.make()
+        job = await self.to_assets_review(orch)
+        job = await orch.add_reviewable_asset(job.id, self.asset(sha256="u2", license=""), reviewer="Aly")
+        new = next(a for a in job.assets if a.sha256 == "u2")
+        self.assertEqual(new.vetting.risk, "high")
+        self.assertEqual(new.status, "pending")             # note is only required when you decide, not on add
+
+    async def test_added_asset_flows_through_normal_gate2_review(self):
+        orch = self.make()
+        job = await self.to_assets_review(orch)
+        job = await orch.add_reviewable_asset(job.id, self.asset(sha256="u3", license="CC0"), reviewer="Aly")
+        new = next(a for a in job.assets if a.sha256 == "u3")
+        job = await orch.review_assets(job.id, {new.id: {"decision": "approve"}}, reviewer="Aly")
+        self.assertEqual(next(a for a in job.assets if a.sha256 == "u3").status, "approved")
+
+    async def test_wrong_state_raises_and_adds_nothing(self):
+        orch = self.make()
+        job = await self.to_scenes_review(orch)
+        with self.assertRaises(sm.TransitionError):
+            await orch.add_reviewable_asset(job.id, self.asset(sha256="u4"), reviewer="Aly")
+        self.assertFalse(any(a.sha256 == "u4" for a in orch.get(job.id).assets))
+
+
 class ApprovePendingSceneAssetTests(Base):
     def asset(self, **kw):
         base = dict(source="upload", kind="image", path="/tmp/y.jpg", rel_path="y.jpg", source_url="upload://y.jpg",

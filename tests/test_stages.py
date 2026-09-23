@@ -7,7 +7,7 @@ import httpx
 
 from pipeline.core.models import Job, Keyword, Scene, TextRef
 from pipeline.stages.base import StageContext
-from pipeline.stages.keywords.llm import LLMKeywordStage, parse_keywords
+from pipeline.stages.keywords.llm import PROMPT, LLMKeywordStage, _source_guidance, parse_keywords
 from pipeline.stages.keywords.manual import ManualKeywordStage
 from pipeline.stages.mpt_client import MptClient, MptError
 from pipeline.stages.render.mpt import MptRenderStage
@@ -46,18 +46,127 @@ class FakeMpt:
         return httpx.Response(404, json={"status": 404, "message": "nope"})
 
 
+class KeywordPromptSourceGuidanceTests(unittest.TestCase):
+    """The LLM keyword prompt asks for search QUERIES for photo/video libraries, not SEO phrases -- what makes
+    a good phrase depends on which libraries this job actually searches (docs/RUNNING.md), so the guidance
+    text folded into PROMPT changes with job.providers.sources. Regression coverage for the bug this was
+    written to fix: an SEO-framed prompt returned phrases like "dyatlov pass explained"/"... TikTok" that
+    matched nothing in Pexels/Wikipedia captions (relevance scored 0% for 73 of 74 pulled assets)."""
+
+    def test_no_sources_points_at_the_local_clip_library(self):
+        g = _source_guidance([])
+        self.assertIn("library/clips/", g)
+        self.assertNotIn("Pexels", g)
+
+    def test_archive_only_sources_ask_for_era_and_place(self):
+        g = _source_guidance(["wikipedia", "commons", "loc"])
+        self.assertIn("historical archives", g)
+        self.assertIn("year, decade, era or place", g)
+        self.assertNotIn("modern, generic stock", g)
+
+    def test_stock_only_sources_ask_for_generic_timeless_subjects(self):
+        g = _source_guidance(["pexels", "pixabay"])
+        self.assertIn("modern, generic stock", g)
+        self.assertIn("NOTHING era- or event-specific", g)
+        self.assertNotIn("historical archives", g)
+
+    def test_new_2026_09_23_sources_are_treated_as_archives(self):
+        # openverse/flickr/dpla/europeana/chronicling_america were added alongside this test -- they should
+        # get the "specific era/place" guidance, same as wikipedia/commons/loc, not the generic-stock one.
+        g = _source_guidance(["openverse", "flickr", "dpla", "europeana", "chronicling_america"])
+        self.assertIn("historical archives", g)
+        self.assertIn("Openverse", g)
+        self.assertIn("Flickr", g)
+        self.assertNotIn("modern, generic stock", g)
+
+    def test_mixed_sources_get_both_pieces_of_guidance(self):
+        g = _source_guidance(["wikipedia", "pexels"])
+        self.assertIn("historical archives", g)
+        self.assertIn("modern, generic stock", g)
+
+    def test_unrecognized_sources_still_return_some_guidance(self):
+        # e.g. only "urls"/"folder" configured -- neither archive nor generic stock, but never blank.
+        g = _source_guidance(["urls"])
+        self.assertTrue(g.strip())
+
+    def test_prompt_never_asks_for_seo_or_social_media_phrasing(self):
+        rendered = PROMPT.format(subject="cats", feedback="", n=5, sources_line="wikipedia, pexels",
+                                 source_guidance=_source_guidance(["wikipedia", "pexels"]))
+        self.assertIn("SEARCH QUERIES", rendered)
+        self.assertIn("TikTok", rendered)             # named as an example of what NOT to produce
+        self.assertNotIn("SEO analyst", rendered)      # the old framing that caused literal SEO-style terms
+
+    def test_prompt_renders_for_every_source_combo_without_a_format_error(self):
+        for sources in ([], ["wikipedia"], ["pexels"], ["wikipedia", "pexels", "urls"], ["nasa"]):
+            sources_line = ", ".join(sources) if sources else "none -- your own library/clips/ folder only"
+            PROMPT.format(subject="x", feedback="", n=10, sources_line=sources_line,
+                         source_guidance=_source_guidance(sources))   # raises KeyError/IndexError if malformed
+
+    def test_prompt_defines_all_four_groups_with_the_required_examples(self):
+        # #3: the prompt must give the exact search-example phrases from the requirements doc, framed
+        # explicitly as examples (not assertions that matching material exists).
+        rendered = PROMPT.format(subject="x", feedback="", n=5, sources_line="wikipedia, commons, pexels",
+                                 source_guidance=_source_guidance(["wikipedia", "commons", "pexels"]))
+        self.assertIn("Corazon Amurao interview", rendered)
+        self.assertIn("Chicago residential streets 1960s", rendered)
+        self.assertIn("empty hospital hallway", rendered)
+        self.assertIn('"research"', rendered)
+        self.assertIn('"case"', rendered)
+        self.assertIn('"historical"', rendered)
+        self.assertIn('"stock"', rendered)
+        self.assertIn("not a claim that matching material exists", rendered)
+
+    def test_guidance_names_which_groups_are_useful_this_round(self):
+        # Only Wikipedia configured -> only "research" is useful; case/historical/stock have nowhere to go.
+        g = _source_guidance(["wikipedia"])
+        self.assertIn("research", g)
+        self.assertNotIn("case, historical", g)   # case/historical need a non-wikipedia archive source
+        g2 = _source_guidance(["wikipedia", "commons", "pexels"])
+        self.assertIn("research", g2)
+        self.assertIn("case", g2)
+        self.assertIn("historical", g2)
+        self.assertIn("stock", g2)
+
+
 class KeywordTests(unittest.IsolatedAsyncioTestCase):
     def test_parse_keywords_tolerates_prose_around_json(self):
         kws = parse_keywords('Sure!\n[{"term":"cat facts","search_volume":"1200","difficulty":30.5,"why":"x"},{"nope":1}]', "llm:m")
         self.assertEqual(len(kws), 1)
         self.assertEqual((kws[0].term, kws[0].search_volume, kws[0].difficulty, kws[0].rank), ("cat facts", 1200, 30.5, 1))
         self.assertTrue(kws[0].meta["estimated"])
+        self.assertEqual(kws[0].group, "historical")   # no "group" in this (older-style) response -> default
 
     def test_parse_keywords_errors(self):
         with self.assertRaises(ValueError):
             parse_keywords("no json here", "x")
         with self.assertRaises(ValueError):
             parse_keywords("[]", "x")
+
+    def test_parse_keywords_reads_the_structured_search_plan_fields(self):
+        text = ('[{"term": "corazon amurao interview", "group": "case", "entity": "Corazon Amurao", '
+                '"aliases": ["Cora Amurao", ""], "dates": ["1966"], "locations": ["Chicago"], '
+                '"essential": false, "visual_needed": "a period interview photo", '
+                '"search_volume": 10, "difficulty": 5, "why": "shows the survivor"}]')
+        k = parse_keywords(text, "llm:m")[0]
+        self.assertEqual(k.group, "case")
+        self.assertEqual(k.entity, "Corazon Amurao")
+        self.assertEqual(k.aliases, ["Cora Amurao"])          # blank entries dropped
+        self.assertEqual(k.dates, ["1966"])
+        self.assertEqual(k.locations, ["Chicago"])
+        self.assertFalse(k.essential)
+        self.assertEqual(k.visual_needed, "a period interview photo")
+
+    def test_parse_keywords_falls_back_to_historical_for_an_invalid_group(self):
+        text = '[{"term": "some phrase", "group": "not-a-real-group"}]'
+        k = parse_keywords(text, "llm:m")[0]
+        self.assertEqual(k.group, "historical")   # never crashes the whole batch over one bad field
+
+    def test_parse_keywords_essential_defaults_true_and_lists_tolerate_non_list_input(self):
+        text = '[{"term": "some phrase", "aliases": "not a list", "dates": null}]'
+        k = parse_keywords(text, "llm:m")[0]
+        self.assertTrue(k.essential)
+        self.assertEqual(k.aliases, [])
+        self.assertEqual(k.dates, [])
 
     async def test_manual_stage_dedupes_and_uses_seeds(self):
         job = Job(subject="cat facts")

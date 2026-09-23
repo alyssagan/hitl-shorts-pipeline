@@ -36,7 +36,7 @@ MIME_TO_EXT = {
 }
 
 
-_SECRET_PARAM = re.compile(r"([?&](?:key|api_key|apikey|client_id|access_token|token)=)[^&#]+", re.I)
+_SECRET_PARAM = re.compile(r"([?&](?:key|api_key|apikey|wskey|client_id|access_token|token)=)[^&#]+", re.I)
 
 
 def redact_url(url: str) -> str:
@@ -56,7 +56,38 @@ def cc_name(url: str) -> str:
 
 
 class SourceUnavailable(Exception):
-    """The source can't run right now (e.g. missing API key). Logged, not fatal."""
+    """The source can't run right now. Logged, not fatal -- the other sources still run. Prefer a specific
+    subclass below when the reason is known (docs/SOURCE_ERRORS.md, #4): sourcing.py inspects the concrete
+    type to record a distinct `outcome` (credentials_missing/rate_limited/network_error/parse_error/
+    skipped_other) instead of one undifferentiated "skipped" bucket. Existing `except SourceUnavailable`
+    handling still catches every subclass, so this is purely additive -- no existing adapter breaks by not
+    using a subclass, it just gets the least specific ("skipped_other") classification."""
+
+
+class CredentialsMissing(SourceUnavailable):
+    """No (or invalid) API key/auth configured. Fixable by the person -- the message should name the
+    exact env var. Never means "searched and found nothing"."""
+
+
+class RateLimited(SourceUnavailable):
+    """The provider itself said to slow down (HTTP 429, or a documented rate-limit response), not a
+    "no results" response. `retry_after` is the provider's own Retry-After value in seconds, when given --
+    callers should respect it rather than retrying immediately."""
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class ProviderError(SourceUnavailable):
+    """A network failure or an unexpected HTTP status (5xx, timeout, connection reset) -- a technical
+    failure of the provider or the connection to it, not a search that legitimately found nothing."""
+
+
+class ResponseParseError(SourceUnavailable):
+    """The provider answered (HTTP 200) but its response didn't match the shape this adapter expects --
+    a parsing/schema mismatch (the provider changed its API, or this adapter's assumptions were wrong),
+    never silently treated as "zero results"."""
 
 
 def _now() -> str:
@@ -71,6 +102,34 @@ def safe_name(text: str, max_len: int = 60) -> str:
 def strip_html(text: str) -> str:
     return " ".join(re.sub(r"<[^>]+>", " ", text or "").replace("&amp;", "&").replace("&quot;", '"')
                     .replace("&#039;", "'").replace("&nbsp;", " ").split())
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse an HTTP `Retry-After` header value into seconds. Handles the common integer-seconds form
+    (e.g. "120") and the HTTP-date form (e.g. "Wed, 21 Oct 2026 07:28:00 GMT"), per RFC 7231 sec 7.1.3.
+    Returns None if the header is absent, empty, or not parseable as either form -- callers should fall
+    back to their own backoff in that case, never treat an unparseable header as "no wait needed"."""
+    if not value:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+        return seconds if seconds >= 0 else None
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(value)
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = (dt - datetime.now(timezone.utc)).total_seconds()
+        return delta if delta >= 0 else None
+    except (TypeError, ValueError, IndexError):
+        return None
 
 
 class LoggedHttp:
@@ -123,29 +182,40 @@ class LoggedHttp:
                         body = None
                 ms = int((loop.time() - started) * 1000)
                 full_url = redact_url(str(resp.request.url))
+                retry_after = _parse_retry_after(resp.headers.get("retry-after"))
                 self._log(method="GET", url=full_url, status=resp.status_code, purpose=purpose,
                           duration_ms=ms, bytes=len(body) if body is not None else size,
                           dest=str(stream_to) if stream_to else None,
                           auth_header_sent=any(k.lower() in ("authorization", "x-api-key") for k in self.headers),
-                          attempt=attempt + 1)
+                          attempt=attempt + 1, retry_after=retry_after)
                 if resp.status_code in (429, 503) and attempt < self.retries:
-                    await asyncio.sleep(self.backoff * (attempt + 1))
+                    # Respect a provider-given Retry-After (#4) rather than always guessing with backoff.
+                    await asyncio.sleep(retry_after if retry_after is not None else self.backoff * (attempt + 1))
                     continue
                 if resp.status_code != 200:
                     if stream_to and stream_to.exists():
                         stream_to.unlink()
-                    raise httpx.HTTPStatusError(f"{resp.status_code} for {url}", request=resp.request, response=resp)
+                    if resp.status_code == 429:
+                        raise RateLimited(f"{self.source} rate-limited this request (HTTP 429) after "
+                                          f"{attempt + 1} attempt(s): {url}", retry_after=retry_after)
+                    if resp.status_code in (401, 403):
+                        raise CredentialsMissing(f"{self.source} rejected the request's credentials (HTTP "
+                                                 f"{resp.status_code}) -- check the API key is present and valid: {url}")
+                    raise ProviderError(f"{self.source} returned HTTP {resp.status_code} for {url}")
                 return resp, body, (h.hexdigest() if stream_to else None), (size if stream_to else None)
             except httpx.TransportError as exc:
                 self._log(method="GET", url=url, status=None, purpose=purpose, error=str(exc), attempt=attempt + 1)
                 if attempt >= self.retries:
-                    raise
+                    raise ProviderError(f"network error reaching {self.source} after {attempt + 1} attempt(s): {exc}") from exc
                 await asyncio.sleep(self.backoff * (attempt + 1))
         raise RuntimeError("unreachable")
 
     async def get_json(self, url: str, params: dict[str, Any] | None = None, purpose: str = "") -> Any:
         _resp, body, _, _ = await self._send(url, params, purpose, None)
-        return json.loads(body)
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise ResponseParseError(f"{self.source} returned a response that isn't valid JSON: {exc}") from exc
 
     async def download(self, url: str, dest: Path, purpose: str = "") -> tuple[int, str]:
         _resp, _body, sha, size = await self._send(url, None, purpose, dest)
@@ -222,13 +292,26 @@ class HttpSource:
         seen_hashes = set(ctx.known_hashes)
         for q in queries:
             ctx.page = 1 + int((ctx.settings.get("prior_searches") or {}).get(f"{self.name}|{q}", 0))
-            note: dict[str, Any] = {"source": self.name, "query": q, "page": ctx.page, "found": 0, "kept": 0, "skipped": []}
+            # "kind" disambiguates what "found"/"kept" are counting when a report or log line shows
+            # them next to a source name a reader may not immediately map to a unit -- "media" here
+            # always means photos/video (see wikipedia.py for the "text" counterpart, counting articles).
+            note: dict[str, Any] = {"source": self.name, "query": q, "page": ctx.page, "found": 0, "kept": 0, "skipped": [], "kind": "media"}
             try:
                 cands = await self.search(q, ctx)
             except SourceUnavailable:
                 raise
+            except (KeyError, TypeError, AttributeError, ValueError) as exc:
+                # These usually mean the provider's response didn't match what search() expects
+                # (a changed field name, an unexpected null, a reshaped list) -- a parse problem,
+                # not a legitimate "found nothing" (#4: never silently convert a technical error
+                # into "no results").
+                note["error"] = f"{type(exc).__name__}: {exc}"
+                note["outcome"] = "parse_error"
+                result.trace.append(note)
+                continue
             except Exception as exc:  # one bad query must not sink the others
                 note["error"] = f"{type(exc).__name__}: {exc}"
+                note["outcome"] = "unknown_error"
                 result.trace.append(note)
                 continue
             note["found"] = len(cands)
@@ -270,5 +353,9 @@ class HttpSource:
                 kept_by_kind[kind] += 1
             note["kept"] = kept
             note["kept_photos"], note["kept_videos"] = kept_by_kind["image"], kept_by_kind["video"]
+            # #4: distinguish a real zero-match search from one that found candidates but couldn't
+            # keep any of them (wrong format, download failures, all duplicates) -- both are "kept: 0"
+            # but they mean very different things to a person deciding whether to search again.
+            note["outcome"] = "ok_kept" if kept else ("ok_zero_matches" if note["found"] == 0 else "ok_no_downloadable")
             result.trace.append(note)
         return result

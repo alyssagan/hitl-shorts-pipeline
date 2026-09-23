@@ -8,16 +8,22 @@ from typing import Any, Callable
 
 from .base import KeywordStage, RenderStage, SceneStage
 from ..sources.base import DEFAULT_USER_AGENT, SourceAdapter
+from ..sources.chronicling_america import ChroniclingAmericaSource
 from ..sources.commons import CommonsSource
+from ..sources.dpla import DplaSource
+from ..sources.europeana import EuropeanaSource
+from ..sources.flickr import FlickrSource
 from ..sources.folder import FolderSource
 from ..sources.internet_archive import InternetArchiveSource
 from ..sources.loc import LibraryOfCongressSource
 from ..sources.nasa import NasaSource
+from ..sources.openverse import OpenverseSource
 from ..sources.pexels import PexelsSource
 from ..sources.pixabay import PixabaySource
 from ..sources.smithsonian import SmithsonianSource
 from ..sources.unsplash import UnsplashSource
 from ..sources.urls import UrlListSource
+from ..sources.wikipedia import DEFAULT_MAX_CHARS as DEFAULT_WIKIPEDIA_MAX_CHARS
 from ..sources.wikipedia import WikipediaSource
 from .keywords.llm import LLMKeywordStage
 from .keywords.manual import ManualKeywordStage
@@ -134,7 +140,9 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
     reg.max_queries = int(src_cfg.get("max_queries", 8))
     per_query = int(src_cfg.get("per_query", 4))
     vids = int(src_cfg.get("videos_per_query", 2))
-    reg.register_source("wikipedia", lambda: WikipediaSource(max_articles=int(src_cfg.get("wikipedia_articles", 2))))
+    reg.register_source("wikipedia", lambda: WikipediaSource(
+        max_articles=int(src_cfg.get("wikipedia_articles", 2)),
+        max_chars=int(src_cfg.get("wikipedia_max_chars", DEFAULT_WIKIPEDIA_MAX_CHARS))))
     reg.register_source("commons", lambda: CommonsSource(per_query=per_query))
     reg.register_source("pexels", lambda: PexelsSource(per_query=per_query, videos_per_query=vids, videos=bool(src_cfg.get("pexels_videos", True))))
     reg.register_source("pixabay", lambda: PixabaySource(per_query=per_query, videos_per_query=vids, videos=bool(src_cfg.get("pixabay_videos", True))))
@@ -147,6 +155,11 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
         max_mb=int(src_cfg.get("archive_max_mb", 60))))
     reg.register_source("loc", lambda: LibraryOfCongressSource(per_query=per_query, videos_per_query=vids))
     reg.register_source("smithsonian", lambda: SmithsonianSource(per_query=per_query))
+    reg.register_source("chronicling_america", lambda: ChroniclingAmericaSource(per_query=per_query))
+    reg.register_source("openverse", lambda: OpenverseSource(per_query=per_query))
+    reg.register_source("dpla", lambda: DplaSource(per_query=per_query))
+    reg.register_source("flickr", lambda: FlickrSource(per_query=per_query, licenses=src_cfg.get("flickr_licenses", "1,2,3,4,5,6,7,8,9,10")))
+    reg.register_source("europeana", lambda: EuropeanaSource(per_query=per_query))
     reg.register_source("urls", lambda: UrlListSource(
         max_mb=int(src_cfg.get("url_max_mb", 200)), max_height=int(src_cfg.get("url_max_height", 1080))))
     reg.register_source("folder", lambda: FolderSource(src_cfg.get("folder_path", "library/scraped")))
