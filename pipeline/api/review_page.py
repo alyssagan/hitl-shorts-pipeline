@@ -157,8 +157,20 @@ const score = a => (a.vetting && a.vetting.relevance!=null) ? a.vetting.relevanc
 const below = a => score(a)!=null && score(a) < minScore - 1e-9;
 const risk = a => (a.vetting&&a.vetting.risk)||"low";
 
+function manualUrlAssets(){
+  // Pasted in through Gate 2's "Add links" (import_method="manual_url", pipeline/sources/urls.py) --
+  // always pending on arrival (add_reviewable_asset() never auto-approves), and easy to lose in the main
+  // grid: a platform link is auto-flagged high risk (sorts last by default) and its caption/title often
+  // doesn't text-match the approved keywords, so it also often scores under the relevance threshold and
+  // is hidden by default. Kept out of visible()'s main grid and shown in their own always-visible panel
+  // instead (manualLinksPanel()) for exactly as long as they're pending; once decided, they rejoin the
+  // main grid like everything else.
+  return job.assets.filter(a => a.import_method==="manual_url" && a.status==="pending");
+}
 function visible(){
-  let xs = job.assets.filter(a => (showHidden || !below(a)) && (!srcFilter||a.source===srcFilter) && (!kindFilter||a.kind===kindFilter));
+  const manualPendingIds = new Set(manualUrlAssets().map(a=>a.id));
+  let xs = job.assets.filter(a => !manualPendingIds.has(a.id) &&
+      (showHidden || !below(a)) && (!srcFilter||a.source===srcFilter) && (!kindFilter||a.kind===kindFilter));
   // "risk" is the default: safest first (low, then medium, then high risk), and within each risk group,
   // best-scoring (most relevant) items first -- so the top of the page is always what you'd want to approve
   // first, and risk only gets worse as you scroll, with the strongest candidates surfacing first at each level.
@@ -1059,6 +1071,19 @@ function render(){
   updateSubmit();
   document.querySelectorAll("video").forEach(v=>v.muted=true);
 }
+function manualLinksPanel(){
+  const xs = manualUrlAssets();
+  if (!xs.length) return null;
+  return h("div",{class:"panel", style:"border-color:var(--acc)"},
+    h("b",{}, `Added by link -- ${xs.length} awaiting a decision`),
+    h("div",{class:"sub"},"Pasted in through \"Add links\" below. Downloaded into their own sources/urls/ folder on "+
+      "disk, separate from anything search turned up -- and always shown here regardless of the score/hidden filters "+
+      "or sort order below, since a platform link is auto-flagged high risk (would otherwise sort last) and often "+
+      "scores under the relevance threshold too (its caption rarely matches your keywords), so it could otherwise "+
+      "disappear from view entirely. Use / Duplicate / Irrelevant here work exactly like any other card; once "+
+      "you've decided, it moves down into the main grid like everything else."),
+    h("div",{class:"grid"}, xs.map(card)));
+}
 function assetReviewBody(xs){
   return h("div",{},
     h("div",{class:"sub",style:"margin-bottom:10px"},
@@ -1066,6 +1091,7 @@ function assetReviewBody(xs){
       `Items under ${pct(minScore)} are hidden. Anything you leave undecided or hidden when you submit is not used (logged as rejected with a note) and is NOT counted as a training label. Only your Use / Duplicate / Irrelevant clicks are saved as labels, immediately, one per click (RELEVANCE_LABELS.jsonl in the project folder) -- separately from "Save and continue", which records the approve/reject decision.`),
     assetReportPanel(),
     checklistPanel(),
+    manualLinksPanel(),
     h("div",{class:"grid"}, xs.map(card)));
 }
 function sceneReviewBody(){

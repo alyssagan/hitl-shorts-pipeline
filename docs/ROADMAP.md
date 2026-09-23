@@ -39,6 +39,32 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: "Added by link" panel, Gate 2 (2026-09-23)
+Prompted directly by a real bug report during testing: Aly added an Instagram link through "Add links,"
+got a success message, then couldn't find it anywhere on the page. Traced it rather than guessing --
+`add_reviewable_asset()` always lands a pasted link as `pending` (never auto-approved, #9), and two
+independent, unrelated filters were both working against it at once: any social/video platform link is
+auto-flagged **high risk** by vetting (`PLATFORM_SOURCE`, `pipeline/vetting/rules.py`) regardless of
+content, which sorts it to the very end under the default risk-first sort, and its caption/title text
+often doesn't match the case's approved keywords, so it also frequently scores under the relevance
+threshold and gets hidden by the default score filter -- so it was really in the grid the whole time,
+just sorted last and hidden by score simultaneously. Not a bug, but a genuine discoverability gap worth
+closing rather than just explaining away.
+
+- **`pipeline/api/review_page.py`**: `manualUrlAssets()` picks out every asset with `import_method ===
+  "manual_url"` (already set by `pipeline/sources/urls.py::fetch_one()`, unrelated to this change) that's
+  still `pending`; `visible()` now excludes exactly those from the main filtered/sorted grid, and a new
+  `manualLinksPanel()` renders them in their own always-visible section above the grid, reusing the same
+  `card()` component (so Use/Duplicate/Irrelevant, the high-risk note requirement, everything works
+  identically) -- filters and sort order simply don't apply there. Once a decision is made, the asset's
+  `status` moves off `pending` and it naturally rejoins the normal grid on the next refresh, subject to
+  the normal filters like anything else.
+- Manually added files were already downloading into their own `sources/urls/` folder on disk, separate
+  from every other source -- nothing needed there; the gap was purely in the review page's visibility.
+- 7 new tests (`tests/test_review_page_manual_links.py`), same approach as `test_review_page_sort.py`:
+  pull the actual `visible()`/`manualUrlAssets()` JS out of `review_page.PAGE` and run it for real in
+  Node, rather than a reimplementation that could silently drift from what ships. Full suite: 488 passing.
+
 ## Done: manual crop, Gate 3 (2026-09-23)
 Prompted directly ("do we have a UI for drag and drop and cropping of videos" -> "i definitely want a cropping
 feature"). Investigated MoneyPrinterTurbo first rather than assuming: it always auto-center-crops a clip to the

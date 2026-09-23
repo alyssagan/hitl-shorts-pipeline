@@ -50,11 +50,19 @@ docs/SCORING_CHANGELOG.md), every risk rule that fired with its evidence, and wh
   Instagram/news link is pulled with yt-dlp; a direct `.mp4`/`.jpg`/... link is downloaded as-is. yt-dlp's own error
   is shown as-is, with a plain-language hint added when it looks like the link is a webpage rather than an actual
   video/photo (no login/paywall is ever bypassed -- a link behind one just fails here the way it would for yt-dlp on
-  its own). Every added link lands as a normal **pending** card above, same as anything found by search -- it is
-  never auto-approved, so it still goes through the same Use/Duplicate/Irrelevant review and the same high-risk-needs-
-  a-note rule as everything else. (The older behaviour -- queuing links into the job's URL list for the *next* sourcing
-  round with no per-link feedback -- still exists as `extra_urls_text` on `POST /assets/reject` for scripts, just not
-  from this box anymore.)
+  its own). Every added link lands **pending** -- it is never auto-approved, so it still goes through the same
+  Use/Duplicate/Irrelevant review and the same high-risk-needs-a-note rule as everything else -- but not in the main
+  grid: it shows up in its own always-visible **"Added by link"** panel above the grid instead (requested directly,
+  after a real added link turned out to be hidden by both the relevance-score filter and the risk-first sort at
+  once and looked like it had vanished). A platform link (YouTube/TikTok/Instagram/...) is auto-flagged high risk
+  regardless of content, and its caption/title often doesn't text-match your approved keywords either, so it's easy
+  for one to be simultaneously "sorted last" and "hidden below threshold" in the main grid -- the panel sidesteps
+  both by always showing every pending manually-added link, filters and sort order aside. Downloaded files also
+  already live in their own `sources/urls/` folder on disk, separate from every other source's files, so nothing
+  extra was needed there. Once you decide Use/Duplicate/Irrelevant on one, it moves down into the main grid like
+  any other asset the next time the page refreshes. (The older behaviour -- queuing links into the job's URL list
+  for the *next* sourcing round with no per-link feedback -- still exists as `extra_urls_text` on `POST
+  /assets/reject` for scripts, just not from this box anymore.)
 - **Add your own footage** (below Add links, #10) opens onto a list of whatever's currently sitting in the server's
   `library/scraped/` folder -- your own scraper's output, or anything you dropped there yourself. Nothing here is
   added to any job by itself: tick the specific files this job should use (each gets an optional note, e.g. why
