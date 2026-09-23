@@ -278,6 +278,23 @@ class VisualCoverageEndpointTests(ApiSourcesTests):
         self.assertFalse(out["has_checklist"])
         self.assertTrue(out["ready"])
 
+    def test_generate_from_keywords_over_http(self):
+        # Gate 2's "Generate from approved keywords" button (docs/REVIEW_UI.md) -- without this, the
+        # checklist stays empty in a real browser session and the coverage check never has anything to flag.
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        jid = r.json()["id"]
+        self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        j = self.wait(jid, "keywords_review")
+        term = j["keywords"][0]["term"]
+        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        self.wait(jid, "assets_review")
+        r = self.client.post(f"/jobs/{jid}/visual-checklist/generate", json={"reviewer": "Aly"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(len(r.json()["visual_checklist"]), 1)
+        self.assertEqual(r.json()["visual_checklist"][0]["linked_keyword_term"], term)
+        self.assertEqual(r.json()["visual_checklist"][0]["status"], "needed")
+
     def test_unresolved_item_blocks_approve_until_an_override_note_is_given(self):
         jid, j = self.setup_job_in_scenes_review()
         self.client.post(f"/jobs/{jid}/visual-checklist", json={"label": "a photo of the scene", "reviewer": "Aly"})

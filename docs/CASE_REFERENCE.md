@@ -156,6 +156,12 @@ POST  /jobs/{id}/scenes/approve   {reviewer, override_note?}   refused (422) if 
 
 ## What this doesn't do yet
 
+There's still no UI for the case reference sheet itself (canonical name, facts) -- editing it means calling
+its HTTP API directly. The visual checklist's UI gap is closed (Gate 2's "Visual checklist" panel, docs/
+REVIEW_UI.md, generates it from approved keywords or adds items by hand, and Gate 3's "Visual coverage"
+panel resolves them) -- without that, the pre-render check had nothing to actually check in a real browser
+session, since nothing populates the checklist on its own.
+
 Nothing cross-checks a `case`-group search term's `entity`/`aliases`/`dates`/`locations` against the
 reference sheet's facts -- that comparison, and any resulting "this search term doesn't match anything on
 the reference sheet" warning, is a natural next step but isn't built.

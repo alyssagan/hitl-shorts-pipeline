@@ -80,6 +80,13 @@ docs/SCORING_CHANGELOG.md), every risk rule that fired with its evidence, and wh
   the LLM labeling cost run up so far for this job (calls and an estimated dollar figure, from the same usage rollup
   the terminal's cost reporting already used -- not a second calculation). It's collapsed by default and only loads
   when opened, so it costs nothing on a page that's just being used to click through cards.
+- **"Visual checklist"** (#6/#12, right below that) is the only place to actually put things on the checklist that
+  Gate 3's pre-render coverage check reads (docs/CASE_REFERENCE.md) -- without it the checklist stays empty and that
+  check never has anything to flag. **Generate from approved keywords** seeds one draft item per approved keyword
+  (skipping any term already linked to an item, so it's safe to click again after approving more); the inline form
+  below it adds one by hand (a label, a group -- research/case/historical/stock -- and an optional linked keyword
+  term, which is what lets the coverage check later match the item back to a specific scene). Every new item starts
+  at `needed`; nothing here marks one fulfilled or not available -- that only happens explicitly, at Gate 3.
 
 In the terminal, after submitting in the browser, type `web` at the asset prompt so the script carries on.
 

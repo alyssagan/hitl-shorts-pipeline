@@ -98,11 +98,13 @@ let folderFiles=null, folderFilesOpen=false, folderSelection={};   // path -> no
 let catForms={}, idForms={}, rightsForms={};   // per-asset draft values for the "Case connection & rights" editor (#13)
 let assetReport=null, assetReportOpen=false;   // per-job/per-source summary panel (#13)
 let coverage=null, coverageLoadedFor=null, coverageOverrideNote="", checklistForms={};   // pre-render visual coverage check (#12)
+let checklistOpen=false, newChecklistItem={label:"",group:"case",linked_keyword_term:""};   // adding items (#6/#12)
 const CATEGORY_LABELS = {verified_case:"verified case", unverified_case_candidate:"unverified case candidate",
   historical_context:"historical context", illustrative_stock:"illustrative stock", reconstruction:"reconstruction"};
 const IDENTITY_LABELS = {unverified:"unverified", verified:"verified", disputed:"disputed"};
 const RIGHTS_LABELS = {public_domain:"public domain", cc0:"CC0", open_license:"open license",
   paid_license:"paid license", unresolved:"unresolved"};
+const GROUP_LABELS = {research:"research", case:"case", historical:"historical", stock:"stock"};
 
 async function loadStatic(){
   // Job-independent, small and unchanging within a session -- fetched once (docs/EVALUATION.md, docs/REVIEW_UI.md).
@@ -311,6 +313,52 @@ function assetReportPanel(){
         h("div",{}, h("div",{class:"meta"}, h("b",{},"By rights status")), bd(r.by_rights_status, RIGHTS_LABELS)),
         h("div",{}, h("div",{class:"meta"}, h("b",{},"Labeling cost so far")),
           h("div",{class:"meta"}, `${(r.usage||{}).calls||0} call(s), ~$${((r.usage||{}).cost_usd||0).toFixed(4)}`)))));
+}
+async function generateChecklist(){
+  busy=true; error=""; render();
+  try{
+    const reviewer=(store.get("reviewer")||"").trim();
+    await api("POST", `/jobs/${JOB}/visual-checklist/generate`, {reviewer});
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function addChecklistItem(){
+  if (!newChecklistItem.label.trim()){ error="A label is required (what's needed on screen)."; render(); return; }
+  busy=true; error=""; render();
+  try{
+    const reviewer=(store.get("reviewer")||"").trim();
+    await api("POST", `/jobs/${JOB}/visual-checklist`, {label: newChecklistItem.label.trim(),
+      group: newChecklistItem.group, linked_keyword_term: newChecklistItem.linked_keyword_term.trim(), reviewer});
+    newChecklistItem = {label:"", group:"case", linked_keyword_term:""};
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+function checklistPanel(){
+  // #6/#12: the only way items get onto the visual checklist in the first place -- without this, the
+  // pre-render coverage check (visualCoveragePanel, Gate 3) never has anything to check, since nothing
+  // creates items automatically. Lives at Gate 2 because "what visual are we still missing" is naturally
+  // noticed while looking at what's been found so far, but the checklist itself isn't gated to any state.
+  const items = job.visual_checklist||[];
+  return h("div",{class:"panel"},
+    h("details",{open:checklistOpen,ontoggle:e=>{checklistOpen=e.target.open;}},
+      h("summary",{}, `Visual checklist -- what this video still needs (${items.length})`),
+      !checklistOpen ? null : h("div",{style:"margin-top:8px;display:flex;flex-direction:column;gap:8px"},
+        h("div",{class:"sub"},"Things the video needs a real visual for -- especially case-specific ones (person, place, "+
+          "document). Nothing here is ever set to fulfilled/not available automatically; the pre-render check (Gate 3) "+
+          "refuses to render past anything still sitting at needed/candidates_found."),
+        items.length ? h("div",{style:"display:flex;flex-direction:column;gap:4px"},
+          items.map(it => h("div",{class:"meta"}, `${it.label} -- ${GROUP_LABELS[it.group]||it.group} -- ${it.status}` +
+            (it.note?` (${it.note})`:"")))) : h("div",{class:"sub"},"Nothing on the checklist yet."),
+        h("div",{class:"bar"},
+          h("button",{disabled:busy, onclick:generateChecklist}, "Generate from approved keywords")),
+        h("div",{class:"labelform"},
+          h("input",{type:"text",placeholder:"what's needed on screen, e.g. a period photo of the victim",
+            value:newChecklistItem.label, oninput:e=>{newChecklistItem=Object.assign({},newChecklistItem,{label:e.target.value});}}),
+          h("select",{onchange:e=>{newChecklistItem=Object.assign({},newChecklistItem,{group:e.target.value});}},
+            Object.entries(GROUP_LABELS).map(([val,t])=>h("option",{value:val,selected:val===newChecklistItem.group},t))),
+          h("input",{type:"text",placeholder:"linked keyword (optional)", value:newChecklistItem.linked_keyword_term,
+            oninput:e=>{newChecklistItem=Object.assign({},newChecklistItem,{linked_keyword_term:e.target.value});}}),
+          h("button",{disabled:busy, onclick:addChecklistItem}, "Add item")))));
 }
 function card(a){
   const v = a.vetting||{}, d = decisions[a.id], r = risk(a), lbl = labels[a.id];
@@ -910,6 +958,7 @@ function assetReviewBody(xs){
       `Showing ${xs.length} of ${job.assets.length}. Score = share of a keyword's words found in the item's own title/description/tags (docs/SCORING.md). `+
       `Items under ${pct(minScore)} are hidden. Anything you leave undecided or hidden when you submit is not used (logged as rejected with a note) and is NOT counted as a training label. Only your Use / Duplicate / Irrelevant clicks are saved as labels, immediately, one per click (RELEVANCE_LABELS.jsonl in the project folder) -- separately from "Save and continue", which records the approve/reject decision.`),
     assetReportPanel(),
+    checklistPanel(),
     h("div",{class:"grid"}, xs.map(card)));
 }
 function sceneReviewBody(){
