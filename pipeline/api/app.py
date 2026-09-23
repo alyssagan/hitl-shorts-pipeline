@@ -4,9 +4,16 @@
   POST /jobs/{id}/start                                          -> keywords_running
   POST /jobs/{id}/keywords/review     {approved_ids, extra_terms?, reviewer}   GATE 1 approve
   POST /jobs/{id}/keywords/reject     {feedback, reviewer}                     GATE 1 re-run
-  POST /jobs/{id}/assets/review       {decisions:{asset_id:{decision,note}}, reviewer}   GATE 2 per asset
+  POST /jobs/{id}/assets/review       {decisions:{asset_id:{decision,note,label?,label_reason?,label_note?,
+                                        duplicate_of_asset_id?}}, reviewer}    GATE 2 per asset
   POST /jobs/{id}/assets/approve      {reviewer, note?}                        GATE 2 done -> scenes
-  POST /jobs/{id}/assets/reject       {feedback, extra_queries?, reviewer}     GATE 2 search again
+  POST /jobs/{id}/assets/reject       {feedback, extra_queries?, max_queries?, per_query?, videos_per_query?,
+                                        reviewer}   GATE 2 search again / next batch (max_queries alone, no
+                                        feedback, just pulls more keywords) / more photos per keyword
+  POST /jobs/{id}/assets/label        {asset_id, label, reviewer, reason?, note?, duplicate_of_asset_id?}
+                                        save a Use/Duplicate/Irrelevant label any time, any job state (docs/EVALUATION.md)
+  GET  /methods                        what each relevance-scoring method+version does (docs/SCORING_CHANGELOG.md)
+  GET  /label-reasons                  the three labels and the suggested (extensible) reason list
   PATCH /jobs/{id}/scenes             {order?, edits?, reviewer}               reorder / edit
   POST /jobs/{id}/scenes/approve      {reviewer}                               GATE 3 approve -> rendering
   POST /jobs/{id}/scenes/reject       {feedback, reviewer}                     GATE 3 re-run
@@ -36,9 +43,10 @@ from starlette.routing import Route
 from ..core import joblog
 from ..core import state_machine as sm
 from ..core.models import Job, ProviderChoice
-from ..core.orchestrator import Orchestrator
+from ..core.orchestrator import LABELS, Orchestrator, SUGGESTED_LABEL_REASONS
 from ..core.store import JobNotFound, JobStore
 from ..stages.registry import Registry, build_default_registry
+from ..vetting.method_registry import as_json as method_definitions_json
 from .review_page import PAGE
 
 
@@ -147,13 +155,27 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         d = await body(r)
         return await orch.review_assets(r.path_params["id"], d.get("decisions", {}), reviewer=d.get("reviewer", ""))
 
+    async def assets_label(r: Request):
+        d = await body(r)
+        return await orch.label_asset(r.path_params["id"], d.get("asset_id", ""), d.get("label", ""),
+                                       reviewer=d.get("reviewer", ""), reason=d.get("reason", ""), note=d.get("note", ""),
+                                       duplicate_of_asset_id=d.get("duplicate_of_asset_id", ""))
+
+    async def methods_view(_: Request) -> JSONResponse:
+        return JSONResponse(method_definitions_json())
+
+    async def label_reasons_view(_: Request) -> JSONResponse:
+        return JSONResponse({"labels": list(LABELS), "suggested_reasons": SUGGESTED_LABEL_REASONS})
+
     async def assets_approve(r: Request):
         d = await body(r)
         return await orch.approve_assets(r.path_params["id"], reviewer=d.get("reviewer", ""), note=d.get("note", ""))
 
     async def assets_reject(r: Request):
         d = await body(r)
-        return await orch.reject_assets(r.path_params["id"], d.get("feedback", ""), d.get("extra_queries"), reviewer=d.get("reviewer", ""))
+        return await orch.reject_assets(r.path_params["id"], d.get("feedback", ""), d.get("extra_queries"),
+                                         reviewer=d.get("reviewer", ""), max_queries=d.get("max_queries"),
+                                         per_query=d.get("per_query"), videos_per_query=d.get("videos_per_query"))
 
     async def back(r: Request):
         d = await body(r)
@@ -234,7 +256,10 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/assets/review", wrap(assets_review), methods=["POST"]),
         Route(f"{P}/assets/approve", wrap(assets_approve), methods=["POST"]),
         Route(f"{P}/assets/reject", wrap(assets_reject), methods=["POST"]),
+        Route(f"{P}/assets/label", wrap(assets_label), methods=["POST"]),
         Route(f"{P}/assets/{{asset_id}}/file", wrap(asset_file), methods=["GET"]),
+        Route("/methods", methods_view, methods=["GET"]),
+        Route("/label-reasons", label_reasons_view, methods=["GET"]),
         Route(f"{P}/decisions", wrap(decisions), methods=["GET"]),
         Route(f"{P}/log", wrap(log_view), methods=["GET"]),
         Route(f"{P}/timing", wrap(timing_view), methods=["GET"]),

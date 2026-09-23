@@ -338,5 +338,43 @@ class PositionHintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(picks[2], "/p/d")
 
 
+class ClipMatchingTests(unittest.IsolatedAsyncioTestCase):
+    """pipeline/stages/scenes/clips.py: matching a scene's narration to an approved asset, and what
+    happens when there are more scenes than approved assets to draw from -- both prompted by "the
+    photos don't fit the script" / "the photos just keep running in a circle" feedback."""
+
+    async def test_stopwords_dont_count_as_a_match(self):
+        a = Asset(source="x", path="/p/a", title="The Ocean and the Sky", description="", status="approved")
+        b = Asset(source="x", path="/p/b", title="Whitechapel Street, 1888", description="", status="approved")
+        src = AssetClipSource([a, b])
+        scene = Scene(index=0, narration="A look at the street and the case.", search_terms=["whitechapel"])
+        pick = await src.fetch(scene, Path("."), set())
+        # Every word in "a"'s title is a stopword ("the", "and") except "ocean"/"sky", which share nothing
+        # with the scene; "b" shares the real subject words "street"/"whitechapel". Without stopword
+        # filtering, "the"/"and" alone would have made "a" look like a match too.
+        self.assertEqual(pick, "/p/b")
+        self.assertIn("whitechapel", src.last_pick.reason.lower())
+
+    async def test_pool_is_reused_not_dropped_when_scenes_outnumber_approved_assets(self):
+        a = Asset(source="x", path="/p/a", title="Whitechapel street", description="", status="approved")
+        src = AssetClipSource([a])
+        used: set[str] = set()
+        first = await src.fetch(Scene(index=0, narration="whitechapel", search_terms=["whitechapel"]), Path("."), used)
+        used.add(first)
+        self.assertEqual(first, "/p/a")
+        self.assertNotIn("REUSED", src.last_pick.reason)
+        # A second scene, same (only) approved asset: used to return None here (dropping the scene from
+        # what's sent to render), which is what let MoneyPrinterTurbo loop old clips to fill the gap.
+        second = await src.fetch(Scene(index=1, narration="whitechapel again", search_terms=["whitechapel"]), Path("."), used)
+        self.assertEqual(second, "/p/a")
+        self.assertIn("REUSED", src.last_pick.reason)
+
+    async def test_no_approved_assets_at_all_still_returns_none(self):
+        src = AssetClipSource([])
+        pick = await src.fetch(Scene(index=0, narration="whitechapel"), Path("."), set())
+        self.assertIsNone(pick)
+        self.assertIsNone(src.last_pick)
+
+
 if __name__ == "__main__":
     unittest.main()

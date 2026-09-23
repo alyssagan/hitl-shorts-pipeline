@@ -21,14 +21,19 @@ from ..core.models import Asset, Job
 from ..stages.llm_http import post_chat
 
 # Version of THIS scoring approach (docs/SCORING_CHANGELOG.md) -- bump this and add a changelog entry any time the
-# PROMPT below or the scoring logic changes meaningfully (not for e.g. a typo fix). This versions the METHOD, not
-# the model answering it -- switching Gemini for the Groq fallback (docs/LOGGING.md "LLM fallback provider") is
-# a different model answering the SAME prompt/method, so it keeps this same version.
+# PROMPT below or the scoring logic changes meaningfully (not for e.g. a typo fix). PROMPT_VERSION is the same
+# string, named for what it actually identifies: the prompt/method, NOT the model answering it. Swapping Gemini
+# for the Groq fallback (docs/LOGGING.md "LLM fallback provider") is a different model answering the SAME
+# prompt/method, so it keeps this same version -- which model actually answered a given call is a separate,
+# per-call fact recorded by the usage log (docs/LOGGING.md "Tokens / cost"), not by this identifier.
 VERSION = "llm-semantic-v1"
-FORMULA = ("no formula: a free-tier LLM is shown each asset's title/description/tags/source/kind plus the job's "
-           "subject and approved keywords, and returns a 0-100 judgment of whether the asset actually depicts/"
-           "relates to the topic IN MEANING (not just shared vocabulary), with a one-line reason. See PROMPT in "
-           "pipeline/vetting/llm_relevance.py and docs/SCORING.md.")
+PROMPT_VERSION = VERSION        # alias: this IS the prompt version, there's no separate numbering for it
+FORMULA = ("not a mathematical formula -- a judgment call. The configured LLM (config/pipeline.toml [relevance] /"
+           " .env; see docs/LOGGING.md for which model actually answered a given call) is shown each asset's "
+           "title/description/tags/source/kind plus the job's subject and approved keywords, and returns a 0-100 "
+           "judgment of whether the asset actually depicts/relates to the topic IN MEANING (not just shared "
+           "vocabulary), with a one-line reason. The exact wording is PROMPT in pipeline/vetting/llm_relevance.py "
+           "(this version's prompt, unchanged since llm-semantic-v1 shipped) -- see docs/SCORING.md.")
 
 PROMPT = """You are checking whether photos/video clips actually relate to a specific true-story video, not just whether
 they share vocabulary with it. Subject: {subject}

@@ -31,23 +31,31 @@ from .store import JobStore
 from ..stages.base import StageContext
 from ..stages.registry import Registry
 from ..stages.sourcing import write_credits, write_manifests
-from ..vetting.rules import (RELEVANCE_MIN, RULES, STOPWORDS, VERSION as VETTING_VERSION,
-                              KEYWORD_MATCH_FORMULA, KEYWORD_MATCH_VERSION, clean_term, vet_all)
-from ..vetting.tfidf_relevance import FORMULA as TFIDF_FORMULA, VERSION as TFIDF_VERSION, tfidf_scores
-from ..vetting.llm_relevance import FORMULA as LLM_SEMANTIC_FORMULA, VERSION as LLM_SEMANTIC_VERSION
+from ..vetting.rules import RELEVANCE_MIN, RULES, STOPWORDS, VERSION as VETTING_VERSION, asset_text, clean_term, vet_all
+from ..vetting.tfidf_relevance import VERSION as TFIDF_VERSION, tfidf_scores
+from ..vetting.llm_relevance import VERSION as LLM_SEMANTIC_VERSION
+from ..vetting.method_registry import METHOD_VERSIONS
 
 VETTER = machine("vetting-rules", VETTING_VERSION)
 MATCHER = machine("clip-matcher", "1")
 
-# Every relevance-scoring method's CURRENT version -> the formula it actually uses (docs/SCORING_CHANGELOG.md has
-# the full history). Used by _apply_vetting() to record, in each run's `relevance_scoring` decision-log entry,
-# the real formula for whichever tier(s) actually scored assets that round -- never a stale, one-size-fits-all
-# description (see docs/SCORING_CHANGELOG.md for why that used to be wrong).
-RELEVANCE_FORMULA_BY_METHOD = {
-    KEYWORD_MATCH_VERSION: KEYWORD_MATCH_FORMULA,
-    TFIDF_VERSION: TFIDF_FORMULA,
-    LLM_SEMANTIC_VERSION: LLM_SEMANTIC_FORMULA,
-}
+# The three human review labels (docs/EVALUATION.md). A duplicate may still be relevant to the topic -- it's an
+# independent axis from `decision` (approve/reject, which drives the pipeline's approved pool), not a synonym for
+# "irrelevant". SUGGESTED_LABEL_REASONS is UI guidance only (the review page's reason dropdown, GET /label-reasons)
+# -- `reason` itself is free text, never validated against this list server-side, so it's trivial to extend: edit
+# this one list and nothing else needs to change.
+LABELS = ("use", "duplicate", "irrelevant")
+SUGGESTED_LABEL_REASONS = [
+    "wrong case/person", "keyword-only match", "generic imagery", "wrong era",
+    "poor visual quality", "unreliable source", "exact duplicate", "near duplicate",
+]
+
+# Every relevance-scoring method's CURRENT version -> the formula/prompt it actually uses (pipeline/vetting/
+# method_registry.py is the single source of truth; docs/SCORING_CHANGELOG.md has the fuller history). Used by
+# _apply_vetting() to record, in each run's `relevance_scoring` decision-log entry, the real formula for whichever
+# method(s) actually scored assets that round -- never a stale, one-size-fits-all description (see
+# docs/SCORING_CHANGELOG.md for why that used to be wrong).
+RELEVANCE_FORMULA_BY_METHOD = {v: d.formula_or_prompt for v, d in METHOD_VERSIONS.items()}
 
 STAGE_CATEGORY = {
     JobState.KEYWORDS_RUNNING: "keywords", JobState.SOURCING_RUNNING: "sourcing",
@@ -169,8 +177,11 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ gate 2: assets
     async def review_assets(self, job_id: str, decisions: dict[str, dict[str, Any]], *, reviewer: str = "") -> Job:
-        """Record approve/reject for assets. `decisions` = {asset_id: {"decision": "approve"|"reject", "note": "..."}}.
-        Approving a HIGH-risk asset requires a note saying why it is acceptable."""
+        """Record approve/reject for assets. `decisions` = {asset_id: {"decision": "approve"|"reject", "note": "...",
+        "label": "use"|"duplicate"|"irrelevant"?, "label_reason": "..."?, "label_note": "..."?, "duplicate_of_asset_id": "..."?}}.
+        Approving a HIGH-risk asset requires a note saying why it is acceptable. `label` is optional and independent
+        of `decision` -- a duplicate may still be relevant to the topic, so labelling something "duplicate" does not
+        by itself change whether it's approved or rejected (docs/EVALUATION.md); set `decision` for that as usual."""
         actor = self._who(reviewer, require=True)
 
         def fn(job: Job) -> None:
@@ -182,6 +193,11 @@ class Orchestrator:
                     raise ValueError(f"unknown asset id {aid}")
                 if d.get("decision") not in ("approve", "reject"):
                     raise ValueError(f"decision for {aid} must be 'approve' or 'reject'")
+                if d.get("label") and d.get("label") not in LABELS:
+                    raise ValueError(f"label for {aid} must be one of {LABELS} (or omitted)")
+                dup_id = (d.get("duplicate_of_asset_id") or "").strip()
+                if dup_id and dup_id not in by_id:
+                    raise ValueError(f"duplicate_of_asset_id '{dup_id}' for {aid} is not a known asset in this job")
                 a = by_id[aid]
                 risk = a.vetting.risk if a.vetting else "unvetted"
                 note = (d.get("note") or "").strip()
@@ -195,9 +211,11 @@ class Orchestrator:
                 a.status = "approved" if d["decision"] == "approve" else "rejected"
                 a.decision_note = (d.get("note") or "").strip()
                 a.reviewer, a.reviewed_at = actor.name, _now()
-                label = d.get("label") if d.get("label") in ("relevant", "irrelevant") else ""
+                label = d.get("label") if d.get("label") in LABELS else ""
+                dup_id = (d.get("duplicate_of_asset_id") or "").strip()
                 if label:
-                    self._write_label(job, a, label, actor.name)
+                    self._write_label(job, a, label, actor.name, reason=(d.get("label_reason") or "").strip(),
+                                       note=(d.get("label_note") or "").strip(), duplicate_of_asset_id=dup_id)
                 v = a.vetting
                 self._rec(job.id, "assets", "asset_reviewed", actor, decision=d["decision"],
                           reason=a.decision_note or "(no note)",
@@ -205,24 +223,63 @@ class Orchestrator:
                           logic={"machine_risk": v.risk if v else "unvetted", "machine_summary": v.summary if v else "",
                                  "flags_shown_to_reviewer": [f"{f.rule}:{f.severity}" for f in (v.flags if v else [])],
                                  "high_risk_acknowledged": bool(v and v.risk == "high" and d["decision"] == "approve"),
-                                 "relevance_label_saved": label or None})
+                                 "relevance_label_saved": label or None, "label_reason": (d.get("label_reason") or "").strip() or None,
+                                 "duplicate_of_asset_id": dup_id or None})
         return await self._mutate(job_id, fn)
 
-    def _write_label(self, job: Job, a: Asset, label: str, who: str) -> None:
-        """Keep every explicit Use / Irrelevant click as a labelled example (RELEVANCE_LABELS.jsonl in the project folder).
-        These are the training/tuning data for relevance scoring: what the machine scored vs. what a human decided."""
+    async def label_asset(self, job_id: str, asset_id: str, label: str, *, reviewer: str = "",
+                           reason: str = "", note: str = "", duplicate_of_asset_id: str = "") -> Job:
+        """Save a Use/Duplicate/Irrelevant label for one asset, independent of the approve/reject decision gate --
+        unlike review_assets() above, this does NOT require JobState.ASSETS_REVIEW. This is what makes it possible
+        to label assets in a job that has already moved past asset review (docs/EVALUATION.md, scripts/
+        sample_for_review.py) without reopening or re-running anything. It only ever appends a row to
+        RELEVANCE_LABELS.jsonl and notes it in the decision log; it never touches the asset's status/decision or
+        the pipeline's approved pool."""
+        actor = self._who(reviewer, require=True)
+        if label not in LABELS:
+            raise ValueError(f"label must be one of {LABELS}")
+        dup_id = (duplicate_of_asset_id or "").strip()
+
+        def fn(job: Job) -> None:
+            a = next((x for x in job.assets if x.id == asset_id), None)
+            if a is None:
+                raise ValueError(f"unknown asset id {asset_id}")
+            if dup_id and not any(x.id == dup_id for x in job.assets):
+                raise ValueError(f"duplicate_of_asset_id '{dup_id}' is not a known asset in this job")
+            self._write_label(job, a, label, actor.name, reason=reason.strip(), note=note.strip(), duplicate_of_asset_id=dup_id)
+            self._rec(job.id, "assets", "label_saved", actor, decision=label, reason=note.strip() or "(no note)",
+                      subject={"asset_id": a.id, "title": a.title, "source": a.source},
+                      logic={"reason": reason.strip() or None, "duplicate_of_asset_id": dup_id or None,
+                             "outside_normal_review": job.state is not JobState.ASSETS_REVIEW,
+                             "job_state_at_label_time": job.state.value})
+        return await self._mutate(job_id, fn)
+
+    def _write_label(self, job: Job, a: Asset, label: str, who: str, *, reason: str = "", note: str = "",
+                      duplicate_of_asset_id: str = "") -> None:
+        """Append one labelled example to RELEVANCE_LABELS.jsonl (docs/EVALUATION.md) -- the ground truth
+        scripts/evaluate_relevance.py compares the machine's score against. APPEND-ONLY: relabeling an asset adds
+        a new row rather than replacing the old one, so nothing here is ever silently overwritten -- a reader
+        wanting "the current label" takes the latest row per asset_id by `at`; the full relabeling history stays
+        on disk regardless. Snapshots the threshold/decision/method/version AS THEY WERE when this asset was last
+        scored -- a later report must never recompute a historical decision against today's config."""
         v = a.vetting
-        row = {"job": job.id, "subject": job.subject, "label": label, "reviewer": who, "at": _now(),
-               "asset_id": a.id, "source": a.source, "kind": a.kind, "title": a.title, "description": a.description[:500],
-               "page_url": a.page_url, "sha256": a.sha256, "found_by_query": a.query,
-               "machine_score": v.relevance if v else None, "machine_why": v.relevance_why if v else "",
-               "keywords": [k.term for k in job.approved_keywords]}
+        row = {
+            "at": _now(), "job": job.id, "subject": job.subject, "reviewer": who,
+            "asset_id": a.id, "label": label, "reason": reason or None, "note": note or None,
+            "duplicate_of_asset_id": duplicate_of_asset_id or None,
+            "source": a.source, "kind": a.kind, "title": a.title, "description": a.description[:500],
+            "page_url": a.page_url, "sha256": a.sha256, "found_by_query": a.query,
+            "scored_text": asset_text(a)[:500] if v else "",
+            "machine_score": v.relevance if v else None, "machine_why": v.relevance_why if v else "",
+            "machine_decision": v.relevance_decision if v else "",
+            "relevance_threshold": v.relevance_threshold if v else None,
+            "scoring_method": v.scoring_method if v else "", "method_version": v.method_version if v else "",
+            "duplicate_flag_fired": bool(v and any(f.rule == "DUPLICATE" for f in v.flags)),
+            "keywords": [k.term for k in job.approved_keywords],
+        }
         path = self.store.job_dir(job.id) / "RELEVANCE_LABELS.jsonl"
-        keep = []
-        if path.exists():                     # one row per asset: a later click replaces an earlier one
-            keep = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip() and json.loads(ln).get("asset_id") != a.id]
-        keep.append(json.dumps(row, ensure_ascii=False))
-        path.write_text("\n".join(keep) + "\n", encoding="utf-8")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     async def approve_assets(self, job_id: str, *, reviewer: str = "", note: str = "") -> Job:
         actor = self._who(reviewer, require=True)
@@ -236,8 +293,15 @@ class Orchestrator:
                                "approved_high_risk": [a.id for a in approved if a.vetting and a.vetting.risk == "high"]})
         return await self._mutate(job_id, fn)
 
-    async def reject_assets(self, job_id: str, feedback: str = "", extra_queries: list[str] | None = None, *, reviewer: str = "") -> Job:
-        """Send the batch back to sourcing, optionally with new search terms."""
+    async def reject_assets(self, job_id: str, feedback: str = "", extra_queries: list[str] | None = None, *,
+                             reviewer: str = "", max_queries: int | None = None, per_query: int | None = None,
+                             videos_per_query: int | None = None) -> Job:
+        """Send the batch back to sourcing, optionally with new search terms and/or new per-job overrides:
+        `max_queries` (how many approved keywords the next round, and every round after it, searches) and
+        `per_query`/`videos_per_query` (how many photos/videos each source keeps PER keyword) -- see
+        queries_for()/SourcingStage.run in pipeline/stages/sourcing.py. This is what backs both the review
+        page's "Search again" (feedback + extra_queries) and its "Next batch" (max_queries only, no feedback
+        needed -- it just pulls more of the keywords already approved)."""
         actor = self._who(reviewer, require=True)
 
         def fn(job: Job) -> None:
@@ -246,9 +310,17 @@ class Orchestrator:
             extra = [clean_term(q) for q in (extra_queries or []) if clean_term(q)]
             if extra:
                 job.providers.options["extra_queries"] = list(dict.fromkeys(job.providers.options.get("extra_queries", []) + extra))
+            if max_queries is not None:
+                job.providers.options["max_queries"] = int(max_queries)
+            if per_query is not None:
+                job.providers.options["per_query"] = int(per_query)
+            if videos_per_query is not None:
+                job.providers.options["videos_per_query"] = int(videos_per_query)
             sm.apply(job, "reject_assets", note=feedback)
             self._rec(job.id, "assets", "rejected_asset_pool", actor, decision="reject",
-                      reason=feedback or "(no reason given)", outputs={"extra_queries": extra})
+                      reason=feedback or "(no reason given)",
+                      outputs={"extra_queries": extra, "max_queries": max_queries, "per_query": per_query,
+                               "videos_per_query": videos_per_query})
         return await self._mutate(job_id, fn)
 
     # ------------------------------------------------------------------ gate 3: scenes
@@ -260,7 +332,7 @@ class Orchestrator:
         *,
         reviewer: str = "",
     ) -> Job:
-        """Reorder scenes and/or edit narration/clip/approved flags. Only
+        """Reorder scenes and/or edit narration/clip/approved/note. Only
         allowed while the job is waiting in SCENES_REVIEW."""
         actor = self._who(reviewer)
 
@@ -275,7 +347,7 @@ class Orchestrator:
                     raise ValueError(f"unknown scene id {sid}")
                 if job.uses_sources and changes.get("clip_path") and changes["clip_path"] not in allowed_paths:
                     raise ValueError("clip_path must be one of the approved assets")
-                for field in ("narration", "clip_path", "approved", "search_terms"):
+                for field in ("narration", "clip_path", "approved", "search_terms", "note"):
                     if field in changes:
                         old = getattr(by_id[sid], field)
                         setattr(by_id[sid], field, changes[field])
@@ -499,7 +571,7 @@ class Orchestrator:
 
         need, reused, confident = [], 0, 0
         for a in pending:
-            if a.vetting is not None and a.vetting.relevance_method.split(" (")[0].startswith("llm-semantic"):
+            if a.vetting is not None and a.vetting.scoring_method == "llm-semantic":
                 reused += 1
                 continue
             score = tfidf.get(a.id, (None, ""))[0]
@@ -538,11 +610,11 @@ class Orchestrator:
             by_risk[r] = by_risk.get(r, 0) + 1
         methods = {}
         for a in job.assets:
-            m = a.vetting.relevance_method if a.vetting else ""
-            if m:
-                methods[m.split(" (")[0]] = methods.get(m.split(" (")[0], 0) + 1
+            mv = a.vetting.method_version if a.vetting else ""
+            if mv:
+                methods[mv] = methods.get(mv, 0) + 1
         joblog.write(self.store.job_dir(job.id), "INFO", "vetting", f"vetted {len(job.assets)} assets", risk=by_risk,
-                     scored_against=terms, min_relevance=min_rel, relevance_method=methods or None)
+                     scored_against=terms, min_relevance=min_rel, method_versions=methods or None)
         hidden = sum(1 for a in job.assets if a.status == "pending" and a.vetting and a.vetting.relevance is not None and a.vetting.relevance < min_rel)
         # Only the method(s) that actually scored an asset THIS round get their formula listed here -- e.g. a run
         # with no LLM configured only ever shows tfidf-vN's formula, never a stale, one-size-fits-all description
@@ -565,7 +637,11 @@ class Orchestrator:
             score = "n/a" if v.relevance is None else f"{round(v.relevance * 100)}%"
             self._rec(job.id, "vetting", "vetted_asset", VETTER, decision=f"risk {v.risk}, relevance {score}", reason=v.summary,
                       subject={"asset_id": a.id, "title": a.title, "source": a.source},
-                      logic={"method": v.method, "relevance_method": v.relevance_method or None,
+                      logic={"method": v.method, "scoring_method": v.scoring_method or None,
+                             "method_version": v.method_version or None, "scoring_fallback_note": v.scoring_fallback_note or None,
+                             "relevance_threshold": v.relevance_threshold, "relevance_decision": v.relevance_decision or None,
+                             "contribution_note": v.contribution_note or None,
+                             "contributions": [c.model_dump() for c in v.contributions],
                              "rules_checked": [r[0] for r in RULES] + ["RELEVANCE_LOW"],
                              "fired": [f.model_dump() for f in v.flags],
                              "how_risk_is_set": "highest severity among fired rules; info flags don't raise it",

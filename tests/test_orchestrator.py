@@ -40,9 +40,11 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         # Scene stage only ever sees approved keywords.
         self.assertEqual(self.stages["scenes"].calls[0][0], ["kw1", "kw3", "my own"])
 
-        # Human reorders scenes, edits narration, then approves.
+        # Human reorders scenes, edits narration and a private note, then approves.
         ids = [s.id for s in job.scenes]
-        job = await orch.edit_scenes(job.id, order=[ids[2], ids[0], ids[1]], edits={ids[0]: {"narration": "edited"}})
+        job = await orch.edit_scenes(job.id, order=[ids[2], ids[0], ids[1]],
+                                     edits={ids[0]: {"narration": "edited", "note": "double-check this date"}})
+        self.assertEqual(next(s for s in job.scenes if s.id == ids[0]).note, "double-check this date")
         job = await orch.approve_scenes(job.id)
         self.assertEqual(job.state, S.RENDERING)
 

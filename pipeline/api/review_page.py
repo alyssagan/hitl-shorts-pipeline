@@ -39,7 +39,10 @@ details{font-size:13px}summary{cursor:pointer;color:var(--acc)}
 .flag{margin:4px 0}.flag b{font-size:12px}
 .acts{display:flex;gap:8px;padding:0 12px 12px}.acts button{flex:1;font-weight:600}
 .acts .use.on{background:var(--ok);color:#fff;border-color:var(--ok)}.acts .rej.on{background:var(--no);color:#fff;border-color:var(--no)}
+.acts .dup.on{background:var(--med);color:#fff;border-color:var(--med)}
 textarea.note{width:100%;min-height:52px}
+.labelform{display:flex;flex-direction:column;gap:6px;padding:8px;background:var(--bg);border-radius:6px}
+.labelform select,.labelform input{width:100%}
 .banner{padding:10px 14px;border-radius:8px;background:var(--nobg);margin-bottom:14px}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:16px 0}
 .err{color:var(--no);margin:8px 0;white-space:pre-wrap}
@@ -87,17 +90,46 @@ async function loadLog(){
   try{ const r = await fetch(`/jobs/${JOB}/log?tail=150&level=${logLevel}`); logLines = (await r.text()).split("\n").filter(Boolean); }catch(e){}
   const el = document.getElementById("logbox"); if(el){ el.textContent = logLines.join("\n"); el.scrollTop = el.scrollHeight; }
 }
-let job=null, decisions={}, notes={}, minScore=0.5, showHidden=false, srcFilter="", kindFilter="", sortBy="risk", busy=false, error="";
+let job=null, decisions={}, notes={}, labels={}, labelSaved={}, labelForms={}, dupIds={}, minScore=0.5, showHidden=false, srcFilter="", kindFilter="", sortBy="risk", busy=false, error="", batchSize=10;
+let sceneNarration={}, sceneOrder=null, sceneClipOverride={}, sceneNotes={}, dragSceneId=null;
+let methodDefs={}, labelReasons=[];
+
+async function loadStatic(){
+  // Job-independent, small and unchanging within a session -- fetched once (docs/EVALUATION.md, docs/REVIEW_UI.md).
+  try{ methodDefs = await api("GET","/methods"); }catch(e){}
+  try{ const r = await api("GET","/label-reasons"); labelReasons = r.suggested_reasons||[]; }catch(e){}
+}
 
 async function load(){
   job = await api("GET","/jobs/"+JOB);
   const opt = (job.providers&&job.providers.options)||{};
   if (store.get("minScore:"+JOB)==null) minScore = opt.min_relevance!=null ? Number(opt.min_relevance) : 0.5;
   else minScore = Number(store.get("minScore:"+JOB));
+  if (store.get("batchSize:"+JOB)==null) batchSize = opt.max_queries!=null ? Number(opt.max_queries) : 10;
+  else batchSize = Number(store.get("batchSize:"+JOB));
   for (const a of job.assets){
     if (a.status!=="pending" && decisions[a.id]==null){ decisions[a.id]=a.status==="approved"?"approve":"reject"; notes[a.id]=a.decision_note||""; }
   }
+  syncScenes();
   render();
+}
+function syncScenes(){
+  // Keeps any in-progress narration/order edits across a poll-driven reload -- but only for the SAME set of
+  // scenes. A rewrite ("Search again"/"Search again" at gate 3, i.e. scenes/reject) replaces job.scenes
+  // entirely with new ids, so a changed id set means start fresh rather than mixing old drafts into it.
+  const ids = new Set((job.scenes||[]).map(s=>s.id));
+  const known = new Set(Object.keys(sceneNarration));
+  const sameSet = ids.size===known.size && [...ids].every(id=>known.has(id));
+  if (!sameSet){ sceneNarration={}; sceneOrder=null; sceneClipOverride={}; sceneNotes={}; }
+  for (const s of (job.scenes||[])){
+    if (sceneNarration[s.id]==null) sceneNarration[s.id] = s.narration;
+    if (sceneNotes[s.id]==null) sceneNotes[s.id] = s.note||"";
+  }
+}
+function orderedScenes(){
+  if (!sceneOrder) return job.scenes;
+  const by = Object.fromEntries(job.scenes.map(s=>[s.id,s]));
+  return sceneOrder.map(id=>by[id]).filter(Boolean);
 }
 const score = a => (a.vetting && a.vetting.relevance!=null) ? a.vetting.relevance : null;
 const below = a => score(a)!=null && score(a) < minScore - 1e-9;
@@ -113,8 +145,38 @@ function visible(){
                           || (score(b)??-1)-(score(a)??-1)};
   return xs.sort(by[sortBy]);
 }
-function setDecision(a, d){
-  decisions[a.id] = decisions[a.id]===d ? undefined : d; if(decisions[a.id]==null) delete decisions[a.id];
+// Label (use/duplicate/irrelevant) and decision (approve/reject) are two independent axes (docs/EVALUATION.md):
+// `decision` drives the pipeline's approved pool, `label` drives RELEVANCE_LABELS.jsonl. The three buttons below
+// set both at once because in normal review they move together (Use approves + labels "use"; Duplicate/Irrelevant
+// both reject + label accordingly, since a duplicate is not automatically wanted in the video) -- but the label
+// save itself (saveLabel) is a separate API call from the approve/reject submit, and succeeds immediately so
+// labelling works even before you hit "Save and continue".
+function setLabel(a, lbl){
+  const was = labels[a.id];
+  labels[a.id] = was===lbl ? undefined : lbl;
+  if (labels[a.id]==null){
+    delete labels[a.id]; delete decisions[a.id]; delete labelSaved[a.id];
+    render();
+    return;
+  }
+  decisions[a.id] = lbl==="use" ? "approve" : "reject";
+  delete labelSaved[a.id];
+  render();
+  saveLabel(a);
+}
+async function saveLabel(a){
+  const lbl = labels[a.id];
+  if (!lbl) return;
+  const form = labelForms[a.id]||{};
+  const reviewer = (store.get("reviewer")||"").trim();
+  try{
+    await api("POST", `/jobs/${JOB}/assets/label`, {
+      asset_id: a.id, label: lbl, reviewer,
+      reason: form.reason||"", note: form.note||"",
+      duplicate_of_asset_id: lbl==="duplicate" ? (dupIds[a.id]||"") : "",
+    });
+    labelSaved[a.id] = true; error="";
+  }catch(e){ error = String(e.message||e); }
   render();
 }
 function counts(){
@@ -128,30 +190,45 @@ function counts(){
 }
 
 function card(a){
-  const v = a.vetting||{}, d = decisions[a.id], r = risk(a);
+  const v = a.vetting||{}, d = decisions[a.id], r = risk(a), lbl = labels[a.id];
   const media = a.kind==="video"
     ? h("video",{src:`/jobs/${JOB}/assets/${a.id}/file`,controls:true,muted:true,preload:"metadata",playsinline:true})
     : h("img",{src:`/jobs/${JOB}/assets/${a.id}/file`,loading:"lazy",alt:a.title||"",onclick:()=>lightbox(a)});
   const flags = (v.flags||[]).map(f => h("div",{class:"flag"}, h("b",{}, f.rule+" ("+f.severity+")"), ": ", f.message,
                    h("div",{class:"meta"},"evidence: "+f.evidence)));
-  const methodLabel = [
-    ["llm-semantic", "scored by: LLM (judged meaning, not just shared words)"],
-    ["tfidf", "scored by: TF-IDF (local, deterministic match against the approved keywords)"],
-    ["keyword-match", "scored by: plain keyword match (fallback -- TF-IDF/LLM score wasn't available for this item)"],
-  ];
-  // relevance_method is versioned (e.g. "tfidf-v3", docs/SCORING_CHANGELOG.md) -- match by prefix so the friendly
-  // label still shows, and print the exact version alongside it so two assets scored by different algorithm
-  // versions are visibly distinguishable here, not just in decisions.jsonl.
-  const m = (v.relevance_method||"").split(" (")[0];
-  const label = methodLabel.find(([prefix]) => m.startsWith(prefix));
-  const scoredBy = label ? `${label[1]} [${m}]` : (v.relevance_method ? `scored by: ${v.relevance_method}` : "scored by: (not scored)");
+  // scoring_method/method_version are separate, versioned fields (docs/SCORING_CHANGELOG.md), e.g. "tfidf"/"tfidf-v1" --
+  // print both, plus any fallback note, rather than reconstructing a combined string.
+  const scoredBy = v.scoring_method ? `scored by: ${v.scoring_method} [${v.method_version}]`
+      + (v.scoring_fallback_note ? ` (${v.scoring_fallback_note})` : "") : "scored by: (not scored)";
+  const contribs = v.contributions||[];
+  const contribLines = contribs.length>1 ? contribs.map(c =>
+    `  - ${c.scoring_method} [${c.method_version}]: ${c.score==null?"n/a":pct(c.score)}` +
+    (c.used_for_decision?" (used for the decision)":"") + (c.why?` -- ${c.why}`:"")).join("\n")+"\n" : "";
+  const def = methodDefs[v.method_version];
+  const defText = def ? [def.description, def.formula_or_prompt, def.model_note,
+      Object.keys(def.parameters||{}).length ? "Parameters: "+Object.entries(def.parameters).map(([k,val])=>`${k} = ${val}`).join("; ") : "",
+      def.why_changed ? "Why this version: "+def.why_changed : ""].filter(Boolean).join("\n\n") : "";
   const why = h("details",{}, h("summary",{},"Why this score and risk"),
     h("div",{class:"why"},
-      `Relevance score: ${pct(score(a))}  (threshold ${pct(minScore)})\n${scoredBy}\n${v.relevance_why||"(no keyword to score against)"}\n` +
-      `See docs/SCORING.md for how each method works.\n\n` +
-      `${v.summary||""}\nRules version: ${v.method||"?"}\nFound by search: "${a.query||""}"`),
+      `Relevance score: ${pct(score(a))}  (threshold at scoring time: ${pct(v.relevance_threshold)}, machine decision: ${v.relevance_decision||"n/a"})\n` +
+      `${scoredBy}\n${v.relevance_why||"(no keyword to score against)"}\n` + contribLines +
+      `${v.contribution_note||""}\n\nSee docs/SCORING.md for how each method works.`),
+    def?h("details",{}, h("summary",{},`What does ${v.method_version} do?`), h("div",{class:"why"}, defText)):null,
+    h("div",{class:"why"}, `${v.summary||""}\nRisk-rules version: ${v.method||"?"}\nFound by search: "${a.query||""}"`),
     flags.length?h("div",{class:"why"}, flags):null);
   const needsNote = d==="approve" && r==="high";
+  const form = labelForms[a.id]||{};
+  const dupOptions = [["","(pick the original asset, optional)"], ...job.assets.filter(x=>x.id!==a.id)
+      .map(x=>[x.id, (x.title||x.id).slice(0,50)+" ["+x.id+"]"])];
+  const labelForm = lbl ? h("div",{class:"labelform"},
+    h("select",{onchange:e=>{labelForms[a.id]=Object.assign({},form,{reason:e.target.value});}},
+      [["","(no reason given)"],...labelReasons.map(x=>[x,x]),["other","other (see note)"]]
+        .map(([val,t])=>h("option",{value:val,selected:val===(form.reason||"")},t))),
+    lbl==="duplicate" ? h("select",{onchange:e=>{dupIds[a.id]=e.target.value;}},
+      dupOptions.map(([val,t])=>h("option",{value:val,selected:val===(dupIds[a.id]||"")},t))) : null,
+    h("input",{type:"text",placeholder:"note (optional)",value:form.note||"",
+      oninput:e=>{labelForms[a.id]=Object.assign({},form,{note:e.target.value});}}),
+    h("button",{onclick:()=>saveLabel(a)}, labelSaved[a.id]?"saved ✓ -- update":"save reason/note")) : null;
   return h("div",{class:"card","data-d":d||""},
     h("div",{class:"media"}, media),
     h("div",{class:"body"},
@@ -168,10 +245,12 @@ function card(a){
       a.description?h("div",{class:"meta"}, a.description.slice(0,260)):null,
       why,
       needsNote?h("textarea",{class:"note",placeholder:"HIGH risk: why is it OK to use this? (required)",
-          oninput:e=>{notes[a.id]=e.target.value; updateSubmit();}}, notes[a.id]||""):null),
+          oninput:e=>{notes[a.id]=e.target.value; updateSubmit();}}, notes[a.id]||""):null,
+      labelForm),
     h("div",{class:"acts"},
-      h("button",{class:"use"+(d==="approve"?" on":""),disabled:v.usable===false,onclick:()=>setDecision(a,"approve")},"Use"),
-      h("button",{class:"rej"+(d==="reject"?" on":""),onclick:()=>setDecision(a,"reject")},"Irrelevant")));
+      h("button",{class:"use"+(lbl==="use"?" on":""),disabled:v.usable===false,onclick:()=>setLabel(a,"use")},"Use"),
+      h("button",{class:"dup"+(lbl==="duplicate"?" on":""),onclick:()=>setLabel(a,"duplicate")},"Duplicate"),
+      h("button",{class:"rej"+(lbl==="irrelevant"?" on":""),onclick:()=>setLabel(a,"irrelevant")},"Irrelevant")));
 }
 
 function lightbox(a){
@@ -197,23 +276,62 @@ async function submit(){
     for (const a of job.assets){
       if (a.status!=="pending" && decisions[a.id]===(a.status==="approved"?"approve":"reject")) continue;
       let d = decisions[a.id], note = notes[a.id]||"";
-      let label = d==="approve" ? "relevant" : d==="reject" ? "irrelevant" : "";
       if (!d){ d="reject"; note = below(a) ? `hidden below the ${pct(minScore)} relevance threshold (score ${pct(score(a))}); not looked at`
                                             : `no decision made in the review page (left undecided, so not used); score ${pct(score(a))}`; }
-      if (d==='reject' && !note && label) note='marked irrelevant';
-      out[a.id]={decision:d, note, label};
+      if (d==='reject' && !note) note = labels[a.id] ? `marked ${labels[a.id]}` : 'marked irrelevant';
+      // `label` is saved separately and immediately via /assets/label (setLabel/saveLabel above) as soon as you
+      // click Use/Duplicate/Irrelevant, not batched into this submit -- so it is intentionally NOT sent here.
+      out[a.id]={decision:d, note};
     }
     await api("POST",`/jobs/${JOB}/assets/review`,{decisions:out, reviewer});
     await api("POST",`/jobs/${JOB}/assets/approve`,{reviewer});
     busy=false; await load();
   }catch(e){ busy=false; error=String(e.message||e); render(); }
 }
+function missingHighRiskNotes(){
+  // Same rule "Save and continue" enforces: a HIGH-risk Use needs a written reason before it can be saved.
+  return job.assets.filter(a=>decisions[a.id]==="approve" && risk(a)==="high" && !(notes[a.id]||"").trim()).length;
+}
+async function persistDecisions(reviewer){
+  // Saves every decision made SO FAR (Use/reject clicks on this and any earlier batch) via /assets/review,
+  // WITHOUT calling /assets/approve -- so the job stays in asset review and nothing moves to scenes yet.
+  // This is what makes a Use survive "Next batch" / "Search again": once saved, an asset's status is no
+  // longer "pending", so the next sourcing+vetting round (pipeline/core/orchestrator.py) leaves it alone --
+  // only still-pending assets get rescored, and only decided assets keep their approved/rejected status.
+  // Anything left undecided is skipped here (not force-rejected), so it's simply still there, still
+  // undecided, next round -- exactly like an asset that hasn't been looked at yet.
+  const out = {};
+  for (const a of job.assets){
+    const d = decisions[a.id];
+    if (!d) continue;
+    if (a.status!=="pending" && d===(a.status==="approved"?"approve":"reject")) continue;   // already saved as-is
+    out[a.id] = {decision:d, note: notes[a.id]||""};
+  }
+  if (Object.keys(out).length) await api("POST",`/jobs/${JOB}/assets/review`,{decisions:out, reviewer});
+}
 async function searchAgain(){
   const fb = document.getElementById("fb").value, xq = document.getElementById("xq").value;
+  const missing = missingHighRiskNotes();
+  if (missing){ error = `${missing} high-risk Use pick(s) need a note before searching again -- add the note, or un-pick them.`; render(); return; }
   busy=true; error=""; render();
   try{
-    await api("POST",`/jobs/${JOB}/assets/reject`,{feedback:fb, extra_queries:xq.split(",").map(s=>s.trim()).filter(Boolean), reviewer:(store.get("reviewer")||"").trim()});
-    busy=false; decisions={}; notes={}; await load();
+    const reviewer = (store.get("reviewer")||"").trim();
+    await persistDecisions(reviewer);
+    await api("POST",`/jobs/${JOB}/assets/reject`,{feedback:fb, extra_queries:xq.split(",").map(s=>s.trim()).filter(Boolean), reviewer});
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function nextBatch(){
+  // Just pulls the next `batchSize` keywords that haven't been searched yet -- no new terms, no reason needed.
+  // Sets job.providers.options.max_queries for every round from here on (docs/RUNNING.md "Many keywords: batches").
+  const missing = missingHighRiskNotes();
+  if (missing){ error = `${missing} high-risk Use pick(s) need a note before pulling more -- add the note, or un-pick them.`; render(); return; }
+  busy=true; error=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    await persistDecisions(reviewer);
+    await api("POST",`/jobs/${JOB}/assets/reject`,{max_queries: Math.max(1, Number(batchSize)||10), reviewer});
+    busy=false; await load();
   }catch(e){ busy=false; error=String(e.message||e); render(); }
 }
 function bulk(kind){
@@ -225,9 +343,120 @@ function bulk(kind){
   render();
 }
 
+/* -------------------------------------------------------------- gate 3: scenes/script */
+function sceneText(s){ return sceneNarration[s.id]!=null ? sceneNarration[s.id] : s.narration; }
+function scriptText(){
+  // The FULL SCRIPT as it stands right now: current order, current in-progress edits -- not job.script,
+  // which is frozen at whatever the writer produced and goes stale the moment any scene narration is edited.
+  return orderedScenes().map((s,i) =>
+    `[Scene ${i+1}${s.clip_path ? " -- clip: "+s.clip_path.split("/").pop() : " -- NO CLIP"}]\n${sceneText(s)}`).join("\n\n");
+}
+function scriptWordsLine(){
+  const words = orderedScenes().reduce((n,s) => n + sceneText(s).trim().split(/\s+/).filter(Boolean).length, 0);
+  return `${words} word(s), about ${Math.round(words/2.6)}s spoken`;
+}
+function updateScriptPreview(){
+  // Called on every keystroke in a scene's textarea -- patches just the preview text/word-count directly
+  // (no render()), so the textarea itself is never rebuilt and the cursor/focus never jumps mid-edit.
+  const el = document.getElementById("scriptPreview"); if (el) el.textContent = scriptText();
+  const wc = document.getElementById("scriptWords"); if (wc) wc.textContent = scriptWordsLine();
+}
+function moveScene(id, dir){
+  const ids = (sceneOrder || job.scenes.map(s=>s.id)).slice();
+  const i = ids.indexOf(id), j = i+dir;
+  if (i<0 || j<0 || j>=ids.length) return;
+  [ids[i], ids[j]] = [ids[j], ids[i]];
+  sceneOrder = ids;
+  render();
+}
+function dropScene(targetId){
+  // Drag-and-drop reorder: drag the handle (draggable, fires dragstart -> sets dragSceneId), drop
+  // anywhere on another scene's card (that card listens for dragover/drop) to move it there. Same
+  // sceneOrder state the ↑/↓ buttons use, so either way works and they never conflict.
+  const id = dragSceneId; dragSceneId = null;
+  if (!id || id===targetId) { render(); return; }
+  const ids = (sceneOrder || job.scenes.map(s=>s.id)).slice();
+  const from = ids.indexOf(id), to = ids.indexOf(targetId);
+  if (from<0 || to<0) { render(); return; }
+  ids.splice(from, 1);
+  ids.splice(to, 0, id);
+  sceneOrder = ids;
+  render();
+}
+async function saveSceneEdits(reviewer){
+  const edits = {};
+  for (const s of job.scenes){
+    const changes = {};
+    if (sceneNarration[s.id]!=null && sceneNarration[s.id] !== s.narration) changes.narration = sceneNarration[s.id];
+    if (sceneClipOverride[s.id]!=null && sceneClipOverride[s.id] !== (s.clip_path||"")) changes.clip_path = sceneClipOverride[s.id];
+    if (sceneNotes[s.id]!=null && sceneNotes[s.id] !== (s.note||"")) changes.note = sceneNotes[s.id];
+    if (Object.keys(changes).length) edits[s.id] = changes;
+  }
+  const reordered = !!sceneOrder && sceneOrder.join(",") !== job.scenes.map(s=>s.id).join(",");
+  if (!Object.keys(edits).length && !reordered) return;      // nothing changed -- don't bother the API
+  const payload = {reviewer};
+  if (Object.keys(edits).length) payload.edits = edits;
+  if (reordered) payload.order = sceneOrder;
+  await api("PATCH", `/jobs/${JOB}/scenes`, payload);
+}
+async function saveScenesClick(){
+  busy=true; error=""; render();
+  try{ await saveSceneEdits((store.get("reviewer")||"").trim()); busy=false; await load(); }
+  catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function approveScenes(){
+  busy=true; error=""; render();
+  try{
+    const reviewer=(store.get("reviewer")||"").trim();
+    await saveSceneEdits(reviewer);                  // whatever you typed gets saved before it renders, not lost
+    await api("POST",`/jobs/${JOB}/scenes/approve`,{reviewer});
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function rejectScenes(){
+  const fb = document.getElementById("sfb").value;
+  if (!fb.trim()){ error="Say what should change before asking for a rewrite."; render(); return; }
+  busy=true; error=""; render();
+  try{
+    await api("POST",`/jobs/${JOB}/scenes/reject`,{feedback:fb, reviewer:(store.get("reviewer")||"").trim()});
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+function sceneCard(s, i, n){
+  const approved = job.assets.filter(a=>a.status==="approved");
+  // job.uses_sources is a plain @property on the backend Job model, not a @computed_field, so it's never
+  // in the JSON the API sends -- mirror its logic here instead: bool(providers.sources) (pipeline/core/models.py).
+  const usesSources = !!(job.providers && job.providers.sources && job.providers.sources.length);
+  const curClip = sceneClipOverride[s.id]!=null ? sceneClipOverride[s.id] : (s.clip_path||"");
+  const clipPicker = (usesSources && approved.length) ? h("label",{}, "Clip ",
+    h("select",{onchange:e=>{sceneClipOverride[s.id]=e.target.value; render();}},
+      [["", s.clip_path ? "(keep: "+s.clip_path.split("/").pop()+")" : "(no clip)"],
+       ...approved.map(a=>[a.path, (a.title||a.id).slice(0,44)])]
+        .map(([v,t])=>h("option",{value:v,selected:v===curClip},t)))) : null;
+  const dragging = dragSceneId===s.id;
+  return h("div",{class:"panel", style: dragging ? "opacity:.4" : "",
+      ondragover:e=>{e.preventDefault(); e.dataTransfer.dropEffect="move";}, ondrop:e=>{e.preventDefault(); dropScene(s.id);}},
+    h("div",{class:"bar"},
+      h("span",{draggable:"true",title:"Drag to reorder",style:"cursor:grab;font-size:16px;color:var(--mute);user-select:none;padding:0 4px;",
+          ondragstart:e=>{dragSceneId=s.id; e.dataTransfer.effectAllowed="move"; e.dataTransfer.setData("text/plain",s.id);},
+          ondragend:()=>{dragSceneId=null; render();}}, "☰"),
+      h("b",{}, `Scene ${i+1} of ${n}`),
+      h("button",{disabled:i===0,onclick:()=>moveScene(s.id,-1),title:"Move earlier"},"↑"),
+      h("button",{disabled:i===n-1,onclick:()=>moveScene(s.id,1),title:"Move later"},"↓"),
+      h("span",{class:"meta"}, s.clip_path ? "clip: "+s.clip_path.split("/").pop() : "NO CLIP -- approve more assets or add footage to library/clips"),
+      s.clip_reason?h("span",{class:"meta"},"("+s.clip_reason+")"):null,
+      clipPicker),
+    h("div",{class:"meta",style:"margin-top:6px"}, "Narration (spoken)"),
+    h("textarea",{class:"note",style:"min-height:80px",
+        oninput:e=>{sceneNarration[s.id]=e.target.value; updateScriptPreview();}}, sceneText(s)),
+    h("div",{class:"meta",style:"margin-top:6px"}, "Your note (private -- never spoken, never sent to the renderer)"),
+    h("textarea",{class:"note",style:"min-height:44px",placeholder:"e.g. reconsider this clip, double-check this date, come back to this later…",
+        oninput:e=>{sceneNotes[s.id]=e.target.value;}}, sceneNotes[s.id]!=null?sceneNotes[s.id]:(s.note||"")));
+}
+
 function render(){
   if(!job) return;
-  const c = counts(), reviewing = job.state==="assets_review";
+  const c = counts(), reviewing = job.state==="assets_review", inScenes = job.state==="scenes_review";
   const sources = [...new Set(job.assets.map(a=>a.source))];
   const opt=(id,cur,vals)=>h("select",{id,onchange:e=>{ if(id==="src")srcFilter=e.target.value; if(id==="kind")kindFilter=e.target.value; if(id==="sort")sortBy=e.target.value; render();}},
       vals.map(([v,t])=>h("option",{value:v,selected:v===cur},t)));
@@ -237,39 +466,73 @@ function render(){
     h("div",{}, h("h1",{}, job.subject), h("div",{class:"sub"}, "Job ", job.id, " · state: ", h("span",{class:"chip"}, job.state), " · ",
         h("a",{href:"/review"},"all projects"), " · ", h("a",{href:`/jobs/${JOB}/decisions?format=md`,target:"_blank"},"decision log"))),
     h("div",{class:"bar"},
-      h("span",{class:"tally"}, `${c.use} use · ${c.rej} reject · ${c.und} undecided · ${c.hidden} hidden`),
+      inScenes ? h("span",{class:"tally"}, `${job.scenes.length} scene(s)`) : h("span",{class:"tally"}, `${c.use} use · ${c.rej} reject · ${c.und} undecided · ${c.hidden} hidden`),
       h("label",{}, "Your name ", h("input",{type:"text",value:store.get("reviewer")||"",placeholder:"recorded in the log",oninput:e=>store.set("reviewer",e.target.value)})),
-      h("label",{}, "Min score ", h("input",{type:"range",min:0,max:100,step:5,value:Math.round(minScore*100),
+      inScenes ? null : h("label",{}, "Min score ", h("input",{type:"range",min:0,max:100,step:5,value:Math.round(minScore*100),
           oninput:e=>{minScore=e.target.value/100;store.set("minScore:"+JOB,String(minScore));render();}}), h("b",{}, pct(minScore))),
-      h("label",{}, h("input",{type:"checkbox",checked:showHidden,onchange:e=>{showHidden=e.target.checked;render();}}), "show below threshold"),
-      h("label",{}, "Source ", opt("src",srcFilter,[["","all"],...sources.map(s=>[s,s])])),
-      h("label",{}, "Type ", opt("kind",kindFilter,[["","all"],["image","photos"],["video","videos"]])),
-      h("label",{}, "Sort ", opt("sort",sortBy,[["risk","risk (low first), best score first within each"],["score","best score"],["source","source"]])),
-      h("button",{onclick:()=>bulk("use")},"Use all shown (not high-risk)"),
-      h("button",{onclick:()=>bulk("rej")},"Mark all shown undecided irrelevant"),
-      h("button",{id:"submit",class:"primary",disabled:true,onclick:submit},"...")));
+      inScenes ? null : h("label",{}, h("input",{type:"checkbox",checked:showHidden,onchange:e=>{showHidden=e.target.checked;render();}}), "show below threshold"),
+      inScenes ? null : h("label",{}, "Source ", opt("src",srcFilter,[["","all"],...sources.map(s=>[s,s])])),
+      inScenes ? null : h("label",{}, "Type ", opt("kind",kindFilter,[["","all"],["image","photos"],["video","videos"]])),
+      inScenes ? null : h("label",{}, "Sort ", opt("sort",sortBy,[["risk","risk (low first), best score first within each"],["score","best score"],["source","source"]])),
+      inScenes ? null : h("button",{onclick:()=>bulk("use")},"Use all shown (not high-risk)"),
+      inScenes ? null : h("button",{onclick:()=>bulk("rej")},"Mark all shown undecided irrelevant"),
+      inScenes ? null : h("button",{id:"submit",class:"primary",disabled:true,onclick:submit},"...")));
   const body = h("main",{},
-    !reviewing?h("div",{class:"banner"},`This project is in state "${job.state}", not asset review. This page will refresh when it reaches asset review.`):null,
+    (!reviewing && !inScenes)?h("div",{class:"banner"},`This project is in state "${job.state}", not asset or scene review. This page will refresh when it reaches one.`):null,
     warn, error?h("div",{class:"err"},error):null,
-    h("div",{class:"sub",style:"margin-bottom:10px"},
-      `Showing ${xs.length} of ${job.assets.length}. Score = share of a keyword's words found in the item's own title/description/tags (docs/SCORING.md). `+
-      `Items under ${pct(minScore)} are hidden. Anything you leave undecided or hidden when you submit is not used (logged as rejected with a note) and is NOT counted as a training label. Only your Use / Irrelevant clicks are saved as labels (RELEVANCE_LABELS.jsonl in the project folder).`),
-    h("div",{class:"grid"}, xs.map(card)),
+    inScenes ? sceneReviewBody() : assetReviewBody(xs),
     h("div",{class:"panel"}, h("details",{open:logOpen,ontoggle:e=>{logOpen=e.target.open; if(logOpen) loadLog();}},
       h("summary",{},"Activity log (what the pipeline did, step by step)"),
       h("div",{class:"bar"}, h("label",{},"Detail ", h("select",{onchange:e=>{logLevel=e.target.value;loadLog();}},
           ["INFO","DEBUG","WARN","ERROR"].map(l=>h("option",{value:l,selected:l===logLevel},l)))),
         h("a",{href:`/jobs/${JOB}/log?level=DEBUG`,target:"_blank"},"open full log")),
       h("pre",{id:"logbox",class:"why",style:"max-height:280px;overflow:auto"}, logLines.join("\n")))),
-    h("div",{class:"panel"}, h("b",{},"Not enough good ones? Search again"),
-      h("div",{class:"sub"},"Fetches the next page of results (no repeats). Add specific new search terms, comma separated."),
+    reviewing ? h("div",{class:"panel"}, h("b",{},"Not enough good ones? Get more"),
+      h("div",{class:"sub"},"Either button saves your Use/Duplicate/Irrelevant picks on this page first, so they're kept -- "+
+        "nothing you've already decided gets lost or asked about again. \"Next batch\" just searches more of your "+
+        "already-approved keywords, no typing needed. \"Search again\" is for when you want to steer it: add new terms, or say what was wrong."),
       h("div",{class:"bar"},
+        h("label",{}, "Batch size ", h("input",{type:"number",id:"bs",min:1,max:200,value:batchSize,style:"width:64px",
+            oninput:e=>{batchSize=Math.max(1,Number(e.target.value)||1); store.set("batchSize:"+JOB,String(batchSize)); render();}})),
+        h("button",{class:"primary",disabled:busy,onclick:nextBatch,title:"Search the next "+batchSize+" keyword(s) that haven't been searched yet"},
+          `Next batch (${batchSize})`)),
+      h("div",{class:"bar",style:"margin-top:8px"},
         h("input",{type:"text",id:"xq",placeholder:"e.g. whitechapel 1888, victorian london street",size:44}),
         h("input",{type:"text",id:"fb",placeholder:"what was wrong with these?",size:34}),
-        h("button",{disabled:!reviewing||busy,onclick:searchAgain},"Search again"))));
+        h("button",{disabled:busy,onclick:searchAgain},"Search again"))) : null);
   $app.replaceChildren(top, body);
   updateSubmit();
   document.querySelectorAll("video").forEach(v=>v.muted=true);
+}
+function assetReviewBody(xs){
+  return h("div",{},
+    h("div",{class:"sub",style:"margin-bottom:10px"},
+      `Showing ${xs.length} of ${job.assets.length}. Score = share of a keyword's words found in the item's own title/description/tags (docs/SCORING.md). `+
+      `Items under ${pct(minScore)} are hidden. Anything you leave undecided or hidden when you submit is not used (logged as rejected with a note) and is NOT counted as a training label. Only your Use / Duplicate / Irrelevant clicks are saved as labels, immediately, one per click (RELEVANCE_LABELS.jsonl in the project folder) -- separately from "Save and continue", which records the approve/reject decision.`),
+    h("div",{class:"grid"}, xs.map(card)));
+}
+function sceneReviewBody(){
+  // Gate 3: the full script (live, from current scene narration -- not the frozen job.script) plus one
+  // editable card per scene (docs/REVIEW_UI.md). Matches what scripts/poc.py does in the terminal, just
+  // easier to read and edit as a whole instead of one scene at a time on a command line.
+  const scenes = orderedScenes();
+  return h("div",{},
+    h("div",{class:"panel"},
+      h("b",{},"Full script"),
+      h("div",{class:"sub"},"This reflects your edits below as you type -- it's what will actually be spoken, not what the writer first drafted. "+
+        "Edit the narration in each scene's box; reorder scenes with the ↑/↓ buttons."),
+      h("div",{id:"scriptWords",class:"meta",style:"margin:4px 0"}, scriptWordsLine()),
+      h("pre",{id:"scriptPreview",class:"why",style:"max-height:320px;overflow:auto"}, scriptText())),
+    h("div",{}, scenes.map((s,i)=>sceneCard(s,i,scenes.length))),
+    h("div",{class:"panel"},
+      h("div",{class:"bar"},
+        h("button",{disabled:busy,onclick:saveScenesClick},"Save changes"),
+        h("button",{class:"primary",disabled:busy,onclick:approveScenes},"Approve and render")),
+      h("div",{class:"sub",style:"margin-top:6px"},"\"Save changes\" keeps you here so you can keep editing. \"Approve and render\" saves whatever's "+
+        "unsaved too, then starts the (slow) render -- your last chance to change anything before it."),
+      h("div",{class:"bar",style:"margin-top:10px"},
+        h("input",{type:"text",id:"sfb",placeholder:"what should change? (e.g. shorter, different tone, wrong facts)",size:50}),
+        h("button",{disabled:busy,onclick:rejectScenes},"Ask for a rewrite instead"))));
 }
 
 async function poll(){
@@ -284,7 +547,7 @@ async function poll(){
 (async function(){
   try{
     if(!JOB) return await listPage();
-    await load(); setInterval(poll, 4000);
+    await Promise.all([loadStatic(), load()]); setInterval(poll, 4000);
   }catch(e){ $app.replaceChildren(h("main",{},h("div",{class:"err"},String(e.message||e)))); }
 })();
 </script></body></html>

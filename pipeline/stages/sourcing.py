@@ -58,7 +58,27 @@ class SourcingStage:
     async def run(self, job: Job, ctx: StageContext) -> SourcingResult:
         if ctx.project_dir is None:
             raise SourcingError("project folder unknown")
-        queries = queries_for(job, self.max_queries)
+        # Per-job override: job.providers.options["max_queries"] beats the registry/config
+        # default (config/pipeline.toml [sources] max_queries), the same way min_relevance
+        # and extra_queries already do. Falls back to the registry's value when not set.
+        max_queries = int(job.providers.options.get("max_queries", self.max_queries))
+        queries = queries_for(job, max_queries)
+        # Per-job override for how many photos/videos each source keeps PER KEYWORD (config/pipeline.toml
+        # [sources] per_query/videos_per_query, default 4/2 -- pipeline/sources/base.py HttpSource). Pulling
+        # more candidates per keyword and then letting the relevance score + the review page's min-score
+        # slider (docs/SCORING.md) narrow them down usually finds more good ones than adding new keywords,
+        # since it doesn't depend on guessing better search phrases. self.adapters is rebuilt fresh every
+        # round (Registry.sourcing_stage()), so mutating these instance attributes here is safe -- it never
+        # leaks into another job or another round with different options. Sources that don't page through
+        # search results (wikipedia, folder, urls) simply have no `per_query` attribute and are skipped.
+        per_query = job.providers.options.get("per_query")
+        videos_per_query = job.providers.options.get("videos_per_query")
+        if per_query is not None or videos_per_query is not None:
+            for adapter in self.adapters.values():
+                if per_query is not None and hasattr(adapter, "per_query"):
+                    adapter.per_query = int(per_query)
+                if videos_per_query is not None and hasattr(adapter, "videos_per_query"):
+                    adapter.videos_per_query = int(videos_per_query)
         if not queries:
             raise SourcingError("no approved keywords to search for")
         out = SourcingResult(queries=queries)
@@ -67,7 +87,7 @@ class SourcingStage:
         wanted = queries_for(job, 10_000)
         if len(wanted) > len(queries):
             dropped = wanted[len(queries):]
-            out.trace.append({"warning": f"Searching {len(queries)} of {len(wanted)} keywords this round (max_queries={self.max_queries}). "
+            out.trace.append({"warning": f"Searching {len(queries)} of {len(wanted)} keywords this round (max_queries={max_queries}). "
                                          f"Waiting for the next round ('more' / Search again): {dropped}"})
             joblog.warn("sourcing", out.trace[-1]["warning"])
         # How many times each (source, search) was already run: "search again" asks for the next page

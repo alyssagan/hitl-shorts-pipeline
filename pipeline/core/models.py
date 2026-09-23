@@ -68,18 +68,40 @@ class Flag(BaseModel):
     evidence: str = ""                      # the exact text/field that triggered it
 
 
+class ScoreContribution(BaseModel):
+    """One scorer's actual output for this asset in the round that produced `Vetting.relevance` (docs/
+    SCORING_CHANGELOG.md). More than one can exist for the same asset: TF-IDF runs on every pending asset first,
+    and the LLM is then asked about the ones that are borderline -- when that happens both scores are real and
+    both are kept here, even though only one (`used_for_decision`) is authoritative for `Vetting.relevance`."""
+    scoring_method: str                     # "tfidf" | "llm-semantic" | "keyword-match"
+    method_version: str                     # e.g. "tfidf-v1" -- docs/SCORING_CHANGELOG.md has what each one did
+    score: float | None = None
+    why: str = ""
+    used_for_decision: bool = False         # True on whichever contribution's score became `Vetting.relevance`
+
+
 class Vetting(BaseModel):
     risk: Literal["low", "medium", "high"] = "low"
     flags: list[Flag] = Field(default_factory=list)
-    method: str = "rules-v1"
+    method: str = "rules-v1"                # the RISK-RULES engine's version (docs/VETTING.md) -- unrelated to
+                                             # relevance scoring despite the similar name; see scoring_method/
+                                             # method_version below for that.
     summary: str = ""                       # how the risk level was derived
     usable: bool = True                     # False when the renderer cannot use the file
-    relevance_why: str = ""                # plain-English reason for the score
-    relevance_method: str = ""              # which scorer produced `relevance`, VERSIONED (docs/SCORING_CHANGELOG.md):
-                                             # "tfidf-vN", "llm-semantic-vN", or "keyword-match-vN" -- optionally with
-                                             # a trailing " (...)" note when it's a fallback (e.g. the LLM was unavailable
-                                             # for this item). Empty = not scored (no topic/keywords given yet).
+    relevance_why: str = ""                 # plain-English reason for the score
     relevance: float | None = None          # 0..1 share of a keyword's words found in the asset's text; None = no topic given
+    scoring_method: str = ""                # which contribution is authoritative for `relevance`:
+                                             # "tfidf" | "llm-semantic" | "keyword-match" | "" (not scored)
+    method_version: str = ""                # that method's version, e.g. "tfidf-v1" (docs/SCORING_CHANGELOG.md)
+    scoring_fallback_note: str = ""         # set only for a keyword-match fallback, e.g. "LLM unavailable/failed
+                                             # for this item" -- explains WHY it fell back, not a formatting suffix
+    relevance_threshold: float | None = None   # the threshold this asset was actually judged against at scoring
+                                             # time (snapshotted -- never recalculate a historical decision against
+                                             # today's config; see docs/EVALUATION.md)
+    relevance_decision: Literal["relevant", "not_relevant", ""] = ""   # derived from relevance vs. relevance_threshold
+                                             # AT THE TIME OF SCORING; "" only when relevance is None (not scored)
+    contribution_note: str = ""             # plain-English: how the contribution(s) below produced the final decision
+    contributions: list[ScoreContribution] = Field(default_factory=list)
 
 
 class Asset(BaseModel):
@@ -137,6 +159,8 @@ class Scene(BaseModel):
     audio_path: str | None = None           # narration audio for this scene
     duration: float | None = None
     approved: bool = False
+    note: str = ""                          # reviewer's own note on this scene -- never read aloud, never
+                                             # sent to MoneyPrinterTurbo; editable at Gate 3 (docs/REVIEW_UI.md)
 
 
 class Event(BaseModel):

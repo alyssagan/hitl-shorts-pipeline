@@ -154,7 +154,8 @@ named historical events, whatever they score.
 The TF-IDF baseline (`docs/SCORING.md`) needs nothing -- no key, no network, no rate limit -- and scores every pending asset
 every round. The LLM is now only consulted for the (usually much smaller) set of borderline assets near the threshold. With
 `[relevance] enabled = true` (the default) and a borderline asset to score, that call needs a working Gemini free-tier key and
-network access; without a key it silently falls back to the TF-IDF score (`relevance_method` on each asset says which scorer
-actually ran), so a run never fails for this reason, but the borderline calls it would have refined stay unrefined. The LLM
+network access; without a key it silently falls back to the TF-IDF score (`scoring_method`/`method_version` on each asset say
+which scorer actually ran), so a run never fails for this reason, but the borderline calls it would have refined stay
+unrefined. The LLM
 calls that do happen are exposed to the same free-tier rate limits and occasional "busy" 429/503s as keyword and script
 generation (auto-retried; see docs/LOGGING.md), bounded by `max_llm_per_round` even in a worst case.

@@ -60,26 +60,29 @@ class VettingIntegrationTests(unittest.TestCase):
         a = mk("a1")                                    # empty caption: keyword-match would find nothing
         vet_all([a], ["whitechapel 1888"], 0.5, {"a1": (0.9, "the model says this is Mitre Square")})
         self.assertEqual(a.vetting.relevance, 0.9)
-        self.assertEqual(a.vetting.relevance_method, "llm-semantic-v1")     # versioned (docs/SCORING_CHANGELOG.md)
+        # scoring_method/method_version are separate, versioned fields (docs/SCORING_CHANGELOG.md).
+        self.assertEqual((a.vetting.scoring_method, a.vetting.method_version), ("llm-semantic", "llm-semantic-v1"))
         self.assertNotIn("RELEVANCE_LOW", [f.rule for f in a.vetting.flags])
 
     def test_falls_back_to_keyword_match_when_llm_has_no_entry_for_asset(self):
         a = mk("a1", title="Whitechapel Road 1888")
         vet_all([a], ["whitechapel 1888"], 0.5, {"other-id": (0.9, "n/a")})
-        self.assertEqual(a.vetting.relevance_method, "keyword-match-v1 (LLM unavailable/failed for this item)")
+        self.assertEqual((a.vetting.scoring_method, a.vetting.method_version), ("keyword-match", "keyword-match-v1"))
+        self.assertEqual(a.vetting.scoring_fallback_note, "LLM unavailable/failed for this item")
         self.assertGreater(a.vetting.relevance, 0)
 
     def test_no_llm_scores_arg_uses_plain_keyword_match_label(self):
         a = mk("a1", title="Whitechapel Road 1888")
         vet_all([a], ["whitechapel 1888"])
-        self.assertEqual(a.vetting.relevance_method, "keyword-match-v1")
+        self.assertEqual((a.vetting.scoring_method, a.vetting.method_version), ("keyword-match", "keyword-match-v1"))
+        self.assertEqual(a.vetting.scoring_fallback_note, "")
 
     def test_a_custom_version_can_be_passed_in(self):
         # The orchestrator always passes the live, current version identifiers (Orchestrator._apply_vetting) --
         # this confirms vet_all()/vet_asset() actually use whatever is passed, not a hardcoded string.
         a = mk("a1")
         vet_all([a], ["whitechapel 1888"], 0.5, {"a1": (0.9, "why")}, llm_version="llm-semantic-v2-experimental")
-        self.assertEqual(a.vetting.relevance_method, "llm-semantic-v2-experimental")
+        self.assertEqual((a.vetting.scoring_method, a.vetting.method_version), ("llm-semantic", "llm-semantic-v2-experimental"))
 
 
 if __name__ == "__main__":
@@ -90,18 +93,18 @@ class ReuseAcrossRoundsTests(unittest.TestCase):
     def test_prior_llm_score_is_kept_when_not_resent(self):
         a = mk("a1", title="")                          # word-match alone would find nothing for this
         vet_all([a], ["whitechapel 1888"], 0.5, {"a1": (0.9, "clearly the right place")})
-        self.assertEqual((a.vetting.relevance, a.vetting.relevance_method), (0.9, "llm-semantic-v1"))
+        self.assertEqual((a.vetting.relevance, a.vetting.scoring_method, a.vetting.method_version), (0.9, "llm-semantic", "llm-semantic-v1"))
         # Second round: a1 isn't in this round's llm_scores (it wasn't resent) -- must NOT fall back to word-match.
         vet_all([a], ["whitechapel 1888"], 0.5, {"a2": (0.1, "unrelated")})
-        self.assertEqual((a.vetting.relevance, a.vetting.relevance_method), (0.9, "llm-semantic-v1"))
+        self.assertEqual((a.vetting.relevance, a.vetting.scoring_method, a.vetting.method_version), (0.9, "llm-semantic", "llm-semantic-v1"))
         self.assertEqual(a.vetting.relevance_why, "clearly the right place")
 
     def test_prior_word_match_score_is_not_protected_and_can_be_upgraded(self):
         a = mk("a1", title="Whitechapel Road 1888")
         vet_all([a], ["whitechapel 1888"])               # first round: no LLM at all -> word-match
-        self.assertEqual(a.vetting.relevance_method, "keyword-match-v1")
+        self.assertEqual((a.vetting.scoring_method, a.vetting.method_version), ("keyword-match", "keyword-match-v1"))
         vet_all([a], ["whitechapel 1888"], 0.5, {"a1": (0.95, "confirmed")})   # now the LLM scores it
-        self.assertEqual((a.vetting.relevance, a.vetting.relevance_method), (0.95, "llm-semantic-v1"))
+        self.assertEqual((a.vetting.relevance, a.vetting.scoring_method, a.vetting.method_version), (0.95, "llm-semantic", "llm-semantic-v1"))
 
 
 class ScoreRelevanceSelectionTests(unittest.IsolatedAsyncioTestCase):
@@ -132,7 +135,7 @@ class ScoreRelevanceSelectionTests(unittest.IsolatedAsyncioTestCase):
         from tests.fakes import fake_registry
 
         already_good = mk("good", title="already scored")
-        already_good.vetting = Vetting(relevance=0.8, relevance_method="llm-semantic-v1", relevance_why="fine")
+        already_good.vetting = Vetting(relevance=0.8, scoring_method="llm-semantic", method_version="llm-semantic-v1", relevance_why="fine")
         confident_low = mk("low", title="clearly off topic")
         confident_high = mk("high", title="clearly on topic")
         borderline = mk("border", title="hard to call")
@@ -278,4 +281,5 @@ class OrchestratorSkipsAlreadyScoredTests(unittest.IsolatedAsyncioTestCase):
             second_ids = set(seen_ids[-1]) if len(seen_ids) > 1 else set()
             # None of the assets already scored in round 1 should be sent to the LLM again in round 2.
             self.assertFalse(first_ids & second_ids, f"re-scored assets that were already llm-semantic: {first_ids & second_ids}")
-            self.assertTrue(all(a["vetting"]["relevance_method"] == "llm-semantic-v1" for a in j.model_dump(mode="json")["assets"]))
+            self.assertTrue(all(a["vetting"]["scoring_method"] == "llm-semantic" and a["vetting"]["method_version"] == "llm-semantic-v1"
+                                 for a in j.model_dump(mode="json")["assets"]))

@@ -1,0 +1,17 @@
+{
+  "topic": "jack the ripper",
+  "generated_at": "2026-09-23T01:39:43Z",
+  "generator": "scripts/make_keywords.py",
+  "provider": "primary",
+  "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+  "model": "gemini-3.6-flash",
+  "era": null,
+  "requested_count": 20,
+  "kept_count": 20,
+  "dropped_count": 0,
+  "usage": {
+    "prompt_tokens": 433,
+    "completion_tokens": 288,
+    "total_tokens": 1862
+  }
+}

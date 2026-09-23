@@ -84,15 +84,20 @@ class LabelTests(ApiSourcesTests):
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
         j = self.wait(jid, "assets_review")
         a, b, c = j["assets"][:3]
-        dec = {a["id"]: {"decision": "approve", "label": "relevant"}, b["id"]: {"decision": "reject", "note": "x", "label": "irrelevant"},
+        # "use"/"duplicate"/"irrelevant" are the three human review labels (docs/EVALUATION.md) -- independent
+        # of `decision` (approve/reject), which still gates the pipeline's approved pool.
+        dec = {a["id"]: {"decision": "approve", "label": "use"}, b["id"]: {"decision": "reject", "note": "x", "label": "irrelevant"},
                c["id"]: {"decision": "reject", "note": "no decision"}}
         if (a.get("vetting") or {}).get("risk") == "high":
             dec[a["id"]]["note"] = "ok"
-        self.client.post(f"/jobs/{jid}/assets/review", json={"decisions": dec, "reviewer": "Aly"})
+        resp = self.client.post(f"/jobs/{jid}/assets/review", json={"decisions": dec, "reviewer": "Aly"})
+        self.assertEqual(resp.status_code, 200, resp.text)
         path = Path(self.tmp.name) / f"{j['slug']}-{jid}" / "RELEVANCE_LABELS.jsonl"
         rows = [json.loads(x) for x in path.read_text().splitlines()]
-        self.assertEqual({r["asset_id"]: r["label"] for r in rows}, {a["id"]: "relevant", b["id"]: "irrelevant"})
+        self.assertEqual({r["asset_id"]: r["label"] for r in rows}, {a["id"]: "use", b["id"]: "irrelevant"})
         self.assertIn("machine_score", rows[0])
+        self.assertIn("scoring_method", rows[0])
+        self.assertIn("method_version", rows[0])
 
 
 class LogEndpointTests(ApiSourcesTests):
@@ -174,5 +179,6 @@ class RelevanceScorerWiringTests(unittest.TestCase):
                     time.sleep(0.02)
                 j = client.get(f"/jobs/{jid}").json()
                 self.assertEqual(j["state"], "assets_review")
-                self.assertTrue(all(a["vetting"]["relevance_method"] == "llm-semantic-v1" for a in j["assets"]))
+                self.assertTrue(all(a["vetting"]["scoring_method"] == "llm-semantic" and a["vetting"]["method_version"] == "llm-semantic-v1"
+                                     for a in j["assets"]))
                 self.assertTrue(all(a["vetting"]["relevance"] == 0.05 for a in j["assets"]))

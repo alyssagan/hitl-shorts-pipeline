@@ -36,7 +36,98 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 - Downloading videos from platforms can break their terms of service and copyright. The
   pipeline flags it and records the decision; the risk stays with you (Limitation #3).
 
-> Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built. See docs/REVIEW_UI.md. Scene/script page still to do.
+> Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
+> (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
+
+
+## Done: clip matching quality + "photos keep looping" fix (2026-09-23)
+Prompted by "I feel like the photos don't fit with the script" and "I don't like that the photos just keep
+running in a circle" -- investigated `pipeline/stages/scenes/clips.py` (how a scene's narration gets matched
+to an approved asset) and `pipeline/stages/render/mpt.py` (what actually gets sent to MoneyPrinterTurbo) to
+find the real cause of both rather than guessing:
+- **Stopword pollution in matching**: `AssetClipSource`'s word-overlap matcher counted ANY shared word,
+  including "the"/"and"/"with"/"for" etc., so two totally unrelated pieces of text could look like a "match"
+  on nothing but grammar. Now filters through the same `STOPWORDS` list the relevance scorer already uses
+  (`pipeline/vetting/rules.py`), so a match has to share an actual subject word.
+- **The real source of the looping**: when a job has fewer approved assets than scenes, the exhausted scenes
+  got `clip_path = None` -- and `MptRenderStage.run()` silently DROPS any scene with no clip from what it
+  sends to MoneyPrinterTurbo (`clips = [s.clip_path for s in scenes if s.clip_path]`), so the video ends up
+  with fewer clips than narration segments. MoneyPrinterTurbo then has to stretch or loop whatever clips it
+  DOES have to cover the full spoken length -- an unpredictable repeat with no connection to what's being
+  said at that point. Fixed by making `AssetClipSource` reuse its best-matching approved asset again, on
+  purpose, once the pool runs out, instead of returning `None` -- every scene now gets a clip, and any repeat
+  is the closest match available and is labeled `REUSED` in that scene's "clip chosen because" reason
+  (visible in the terminal and the review page), rather than an invisible MoneyPrinterTurbo-side workaround.
+  `LocalFolderClipSource` (your own `library/clips/` footage, not sourced photos) intentionally keeps its
+  existing "never reuse, leave it empty" behavior -- unlike an approved-photo pool, that gap is fixed by just
+  adding more files to a folder you control directly, so silently reusing there felt like it would hide the
+  actual signal ("you need more clips") rather than help.
+- **Script-writer prompt**: `pipeline/stages/scenes/writer.py`'s `PROMPT` (used whenever a script-writer LLM
+  key is configured, which this project's setup already has) now explicitly tells the model that one
+  paragraph becomes one scene and gets matched to a real photo afterward, so it should anchor every paragraph
+  to one concrete, picturable subject from the source text (a specific place, person, document, date or
+  moment) instead of abstract or purely reflective lines nothing can actually depict. Left MoneyPrinterTurbo's
+  own fallback script prompt (`pipeline/stages/scenes/mpt.py`, only used when no script-writer key is set)
+  alone -- it's under a hard 2000-character limit MoneyPrinterTurbo enforces, already tight, and not the path
+  this project's config actually uses.
+- 3 new tests (`tests/test_more_sources.py::ClipMatchingTests`) cover the stopword fix, the reuse-instead-of-
+  None fallback, and the true "zero approved assets" case still correctly returning no clip. Full suite: 237
+  passing.
+- Not done, and probably the more complete fix: actually generating an AI image/clip for a scene that has no
+  good match, instead of reusing an unrelated one -- raised in the same feedback ("we should also have an
+  option to ask them to render AI"). Needs a provider decision (a free-tier image API, e.g. Pollinations.ai
+  keyless, or Gemini's own image generation if the account's tier includes it) and a decision on when it
+  should trigger (every gap automatically, or a per-scene opt-in). Not started; see backlog.
+
+
+## Done: drag-and-drop scene reorder + private per-scene notes (2026-09-23)
+Follow-up to the clip-matching/looping fix above. That same feedback message also raised two more things --
+"we haven't added the UI to move things around option" and "Notes: what would be a good way to put it.." -- and
+asked to add an AI-render option. Asked Aly to clarify all three with `AskUserQuestion`; her reply only answered
+the first, clearly ("drag drop"). Rather than re-prompting over something this small, built the one clear answer
+and made a best-guess, easily-changed call on the ambiguous one, while explicitly leaving the bigger, costed
+decision (AI rendering) alone:
+- **Drag-and-drop reordering**: each scene card in the Gate 3 editor (`pipeline/api/review_page.py`) now has a
+  `☰` drag handle alongside the existing ↑/↓ buttons -- either works, and they stay in sync (same `sceneOrder`
+  state, same save path). Uses the plain HTML5 drag-and-drop API, no library.
+- **Private per-scene notes**: a new text box on every scene card, under the narration -- "Your note (private --
+  never spoken, never sent to the renderer)". Best guess at what "Notes" meant: a place to jot why you picked
+  something, what to double check, or what to come back to, that stays out of the actual video. New `Scene.note`
+  field (`pipeline/core/models.py`), threaded through `Orchestrator.edit_scenes()`'s existing allowed-fields list
+  (no new API route), saved the same way and at the same time as narration edits. **This is a guess, not a
+  confirmed spec** -- if what Aly actually wanted was one note for the whole project rather than one per scene,
+  or something else entirely, this is easy to change; flagged back to her directly rather than assumed settled.
+- **Not done**: the AI-render option itself. That's a real feature needing her decision on scope and provider
+  (automatic fallback vs. per-scene choice, which free-tier image API, cost/label handling) -- see backlog item E
+  above, unchanged from the previous entry, still waiting on her input rather than guessed at.
+- Extended the existing end-to-end orchestrator test (`tests/test_orchestrator.py::test_full_human_in_the_loop_flow`)
+  to cover a scene reorder + narration edit + note edit together, rather than adding a separate test, since it's
+  exercising the same `edit_scenes()` call the UI already made for reordering. No JS test framework is available
+  in this environment (no npm registry access to install one); syntax-checked the embedded script with
+  `node --check` and hand-validated the reorder/diff logic with a standalone Node script mirroring the pure
+  functions, the same approach used for the scene/script editor below. Full suite: 237 passing.
+
+
+## Done: scene/script review web page (2026-09-23)
+Prompted by "we should also be able to see the script and update it if necessary" -- Gate 3 previously only worked from the
+terminal (`scripts/poc.py`'s `scene_gate()`); the review page just showed a banner and did nothing once a job reached scene
+review (docs/REVIEW_UI.md said so outright: "Not built yet"). This was also the last item of step 3 in the order-of-work
+above ("Script editor on the same page").
+- **`/review/JOB_ID` now handles Gate 3**, switching automatically when the job gets there: a live full-script view (current
+  order + narration, word count, estimated seconds), one editable card per scene (narration textarea, ↑/↓ reorder, and
+  a clip-swap dropdown over the approved assets when the job sources its own footage), Save changes / Approve and render /
+  Ask for a rewrite. See docs/REVIEW_UI.md "Gate 3: script and scenes" for the full rundown.
+- **Fixed a real staleness bug found while building this**: `job.script` is written once, when the writer stage finishes, and
+  was never updated again -- so both the terminal's old `SCRIPT:` display and any script preview one might have added on this
+  page would have shown the ORIGINAL draft forever, even after editing a scene's narration. Neither now trusts that field for
+  display; both recompute the current script live from `job.scenes[*].narration` instead (`scripts/poc.py`'s `scene_gate()`
+  updated the same way, so the terminal and the browser agree). `job.script` itself is left as-is (still useful as a record of
+  the first draft) -- nothing reads it besides that one now-corrected display.
+- No new API routes: both actions reuse `PATCH /jobs/<id>/scenes` and `POST /jobs/<id>/scenes/approve` / `/scenes/reject`,
+  already covered by `tests/test_orchestrator.py`'s `edit_scenes` tests. The new per-scene edit-diffing and reorder logic
+  (which scenes actually changed, in what order) was checked separately against a standalone set of cases (order swap,
+  live-edit reflected in the script preview, no-op past the ends of the list, diff-only-what-changed) before shipping, since
+  it's plain JS embedded in `pipeline/api/review_page.py` and outside the Python test suite's reach.
 
 
 ## Done: semantic (LLM) relevance scoring (2026-09-21)
@@ -123,6 +214,49 @@ additively -- nothing already written was touched, per the constraint:
 - See docs/LOGGING.md "Relevance-scoring method and version" and docs/SCORING.md "Tracking changes to the scoring
   algorithm" for the full read on where this is recorded and how to compare scoring versions across runs.
 
+  **Correction (2026-09-22, see the next section below):** the `tfidf-v1`/`tfidf-v2` identifiers this entry
+  describes turned out to be a mistake -- no real log entry from before version tracking existed can actually be
+  attributed to either one specifically, so presenting them as addressable versions was inventing precision that
+  didn't exist. They've been replaced with an honest "pre-tracking history" note, and the current TF-IDF code is
+  now `tfidf-v1` (the first version ever actually tracked). `Vetting.relevance_method` was also split into two
+  separate fields, `scoring_method` and `method_version`. See the next entry for the full fix.
+
+## Done: relevance-scoring provenance, method versioning fixed, and an evaluation workflow (2026-09-22)
+Follow-up to the entry above, prompted by two things: (1) "will what we have now be able to tell us how well a
+model is doing?" -- answer at the time: not really, `RELEVANCE_LABELS.jsonl` didn't record which method/version
+scored a labeled asset, and no report existed; and (2) a direct correction that the previous entry's
+`tfidf-v1`/`tfidf-v2` were invented, unverifiable version identifiers, not real ones any log could confirm.
+- **Schema**: `Vetting.relevance_method` (one combined string) replaced with separate `scoring_method` and
+  `method_version` fields, plus `scoring_fallback_note`, `relevance_threshold`, `relevance_decision`,
+  `contribution_note`, and `contributions` (every method that scored an asset that round, not just the winner).
+  See docs/SCORING.md "Multiple contributions".
+- **`pipeline/vetting/method_registry.py`** (new): single source of truth for what each method+version does
+  (description, formula/prompt, parameters, model note, when/why it changed) -- feeds the decision log's
+  formula lookup AND a new `GET /methods` endpoint the review page fetches so a score can be explained inline,
+  with a link to the method's full definition.
+- **`docs/SCORING_CHANGELOG.md` rewritten**: the current TF-IDF implementation is now `tfidf-v1`, the FIRST
+  version this file's math was ever given a tracked identifier for. The two earlier, real rewrites are described
+  as prose ("pre-tracking history"), explicitly not versioned -- no `tfidf-v0`/`-v2` invented, no historical
+  score attributed to one of them.
+- **Human labels extended**: the three labels are now `use` / `duplicate` / `irrelevant` (was a 2-button
+  Use/Irrelevant), with an optional structured `reason`, free-text `note`, and `duplicate_of_asset_id`.
+  `RELEVANCE_LABELS.jsonl` is now strictly APPEND-ONLY (one row per label event, never rewritten -- "current"
+  means the latest row per asset by timestamp) and snapshots the method/version/threshold/decision AS THEY WERE
+  at scoring time, never recalculated later. A new `label_asset()` / `POST /assets/label` lets you label an
+  asset in ANY job state, not just during the assets-review gate -- required for sampling/reviewing older jobs.
+- **`scripts/evaluate_relevance.py`** (new): reads `RELEVANCE_LABELS.jsonl` across projects, groups by
+  scoring method+version (with a separate unversioned/missing-provenance bucket for older data), and reports Use
+  yield, Irrelevant/Duplicate selection rate, Missed Use items, relevance agreement/false-positive/false-negative
+  rates (only where the machine's prediction and the human label are actually comparable), and duplicate-flag
+  precision/recall -- every percentage with its sample size and a sparse-data warning. See docs/EVALUATION.md.
+- **`scripts/sample_for_review.py`** (new): picks random + optional borderline assets from BOTH the
+  machine-selected and machine-rejected/hidden pools for you to go label, tagging how each item was picked
+  (`SAMPLE_TAGS.jsonl`, append-only) so a report never mistakes a biased sample for a representative one. Also
+  a holdout discipline (`mark-holdout` / `HOLDOUT.json` per project) so a stable set can be kept aside and never
+  tuned against, for an honest before/after comparison of a scoring change. See docs/EVALUATION.md.
+- 40 new tests (`tests/test_evaluation_*.py`) cover the report math, the sampling logic, and an end-to-end path
+  through the real `Orchestrator.label_asset()` into both CLI scripts. Full suite: 231 passing.
+
 ## Ideas backlog (added 2026-09-20, not started)
 
 ### A. Notifications (Slack, readable on a phone)
@@ -203,3 +337,28 @@ instead of grepping `decisions.jsonl` files one project folder at a time.
 - Rough build order: (1) the Postgres service + schema + `reindex_logs.py` (get existing history searchable
   first, no live-write risk yet), (2) dual-write hooks so new jobs stay indexed as they run, (3) the
   `GET /logs/search` API, (4) the `/logs` UI page.
+
+### E. AI-generated image/clip fallback (added 2026-09-23, not started)
+Goal: "we should also have an option to ask them to render AI" -- a scene with no good matching approved
+photo gets an AI-generated image instead of either nothing or a reused unrelated photo (see "Done: clip
+matching quality" above for why that gap exists at all).
+- **Where it plugs in**: `ClipSource` (`pipeline/stages/scenes/clips.py`) is already the extension point --
+  its own docstring says so ("Implement `ClipSource` to add scrapers, Pexels/Pixabay, or AI video
+  generation"). A new `AiImageClipSource` (or a wrapper that falls back to one) would slot in next to
+  `AssetClipSource`/`LocalFolderClipSource` the same way every other provider does (`pipeline/stages/
+  registry.py`), no orchestrator changes needed.
+- **Open questions to settle before building** (asked Aly directly -- 2026-09-23):
+  - Automatic fallback only (fires just for a scene with no good approved match) vs. a per-scene choice to
+    use AI art even when a real photo is available.
+  - Provider: needs a free-tier (or already-configured) image API -- Pollinations.ai (keyless, genuinely
+    free) is the most likely fit given this project's "free-tier only" rule elsewhere (`llm_fallback`,
+    `keywords`, `relevance` all default to free tiers); Gemini's own image generation is worth checking if
+    the configured account's tier includes it, since a key is already set up.
+  - Whether an AI-generated image needs its own risk/label handling (it's not a real photo, so "license",
+    "author", DUPLICATE checks etc. in `pipeline/vetting/rules.py` don't cleanly apply) and whether it shows
+    up differently in the review page / CREDITS.md (probably: no license line needed, but should say clearly
+    "AI-generated" wherever it's shown, including in the rendered video's description if that matters legally
+    or editorially).
+  - Cost: image generation is usually metered even on a "free tier" (rate-limited, not unlimited) -- worth a
+    usage/cost entry the same way LLM calls already get one (`pipeline/core/usage.py`), so it doesn't become
+    an invisible cost the way tokens used to be before that was built.

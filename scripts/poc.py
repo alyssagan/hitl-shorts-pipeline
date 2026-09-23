@@ -243,7 +243,10 @@ def asset_gate(api: Api, job: dict, reviewer: str) -> dict:
 def scene_gate(api: Api, job: dict, reviewer: str = "") -> dict:
     while True:
         print("\n=== GATE 3: scenes ===  (why: this is your last chance before the slow render)\n")
-        print("SCRIPT:\n" + job["script"] + "\n")
+        # job["script"] is frozen at whatever the writer first drafted -- it's never updated when you edit a
+        # scene's narration below, so showing it here would go stale the moment you make your first edit.
+        # This is the CURRENT script instead: today's scene order + narration, exactly what will be spoken.
+        print("SCRIPT (current):\n" + "\n\n".join(s["narration"] for s in job["scenes"]) + "\n")
         for i, s in enumerate(job["scenes"], 1):
             clip = Path(s["clip_path"]).name if s.get("clip_path") else "(NO CLIP - approve more assets or add footage to library/clips)"
             why = f"\n     clip chosen because: {s['clip_reason']}" if s.get("clip_reason") else ""
@@ -294,6 +297,17 @@ def main() -> None:
     ap.add_argument("--resume", metavar="JOB_ID", help="continue an existing job (retries it first if it failed)")
     ap.add_argument("--keywords-file", metavar="FILE", help="text file of keywords, one per line (# for comments). Added as approved keywords; searched in batches of max_queries")
     ap.add_argument("--min-relevance", type=float, default=0.5, help="hide assets scoring below this (0 to 1) at the asset review; default 0.5")
+    ap.add_argument("--max-queries", type=int, default=None,
+                    help="how many approved keywords to search per sourcing round for THIS job (overrides config/pipeline.toml's "
+                         "[sources] max_queries, default 8). Raise it with a big --keywords-file so one round covers more of it; "
+                         "type 'more' at the asset prompt (or 'Search again' in the browser) for the next batch either way")
+    ap.add_argument("--per-query", type=int, default=None,
+                    help="how many photos each source keeps PER KEYWORD for THIS job (overrides config/pipeline.toml's [sources] "
+                         "per_query, default 4). If keyword search isn't turning up enough good photos, raising this pulls more "
+                         "candidates per keyword for the relevance score + the review page's min-score slider to filter, instead "
+                         "of needing better keywords")
+    ap.add_argument("--videos-per-query", type=int, default=None,
+                    help="same as --per-query but for video clips (overrides [sources] videos_per_query, default 2)")
     ap.add_argument("--quiet", action="store_true", help="don't stream the pipeline's activity log while waiting")
     ap.add_argument("--debug", action="store_true", help="stream DEBUG detail too (every HTTP request); the full log is always in the project's logs/ folder")
     ap.add_argument("--out", default="output")
@@ -307,6 +321,10 @@ def main() -> None:
         file_terms = [ln.strip().strip("\"'") for ln in Path(args.keywords_file).expanduser().read_text(encoding="utf-8").splitlines()
                       if ln.strip() and not ln.strip().startswith("#")]
         print(f"Read {len(file_terms)} keyword(s) from {args.keywords_file}")
+        if args.max_queries is not None and args.max_queries > 0:
+            rounds = -(-len(file_terms) // args.max_queries)          # ceil
+            print(f"  Searching {args.max_queries} keyword(s) per round -> {rounds} round(s) to cover all of them "
+                  f"(type 'more' at the asset prompt for each next round)")
         # Where these keywords actually came from (docs/LOGGING.md "Where a keywords file came from"): at
         # minimum the file path; if scripts/make_keywords.py made this file, its .meta.json sidecar next to it
         # also has which API/model/tokens produced it, and that travels into this job's decision log below.
@@ -334,6 +352,12 @@ def main() -> None:
         subject = args.subject or ask("What is the video about? ")
         sources = [x.strip() for x in args.sources.split(",") if x.strip()]
         options = {"min_relevance": args.min_relevance}
+        if args.max_queries is not None:
+            options["max_queries"] = args.max_queries
+        if args.per_query is not None:
+            options["per_query"] = args.per_query
+        if args.videos_per_query is not None:
+            options["videos_per_query"] = args.videos_per_query
         if file_terms and args.keywords == "manual":
             options["seed_keywords"] = file_terms          # Gate 1 will show exactly your file's keywords
             if keywords_provenance:

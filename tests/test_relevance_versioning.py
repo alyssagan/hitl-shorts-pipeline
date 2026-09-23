@@ -87,25 +87,33 @@ class DecisionLogCarriesMethodAndVersionTests(unittest.TestCase):
         by_id = {a.id: a for a in job.assets}
         for e in vetted:
             asset_id = e["subject"]["asset_id"]
-            live_method = by_id[asset_id].vetting.relevance_method
-            self.assertEqual(e["logic"]["relevance_method"], live_method or None,
-                              "the decision log's relevance_method must match what's actually on the asset")
+            live = by_id[asset_id].vetting
+            self.assertEqual(e["logic"]["method_version"], live.method_version or None,
+                              "the decision log's method_version must match what's actually on the asset")
+            self.assertEqual(e["logic"]["scoring_method"], live.scoring_method or None,
+                              "the decision log's scoring_method must match what's actually on the asset")
             # It's the unrelated risk-rules version -- confirms we did NOT remove or repurpose the old field.
             self.assertEqual(e["logic"]["method"], "rules-v1")
-        self.assertTrue(all(e["logic"]["relevance_method"].startswith(KEYWORD_MATCH_VERSION) for e in vetted),
-                         [e["logic"]["relevance_method"] for e in vetted])
+        self.assertTrue(all(e["logic"]["method_version"] == KEYWORD_MATCH_VERSION for e in vetted),
+                         [e["logic"]["method_version"] for e in vetted])
+        # No TF-IDF batch and no LLM scorer -> the keyword-match fallback fired for every asset, and it should
+        # say so (docs/EVALUATION.md: never silently look like a first-class score).
+        self.assertTrue(all(e["logic"]["scoring_fallback_note"] for e in vetted),
+                         [e["logic"]["scoring_fallback_note"] for e in vetted])
 
     def test_tfidf_scores_are_recorded_with_the_real_tfidf_version(self):
         a = mk("a1", "Whitechapel Road 1888")
         job, entries = self._apply([a], ({"a1": (0.8, "matched")}, None))   # tfidf batch given, no LLM scorer
         vetted = next(e for e in entries if e["action"] == "vetted_asset")
-        self.assertEqual(vetted["logic"]["relevance_method"], tfidf_relevance.VERSION)
+        self.assertEqual(vetted["logic"]["scoring_method"], "tfidf")
+        self.assertEqual(vetted["logic"]["method_version"], tfidf_relevance.VERSION)
 
     def test_llm_scores_are_recorded_with_the_real_llm_semantic_version(self):
         a = mk("a1")
         job, entries = self._apply([a], ({}, {"a1": (0.9, "on topic")}))   # LLM scored it this round
         vetted = next(e for e in entries if e["action"] == "vetted_asset")
-        self.assertEqual(vetted["logic"]["relevance_method"], llm_relevance.VERSION)
+        self.assertEqual(vetted["logic"]["scoring_method"], "llm-semantic")
+        self.assertEqual(vetted["logic"]["method_version"], llm_relevance.VERSION)
 
     def test_relevance_scoring_entry_lists_only_methods_actually_used_with_real_formulas(self):
         assets = [mk("a1", "Whitechapel Road 1888")]
@@ -156,7 +164,8 @@ class NothingIsEverDeletedTests(unittest.TestCase):
             self.assertTrue(ok, f"hash chain broken at seq {bad_seq}")
 
             a2 = next(a for a in job.assets if a.id == "a2")
-            self.assertEqual(a2.vetting.relevance_method, llm_relevance.VERSION)   # kept, not downgraded
+            self.assertEqual((a2.vetting.scoring_method, a2.vetting.method_version),
+                              ("llm-semantic", llm_relevance.VERSION))   # kept, not downgraded
 
 
 if __name__ == "__main__":

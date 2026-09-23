@@ -200,7 +200,9 @@ projects/cute-cats-294eb679f060/
 - `manifest.json`: every kept file with its source URL, license, author, hash, the machine's risk flags, and your decision.
 - `decisions.jsonl`: who decided what, when, why, and by what logic. Actors are `human` (your name), `ai` (model recorded), or `machine` (a rule, with its version).
 
-How risk is judged, rule by rule: [docs/VETTING.md](docs/VETTING.md). Adding another scraping source: [docs/ADD_A_SOURCE.md](docs/ADD_A_SOURCE.md). Trade-offs we chose on purpose and may improve: [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md). Voices, models and sources to try, with results: [docs/OPTIONS_TO_TRY.md](docs/OPTIONS_TO_TRY.md).
+How risk is judged, rule by rule: [docs/VETTING.md](docs/VETTING.md). How relevance is scored: [docs/SCORING.md](docs/SCORING.md).
+Checking whether a scoring method/version is actually any good: [docs/EVALUATION.md](docs/EVALUATION.md). Adding another scraping
+source: [docs/ADD_A_SOURCE.md](docs/ADD_A_SOURCE.md). Trade-offs we chose on purpose and may improve: [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md). Voices, models and sources to try, with results: [docs/OPTIONS_TO_TRY.md](docs/OPTIONS_TO_TRY.md).
 
 ## Adding your own provider
 
@@ -246,7 +248,8 @@ Things to check on first run:
 5. The renderer only handles jpg/png images and mp4/mov/webm video, at least 480 px. Other formats are skipped and logged.
 6. The vetting rules read titles, descriptions and license text. They cannot see the picture itself. That is why a human stays in the loop.
 
-**Not built yet:** the review UI, Pixabay/AI clip sources, and a real SEO data provider.
+**Not built yet:** the after-render editor, Pixabay/AI clip sources, and a real SEO data provider. (The asset and
+scene/script review pages are built -- see [docs/REVIEW_UI.md](docs/REVIEW_UI.md).)
 
 **About RankReel:** it is a countdown-video editor and, as far as its public pages show, has no
 keyword or ranking-data features. The keyword step therefore uses an LLM (its volume and difficulty

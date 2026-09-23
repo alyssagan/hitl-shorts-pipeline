@@ -20,11 +20,18 @@ from ..mpt_client import MptError
 
 WORDS_PER_SECOND = 2.6          # a typical narration pace, about 155 words a minute
 
-PROMPT = """You write voice-over scripts for short vertical videos.
+PROMPT = """You write voice-over scripts for short vertical videos, narrated over real archival photos and
+footage -- one paragraph becomes one scene, and a clip gets matched to it afterward by the words you use
+(pipeline/stages/scenes/clips.py). So keep EVERY paragraph anchored to one concrete, picturable subject named
+in the source text: a specific place, person, document, object, date or moment. A photo can be found for
+"the murder scene on Mitre Square" or "the coroner's inquest report" -- not for "it shocked the nation" or
+"the mystery endures forever." If a paragraph would only work over a generic, interchangeable stock image,
+rewrite it around a specific detail from the source instead.
 Subject: {subject}
 
 Length: about {words} words (roughly {seconds} seconds spoken), in {paragraphs} short paragraphs
-separated by a blank line. Each paragraph is one idea, one to three sentences. Open with a hook.
+separated by a blank line. Each paragraph is one idea, one to three sentences, built around ONE concrete,
+picturable subject (see above). Open with a hook.
 Write plain spoken sentences only: no headings, markdown, bullet points, emoji, stage directions,
 scene numbers or timestamps.
 

@@ -192,32 +192,40 @@ includes not just *which tier* scored an asset but *which version* of that tier'
 full version history) -- this closes a real gap: earlier, the algorithm could change (and did -- twice, for TF-IDF) with
 nothing in any log saying so.
 
-Each `vetted_asset` entry (one per pending asset, every vetting round) carries the asset's exact scorer+version in
-`logic.relevance_method`:
+Each `vetted_asset` entry (one per pending asset, every vetting round) carries the asset's exact scorer+version as two
+SEPARATE fields, `logic.scoring_method` and `logic.method_version` -- plus `logic.contributions` (every method that scored
+this asset this round, not just the one that won) and `logic.contribution_note` (a plain-English sentence explaining how the
+final decision was reached):
 
 ```json
 {"action": "vetted_asset", "subject": {"asset_id": "a17", "title": "Whitechapel murders map, 1888"},
  "decision": "risk low, relevance 82%",
- "logic": {"method": "rules-v1", "relevance_method": "tfidf-v3", "rules_checked": [...], "fired": []}}
+ "logic": {"method": "rules-v1", "scoring_method": "tfidf", "method_version": "tfidf-v1", "scoring_fallback_note": null,
+           "relevance_threshold": 0.5, "relevance_decision": "relevant",
+           "contribution_note": "Only the TF-IDF baseline scored this asset this round ...",
+           "contributions": [{"scoring_method": "tfidf", "method_version": "tfidf-v1", "score": 0.82, "why": "...", "used_for_decision": true}],
+           "rules_checked": [...], "fired": []}}
 ```
 
 `logic.method` is the *risk-rules* engine's version (duplicate detection, resolution checks, etc. -- docs/VETTING.md) --
-unrelated to relevance scoring, despite the similar name. `logic.relevance_method` is the one that answers "which sort of
-method scored this specific image, and which version of it": `tfidf-v3`, `llm-semantic-v1`, or `keyword-match-v1` (optionally
-with a trailing `(...)` note when it's a fallback, e.g. `keyword-match-v1 (LLM unavailable/failed for this item)`).
+unrelated to relevance scoring, despite the similar name. `logic.scoring_method` / `logic.method_version` are the ones that
+answer "which sort of method scored this specific image, and which version of it": `tfidf` / `tfidf-v1`, `llm-semantic` /
+`llm-semantic-v1`, or `keyword-match` / `keyword-match-v1`, with `logic.scoring_fallback_note` set separately when it's a
+fallback (e.g. "LLM unavailable/failed for this item").
 
 The once-per-round `relevance_scoring` entry now also records the *real* formula for whichever method(s) actually ran that
 round, instead of a single static description that didn't move when the code did:
 
 ```json
 {"action": "relevance_scoring", "decision": "34 hidden below 50%",
- "logic": {"methods_used_this_round": ["llm-semantic-v1", "tfidf-v3"],
-           "formulas_by_method": {"llm-semantic-v1": "no formula: ... a 0-100 judgment ...",
-                                   "tfidf-v3": "score = the BEST, over each approved keyword, of the IDF-weighted recall ..."},
+ "logic": {"methods_used_this_round": ["llm-semantic-v1", "tfidf-v1"],
+           "formulas_by_method": {"llm-semantic-v1": "not a mathematical formula -- a judgment call. ... a 0-100 judgment ...",
+                                   "tfidf-v1": "score = the BEST, over each approved keyword, of the IDF-weighted recall ..."},
            "keywords_scored_against": [...], "threshold": 0.5, "changelog": "docs/SCORING_CHANGELOG.md"}}
 ```
 
-To compare how different scoring approaches performed across runs -- the original ask behind this whole section -- grep a
-job's `decisions.jsonl` for `"action": "vetted_asset"` and group by `logic.relevance_method`; `docs/SCORING_CHANGELOG.md` tells
-you what each version string actually did, and your own Use/Irrelevant review decisions (`RELEVANCE_LABELS.jsonl`,
-docs/REVIEW_UI.md) are the ground truth for judging whether a given version's scores were any good.
+To compare how different scoring approaches performed across runs -- the original ask behind this whole section -- use
+`scripts/evaluate_relevance.py` (docs/EVALUATION.md), which does this for you from `RELEVANCE_LABELS.jsonl` (grouped by
+`scoring_method`+`method_version`, with real Use/Duplicate/Irrelevant outcomes, not just what the machine predicted). To look
+at the raw decision log by hand instead: grep a job's `decisions.jsonl` for `"action": "vetted_asset"` and group by
+`logic.scoring_method` + `logic.method_version`; `docs/SCORING_CHANGELOG.md` tells you what each version string actually did.

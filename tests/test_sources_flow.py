@@ -238,6 +238,69 @@ class FlowTests(Base):
         md = (d / "DECISIONS.md").read_text()
         self.assertIn("Aly", md)
 
+    async def test_per_query_override_limits_photos_kept_per_keyword(self):
+        """job.providers.options["per_query"] should override each source adapter's built-in per_query
+        (pipeline/sources/base.py HttpSource), the same override pattern as max_queries -- this is what
+        --per-query on poc.py and a future "more photos per keyword" UI control would rely on."""
+        orch = self.make()                             # Base.make() wires commons with per_query=5
+        job = await orch.create_job("Cute cats!", ProviderChoice(keywords="fake", scenes="fake", render="fake",
+                                                                   sources=["commons"], options={"per_query": 1}))
+        await orch.start(job.id)
+        job = await orch.run_pending(job.id)
+        job = await orch.review_keywords(job.id, [job.keywords[0].id], reviewer="Aly")
+        self.assertEqual(job.state, S.SOURCING_RUNNING)
+        job = await orch.run_pending(job.id)
+        self.assertEqual(job.state, S.ASSETS_REVIEW)
+        # Without the override the mock offers 3 keepable (non-svg) commons photos (see SourceAdapterTests);
+        # per_query=1 should cut that down to 1.
+        self.assertEqual(len([a for a in job.assets if a.source == "commons"]), 1)
+
+    async def test_approved_asset_status_survives_search_again_and_next_batch(self):
+        """Backend contract the review page's "keep my Use picks" fix relies on: approve an asset via
+        /assets/review (POST /jobs/{id}/assets/review) WITHOUT /assets/approve, so the job stays in
+        ASSETS_REVIEW, then trigger another sourcing round with reject_assets (what both "Search again"
+        and "Next batch" call) -- the approved asset must keep its status through the new sourcing +
+        vetting round, not get silently reset to pending or re-scored away."""
+        orch = self.make()
+        job = await self.to_assets_review(orch, sources=("commons",))
+        approved_id = next(a.id for a in job.assets if a.vetting.usable and a.vetting.risk != "high")
+        job = await orch.review_assets(job.id, {approved_id: {"decision": "approve"}}, reviewer="Aly")
+        self.assertEqual(job.state, S.ASSETS_REVIEW)                 # review_assets alone does not advance the job
+        self.assertEqual(next(a for a in job.assets if a.id == approved_id).status, "approved")
+
+        job = await orch.reject_assets(job.id, max_queries=5, reviewer="Aly")   # "Next batch"
+        self.assertEqual(job.state, S.SOURCING_RUNNING)
+        job = await orch.run_pending(job.id)
+        self.assertEqual(job.state, S.ASSETS_REVIEW)
+        self.assertEqual(next(a for a in job.assets if a.id == approved_id).status, "approved")   # kept
+
+    async def test_reject_assets_max_queries_overrides_next_round(self):
+        """The review page's "Next batch" button (and --max-queries on poc.py) both go through
+        reject_assets(max_queries=...): it should override the registry/config default for every
+        round from then on, with no feedback or new search terms required."""
+        orch = self.make()
+        job = await orch.create_job("Cute cats!", ProviderChoice(keywords="fake", scenes="fake", render="fake",
+                                                                   sources=["commons"], options={"max_queries": 2}))
+        await orch.start(job.id)
+        job = await orch.run_pending(job.id)                          # kw1, kw2, kw3 proposed
+        job = await orch.review_keywords(job.id, [k.id for k in job.keywords], extra_terms=["kw4", "kw5"], reviewer="Aly")
+        self.assertEqual(job.state, S.SOURCING_RUNNING)
+        job = await orch.run_pending(job.id)
+        self.assertEqual(job.state, S.ASSETS_REVIEW)
+        round1 = [n["query"] for n in job.source_notes if n.get("source") == "commons" and n.get("query")]
+        self.assertEqual(len(round1), 2)                              # honors the per-job option set at creation
+        self.assertTrue(any("max_queries=2" in (n.get("warning") or "") for n in job.source_notes))
+
+        before = len(job.source_notes)
+        job = await orch.reject_assets(job.id, max_queries=4, reviewer="Aly")   # "Next batch": no feedback needed
+        self.assertEqual(job.providers.options["max_queries"], 4)
+        self.assertEqual(job.state, S.SOURCING_RUNNING)
+        job = await orch.run_pending(job.id)
+        self.assertEqual(job.state, S.ASSETS_REVIEW)
+        round2 = [n["query"] for n in job.source_notes[before:] if n.get("source") == "commons" and n.get("query")]
+        self.assertEqual(len(round2), 4)                              # new size took effect immediately
+        self.assertTrue({"kw4", "kw5"} <= set(round2))                # never-searched keywords go first
+
     async def test_reject_assets_goes_back_to_sourcing_with_new_queries(self):
         orch = self.make()
         job = await self.to_assets_review(orch, sources=("commons",))

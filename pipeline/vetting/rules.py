@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-from ..core.models import Asset, Flag, Vetting
+from ..core.models import Asset, Flag, ScoreContribution, Vetting
 
 VERSION = "rules-v1"
 MIN_SIDE = 480                 # the renderer (MoneyPrinterTurbo) skips anything smaller
@@ -288,36 +288,73 @@ def relevance(a: Asset, topic_terms: list[str]) -> tuple[float | None, str]:
 def vet_asset(a: Asset, all_assets: list[Asset], topic_terms: list[str] | None = None, min_relevance: float = RELEVANCE_MIN,
               llm_scores: dict[str, tuple[float, str]] | None = None,
               tfidf_scores_batch: dict[str, tuple[float, str]] | None = None,
-              llm_version: str = "llm-semantic-v1", tfidf_version: str = "tfidf-v3") -> Vetting:
+              llm_version: str = "llm-semantic-v1", tfidf_version: str = "tfidf-v1") -> Vetting:
     """`llm_version`/`tfidf_version`: the caller's current version identifier for whichever scorer produced
-    `llm_scores`/`tfidf_scores_batch` (docs/SCORING_CHANGELOG.md) -- recorded on the asset's `relevance_method` so
-    a later comparison across algorithm versions is possible. Orchestrator._apply_vetting() passes the real,
-    live values (pipeline/vetting/tfidf_relevance.VERSION, pipeline/vetting/llm_relevance.VERSION); the defaults
-    here exist only for direct/unit-test callers that don't care and must be kept in sync with those two modules
-    (tests/test_relevance_versioning.py guards this -- it fails loudly if they drift apart)."""
+    `llm_scores`/`tfidf_scores_batch` (docs/SCORING_CHANGELOG.md) -- recorded on the asset's `scoring_method`/
+    `method_version` so a later comparison across algorithm versions is possible (docs/EVALUATION.md).
+    Orchestrator._apply_vetting() passes the real, live values (pipeline/vetting/tfidf_relevance.VERSION,
+    pipeline/vetting/llm_relevance.VERSION); the defaults here exist only for direct/unit-test callers that don't
+    care and must be kept in sync with those two modules (tests/test_relevance_versioning.py guards this -- it
+    fails loudly if they drift apart)."""
     flags: list[Flag] = []
     for _rid, _desc, fn in RULES:
         flags.extend(fn(a, all_assets))
     prev = a.vetting                              # this asset's vetting from BEFORE this call (a prior round, if any)
-    method = ""
-    if llm_scores and a.id in llm_scores:
-        rel, rel_why = llm_scores[a.id]
-        method = llm_version
-    elif prev is not None and prev.relevance_method.split(" (")[0].startswith("llm-semantic"):
+
+    tfidf_entry = tfidf_scores_batch.get(a.id) if tfidf_scores_batch else None
+    llm_entry = llm_scores.get(a.id) if llm_scores else None
+
+    contributions: list[ScoreContribution] = []
+    if tfidf_entry is not None:
+        t_score, t_why = tfidf_entry
+        contributions.append(ScoreContribution(scoring_method="tfidf", method_version=tfidf_version, score=t_score, why=t_why))
+    if llm_entry is not None:
+        l_score, l_why = llm_entry
+        contributions.append(ScoreContribution(scoring_method="llm-semantic", method_version=llm_version, score=l_score, why=l_why))
+
+    rel: float | None
+    scoring_method = ""
+    fallback_note = ""
+    if llm_entry is not None:
+        rel, rel_why = llm_entry
+        scoring_method = "llm-semantic"
+        contributions[-1].used_for_decision = True
+        note = ("TF-IDF scored this asset first; because it was borderline (within the configured band of the "
+                "threshold, docs/SCORING.md), the LLM re-scored it and its judgment is authoritative by design."
+                if tfidf_entry is not None else
+                "Only the LLM scored this asset this round (no TF-IDF batch score was available to compare against).")
+    elif prev is not None and prev.scoring_method == "llm-semantic":
         # Already had a good semantic score from an earlier round (e.g. before a "search again") and wasn't
-        # re-sent to the LLM this time -- keep it (version and all) rather than silently downgrading to a
-        # cruder score or losing which LLM-scoring version actually produced it.
-        rel, rel_why, method = prev.relevance, prev.relevance_why, prev.relevance_method
-    elif tfidf_scores_batch and a.id in tfidf_scores_batch:
+        # re-sent to the LLM this time -- keep it (version, contributions and all) rather than silently
+        # downgrading to a cruder score or losing which version actually produced it. If TF-IDF was freshly
+        # recomputed this round anyway (it's cheap and runs on every pending asset), record that as an extra,
+        # non-authoritative contribution rather than discarding it -- it just didn't change the outcome.
+        rel, rel_why, scoring_method = prev.relevance, prev.relevance_why, prev.scoring_method
+        note = prev.contribution_note + " (kept from an earlier round; not re-scored this round.)"
+        contributions = list(prev.contributions) + contributions
+    elif tfidf_entry is not None:
         # The deterministic local baseline (docs/SCORING.md): used for every asset the LLM wasn't asked to
         # double-check this round, either because it's off/unkeyed or because the score wasn't borderline.
-        rel, rel_why = tfidf_scores_batch[a.id]
-        method = tfidf_version
+        rel, rel_why = tfidf_entry
+        scoring_method = "tfidf"
+        contributions[-1].used_for_decision = True
+        note = "Only the TF-IDF baseline scored this asset this round (not borderline enough to ask the LLM, or no LLM is configured)."
     else:
         rel, rel_why = relevance(a, topic_terms or [])
         if rel is not None:
-            method = KEYWORD_MATCH_VERSION + (" (algorithmic score unavailable for this item)" if tfidf_scores_batch is not None
-                                        else " (LLM unavailable/failed for this item)" if llm_scores is not None else "")
+            scoring_method = "keyword-match"
+            fallback_note = ("algorithmic score unavailable for this item" if tfidf_scores_batch is not None
+                              else "LLM unavailable/failed for this item" if llm_scores is not None else "")
+            contributions.append(ScoreContribution(scoring_method="keyword-match", method_version=KEYWORD_MATCH_VERSION,
+                                                    score=rel, why=rel_why, used_for_decision=True))
+            note = (f"TF-IDF/LLM produced no score for this asset ({fallback_note}); fell back to plain keyword-word overlap."
+                    if fallback_note else
+                    "Relevance scoring did not run at all for this asset (no keywords/topic given, or TF-IDF wasn't computed for it); "
+                    "fell back to plain keyword-word overlap.")
+        else:
+            note = "No approved keywords to score against -- this asset was never scored."
+    method_version = {"tfidf": tfidf_version, "llm-semantic": llm_version, "keyword-match": KEYWORD_MATCH_VERSION, "": ""}[scoring_method]
+    decision: str = "relevant" if rel is not None and rel >= min_relevance else "not_relevant" if rel is not None else ""
     if rel is not None and rel < min_relevance:
         flags.append(Flag(rule="RELEVANCE_LOW", severity="low",
                           message=f"Relevance score {round(rel * 100)}% is under the {round(min_relevance * 100)}% threshold, so it is probably not about your topic.",
@@ -333,12 +370,13 @@ def vet_asset(a: Asset, all_assets: list[Asset], topic_terms: list[str] | None =
         summary = ("Risk LOW: no rule fired above 'info'. This is not an approval. It only means the checker "
                    "found nothing to warn about. A human still decides.")
     return Vetting(risk=risk, flags=flags, method=VERSION, summary=summary, usable=usable, relevance=rel, relevance_why=rel_why,
-                   relevance_method=method)
+                   scoring_method=scoring_method, method_version=method_version, scoring_fallback_note=fallback_note,
+                   relevance_threshold=min_relevance, relevance_decision=decision, contribution_note=note, contributions=contributions)
 
 
 def vet_all(assets: list[Asset], topic_terms: list[str] | None = None, min_relevance: float = RELEVANCE_MIN,
             llm_scores: dict[str, tuple[float, str]] | None = None,
             tfidf_scores_batch: dict[str, tuple[float, str]] | None = None,
-            llm_version: str = "llm-semantic-v1", tfidf_version: str = "tfidf-v3") -> None:
+            llm_version: str = "llm-semantic-v1", tfidf_version: str = "tfidf-v1") -> None:
     for a in assets:
         a.vetting = vet_asset(a, assets, topic_terms, min_relevance, llm_scores, tfidf_scores_batch, llm_version, tfidf_version)

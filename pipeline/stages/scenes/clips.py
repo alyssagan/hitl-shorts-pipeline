@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ...core.models import Asset, Scene
+from ...vetting.rules import STOPWORDS
 
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv"}
 
@@ -20,7 +21,11 @@ class ClipPick:
 
 
 def _tokens(text: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2}
+    # Same stopword list the relevance scorer uses (pipeline/vetting/rules.py), for the same reason: without
+    # it, common words like "the"/"and"/"with" count as a "match" between any two pieces of text, which is
+    # how a scene ends up paired with a photo that shares no actual subject with it -- a likely contributor
+    # to "the photos don't fit the script."
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2 and w not in STOPWORDS}
 
 
 class ClipSource(Protocol):
@@ -73,7 +78,12 @@ class AssetClipSource:
     """Picks from the assets a human approved at the asset review stop. Nothing
     else can appear in the video. Matching uses words shared between the scene
     (its narration and search terms) and the asset's title, description and
-    the search that found it."""
+    the search that found it -- with the same stopword list the relevance
+    scorer uses, so a shared "the"/"and"/"with" doesn't count as a match.
+    Each approved asset is used at most once PER PASS through the pool; if
+    there are more scenes than approved assets, the pool is reused from the
+    top, deliberately picking the best match again rather than leaving a
+    scene with no clip at all (see the "REUSED" reason string below)."""
 
     def __init__(self, assets: list[Asset]):
         self.assets = [a for a in assets if a.status == "approved" and (a.vetting is None or a.vetting.usable)]
@@ -82,9 +92,22 @@ class AssetClipSource:
 
     async def fetch(self, scene: Scene, dest_dir: Path, used: set[str]) -> str | None:
         available = [a for a in self.assets if a.path not in used]
-        self.last_pick = None
+        reused = False
         if not available:
-            return None
+            if not self.assets:
+                self.last_pick = None
+                return None
+            # Every approved asset has already been used once elsewhere in this video. Leaving this
+            # scene with no clip at all would silently drop it from what's sent to MoneyPrinterTurbo
+            # (render/mpt.py only sends scenes that HAVE a clip_path) -- so the video would have fewer
+            # clips than narration segments, and MoneyPrinterTurbo has to stretch or loop whatever clips
+            # it does have to cover the gap: an unpredictable repeat with no connection to what's
+            # actually being said at that point ("the photos just keep running in a circle"). Reusing
+            # the single best-matching approved asset again instead is a deliberate, explained repeat --
+            # approving more assets is what actually avoids it; see the reason string below.
+            available = self.assets
+            reused = True
+        self.last_pick = None
         # A URL-list entry can say where it belongs: a scene number ("2") or "intro" / "end".
         hinted = [a for a in available if _hint_matches(a, scene, self.total_scenes)]
         if hinted:
@@ -104,5 +127,7 @@ class AssetClipSource:
         else:
             best = available[0]
             reason = "no word overlap with any approved asset; used the next unused approved asset"
+        if reused:
+            reason += " -- REUSED: every approved asset was already used once elsewhere; approve more to avoid repeats"
         self.last_pick = ClipPick(best.path, reason, best.id)
         return best.path
