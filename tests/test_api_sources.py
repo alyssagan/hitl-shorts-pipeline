@@ -315,6 +315,80 @@ class VisualCoverageEndpointTests(ApiSourcesTests):
         self.assertEqual(self.client.get("/jobs/nope/visual-coverage").status_code, 404)
 
 
+class SceneCropEndpointTests(ApiSourcesTests):
+    """Gate 3's manual crop tool over HTTP: PATCH/remove .../scenes/{id}/crop, and GET /render-settings,
+    which the tool needs client-side to draw a correctly-proportioned crop box. See tests/test_scene_crop.py
+    for the orchestrator- and render-stage-level coverage (crop_box() math, ffmpeg invocation, fallbacks)."""
+    def setup_job_in_scenes_review(self):
+        # Same path VisualCoverageEndpointTests uses to reach scenes_review -- duplicated locally rather
+        # than subclassed, so this class's own test_ methods run once each instead of also re-running
+        # every inherited one.
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        jid = r.json()["id"]
+        self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        j = self.wait(jid, "keywords_review")
+        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        j = self.wait(jid, "assets_review")
+        decisions = {a["id"]: {"decision": "approve"} for a in j["assets"] if a["vetting"]["risk"] != "high"}
+        decisions.update({a["id"]: {"decision": "reject", "note": "not needed"} for a in j["assets"] if a["id"] not in decisions})
+        self.client.post(f"/jobs/{jid}/assets/review", json={"decisions": decisions, "reviewer": "Aly"})
+        self.client.post(f"/jobs/{jid}/assets/approve", json={"reviewer": "Aly"})
+        j = self.wait(jid, "scenes_review")
+        return jid, j
+
+    def test_render_settings_reports_the_configured_aspect(self):
+        out = self.client.get("/render-settings").json()
+        self.assertEqual(out["aspect"], "9:16")   # settings={} in ApiSourcesTests.setUp -> the documented default
+
+    def give_a_scene_a_clip(self, jid, j):
+        sid = j["scenes"][0]["id"]
+        clip_path = next(a["path"] for a in j["assets"] if a["status"] == "approved")
+        r = self.client.patch(f"/jobs/{jid}/scenes", json={"edits": {sid: {"clip_path": clip_path}}, "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 200, r.text)
+        return sid
+
+    def test_sets_a_crop_over_http(self):
+        jid, j = self.setup_job_in_scenes_review()
+        sid = self.give_a_scene_a_clip(jid, j)
+        r = self.client.patch(f"/jobs/{jid}/scenes/{sid}/crop",
+                              json={"center_x": 0.25, "center_y": 0.75, "zoom": 1.4, "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 200, r.text)
+        scene = next(s for s in r.json()["scenes"] if s["id"] == sid)
+        self.assertEqual(scene["crop"], {"center_x": 0.25, "center_y": 0.75, "zoom": 1.4,
+                                          "updated_by": "Aly", "updated_at": scene["crop"]["updated_at"]})
+
+    def test_removes_a_crop_over_http(self):
+        jid, j = self.setup_job_in_scenes_review()
+        sid = self.give_a_scene_a_clip(jid, j)
+        self.client.patch(f"/jobs/{jid}/scenes/{sid}/crop", json={"zoom": 2.0, "reviewer": "Aly"})
+        r = self.client.post(f"/jobs/{jid}/scenes/{sid}/crop/remove", json={"reviewer": "Aly"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIsNone(next(s for s in r.json()["scenes"] if s["id"] == sid)["crop"])
+
+    def test_crop_without_a_clip_first_is_a_422(self):
+        jid, j = self.setup_job_in_scenes_review()
+        sid = j["scenes"][0]["id"]   # no clip_path given yet
+        r = self.client.patch(f"/jobs/{jid}/scenes/{sid}/crop", json={"reviewer": "Aly"})
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_out_of_range_center_is_a_422(self):
+        jid, j = self.setup_job_in_scenes_review()
+        sid = self.give_a_scene_a_clip(jid, j)
+        r = self.client.patch(f"/jobs/{jid}/scenes/{sid}/crop", json={"center_x": 1.5, "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_zoom_below_1_is_a_422(self):
+        jid, j = self.setup_job_in_scenes_review()
+        sid = self.give_a_scene_a_clip(jid, j)
+        r = self.client.patch(f"/jobs/{jid}/scenes/{sid}/crop", json={"zoom": 0.5, "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 422, r.text)
+
+    def test_unknown_job_is_404(self):
+        r = self.client.patch("/jobs/nope/scenes/whatever/crop", json={"reviewer": "Aly"})
+        self.assertEqual(r.status_code, 404, r.text)
+
+
 class LogEndpointTests(ApiSourcesTests):
     def test_activity_log_covers_the_run(self):
         r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",

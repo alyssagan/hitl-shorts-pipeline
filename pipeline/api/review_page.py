@@ -99,6 +99,7 @@ let catForms={}, idForms={}, rightsForms={};   // per-asset draft values for the
 let assetReport=null, assetReportOpen=false;   // per-job/per-source summary panel (#13)
 let coverage=null, coverageLoadedFor=null, coverageOverrideNote="", checklistForms={};   // pre-render visual coverage check (#12)
 let checklistOpen=false, newChecklistItem={label:"",group:"case",linked_keyword_term:""};   // adding items (#6/#12)
+let renderSettings={aspect:"9:16"}, cropOpen={}, cropDraft={};   // Gate 3 manual crop tool
 const CATEGORY_LABELS = {verified_case:"verified case", unverified_case_candidate:"unverified case candidate",
   historical_context:"historical context", illustrative_stock:"illustrative stock", reconstruction:"reconstruction"};
 const IDENTITY_LABELS = {unverified:"unverified", verified:"verified", disputed:"disputed"};
@@ -110,6 +111,7 @@ async function loadStatic(){
   // Job-independent, small and unchanging within a session -- fetched once (docs/EVALUATION.md, docs/REVIEW_UI.md).
   try{ methodDefs = await api("GET","/methods"); }catch(e){}
   try{ const r = await api("GET","/label-reasons"); labelReasons = r.suggested_reasons||[]; }catch(e){}
+  try{ renderSettings = await api("GET","/render-settings"); }catch(e){}
 }
 
 async function load(){
@@ -829,6 +831,110 @@ async function rejectScenes(){
     busy=false; await load();
   }catch(e){ busy=false; error=String(e.message||e); render(); }
 }
+// -------- Gate 3 manual crop (MoneyPrinterTurbo always auto-center-crops to the render's aspect ratio,
+// with no way to choose what stays in frame -- see pipeline/stages/render/crop.py's module docstring).
+// Same crop_box() math as that module, reimplemented here (there's no way to share Python with browser
+// JS) so the preview box matches exactly what the render will actually do.
+function aspectRatioOf(aspect){
+  const parts = String(aspect||"").split(":");
+  const w = Number(parts[0]), h = Number(parts[1]);
+  return (w>0 && h>0) ? w/h : 9/16;
+}
+function cropBox(sw, sh, targetAspect, cx, cy, zoom){
+  zoom = Math.max(zoom, 1.0);
+  let baseW, baseH;
+  if (sw/sh > targetAspect){ baseH = sh; baseW = sh*targetAspect; }
+  else { baseW = sw; baseH = sw/targetAspect; }
+  const w = Math.max(1, Math.min(sw, Math.round(baseW/zoom)));
+  const h = Math.max(1, Math.min(sh, Math.round(baseH/zoom)));
+  let x = Math.round(cx*sw - w/2), y = Math.round(cy*sh - h/2);
+  x = Math.max(0, Math.min(sw-w, x));
+  y = Math.max(0, Math.min(sh-h, y));
+  return {x,y,w,h};
+}
+function assetForScene(s){ return job.assets.find(a=>a.id===s.asset_id) || null; }
+function cropDraftFor(s){
+  if (!cropDraft[s.id]) cropDraft[s.id] = s.crop
+    ? {center_x:s.crop.center_x, center_y:s.crop.center_y, zoom:s.crop.zoom}
+    : {center_x:0.5, center_y:0.5, zoom:1.0};
+  return cropDraft[s.id];
+}
+async function saveCrop(sceneId){
+  const d = cropDraft[sceneId]; if (!d) return;
+  busy=true; error=""; render();
+  try{
+    const reviewer=(store.get("reviewer")||"").trim();
+    await api("PATCH", `/jobs/${JOB}/scenes/${sceneId}/crop`, Object.assign({reviewer}, d));
+    delete cropDraft[sceneId];
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function resetCrop(sceneId){
+  busy=true; error=""; render();
+  try{
+    const reviewer=(store.get("reviewer")||"").trim();
+    await api("POST", `/jobs/${JOB}/scenes/${sceneId}/crop/remove`, {reviewer});
+    delete cropDraft[sceneId];
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+function startCropDrag(e, sceneId, asset, targetAspect, boxW, d0){
+  e.preventDefault();
+  const mediaEl = e.currentTarget.querySelector("img,video");
+  const startX = e.clientX, startY = e.clientY;
+  const box0 = cropBox(asset.width, asset.height, targetAspect, d0.center_x, d0.center_y, d0.zoom);
+  const scale = boxW / box0.w;
+  function onMove(ev){
+    const dxSrc = (ev.clientX-startX)/scale, dySrc = (ev.clientY-startY)/scale;
+    let cx = Math.max(0, Math.min(1, d0.center_x - dxSrc/asset.width));
+    let cy = Math.max(0, Math.min(1, d0.center_y - dySrc/asset.height));
+    cropDraft[sceneId] = Object.assign({}, d0, {center_x:cx, center_y:cy});
+    if (mediaEl){
+      const box = cropBox(asset.width, asset.height, targetAspect, cx, cy, d0.zoom);
+      mediaEl.style.left = (-box.x*scale)+"px"; mediaEl.style.top = (-box.y*scale)+"px";
+    }
+  }
+  function onUp(){ window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); render(); }
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+}
+function cropEditor(s, asset){
+  const d = cropDraftFor(s);
+  const targetAspect = aspectRatioOf(renderSettings.aspect);
+  const box = cropBox(asset.width, asset.height, targetAspect, d.center_x, d.center_y, d.zoom);
+  const boxW = 160, boxH = Math.round(boxW/targetAspect), scale = boxW/box.w;
+  const mediaStyle = `position:absolute;left:${-box.x*scale}px;top:${-box.y*scale}px;`+
+      `width:${asset.width*scale}px;height:${asset.height*scale}px;pointer-events:none`;
+  const mediaEl = asset.kind==="video"
+    ? h("video",{src:`/jobs/${JOB}/assets/${asset.id}/file`,muted:true,style:mediaStyle})
+    : h("img",{src:`/jobs/${JOB}/assets/${asset.id}/file`,style:mediaStyle});
+  return h("div",{style:"margin-top:8px;display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap"},
+    h("div",{style:`position:relative;width:${boxW}px;height:${boxH}px;overflow:hidden;border:2px solid var(--acc);`+
+        "border-radius:6px;cursor:grab;background:#000",
+        onmousedown:e=>startCropDrag(e, s.id, asset, targetAspect, boxW, d)}, mediaEl),
+    h("div",{style:"display:flex;flex-direction:column;gap:6px;min-width:180px"},
+      h("div",{class:"meta"},"Drag the preview to reposition it; zoom tightens the crop."),
+      h("label",{}, "Zoom ", h("input",{type:"range",min:100,max:400,step:5,value:Math.round(d.zoom*100),
+          oninput:e=>{cropDraft[s.id]=Object.assign({},d,{zoom:Number(e.target.value)/100}); render();}}),
+        h("b",{}, d.zoom.toFixed(2)+"x")),
+      h("div",{class:"bar"},
+        h("button",{disabled:busy, onclick:()=>saveCrop(s.id)}, "Save crop"),
+        s.crop ? h("button",{disabled:busy, onclick:()=>resetCrop(s.id)}, "Reset to auto-crop") : null)));
+}
+function cropWidget(s){
+  if (!s.clip_path) return null;
+  const pendingClipChange = sceneClipOverride[s.id]!=null && sceneClipOverride[s.id] !== (s.clip_path||"");
+  const asset = assetForScene(s);
+  const open = !!cropOpen[s.id];
+  return h("div",{style:"margin-top:6px"},
+    h("details",{open, ontoggle:e=>{cropOpen[s.id]=e.target.open; render();}},
+      h("summary",{}, s.crop ? "Crop: adjusted" : "Crop: automatic (MoneyPrinterTurbo's own center-crop)"),
+      !open ? null :
+      pendingClipChange ? h("div",{class:"sub",style:"margin-top:6px"},"Save your clip change above first, then you can crop it.") :
+      (!asset || !asset.width || !asset.height) ? h("div",{class:"sub",style:"margin-top:6px"},
+          "Can't crop this clip -- its width/height aren't known, so it'll use MoneyPrinterTurbo's own automatic center-crop.") :
+      cropEditor(s, asset)));
+}
 function sceneCard(s, i, n){
   const approved = job.assets.filter(a=>a.status==="approved");
   // job.uses_sources is a plain @property on the backend Job model, not a @computed_field, so it's never
@@ -853,6 +959,7 @@ function sceneCard(s, i, n){
       h("span",{class:"meta"}, s.clip_path ? "clip: "+s.clip_path.split("/").pop() : "NO CLIP -- drag one onto this card, or add footage to library/clips"),
       s.clip_reason?h("span",{class:"meta"},"("+s.clip_reason+")"):null,
       clipPicker),
+    cropWidget(s),
     h("div",{class:"meta",style:"margin-top:6px"}, "Narration (spoken)"),
     h("textarea",{class:"note",style:"min-height:80px",
         oninput:e=>{sceneNarration[s.id]=e.target.value; updateScriptPreview();}}, sceneText(s)),

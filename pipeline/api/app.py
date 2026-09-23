@@ -38,6 +38,9 @@
                                         breakdowns, and the job's running LLM cost (same numbers as /usage).
   GET  /methods                        what each relevance-scoring method+version does (docs/SCORING_CHANGELOG.md)
   GET  /label-reasons                  the three labels and the suggested (extensible) reason list
+  GET  /render-settings                {aspect}   the deployment's render aspect ratio (config/pipeline.toml
+                                        [mpt] aspect) -- Gate 3's crop tool needs this to draw a correctly
+                                        proportioned crop box, same as the render stage's own crop math
   POST /jobs/{id}/case-reference       {canonical_name, reviewer}     set the case's canonical name (#6)
   POST /jobs/{id}/case-reference/facts {kind, text, detail?, source_links?, status?, conflict_note?, reviewer}
                                         add one fact -- always human-entered, never written by search/vetting
@@ -64,6 +67,15 @@
                                         link onto a scene (yt-dlp/direct download, same as the 'urls' source)
   POST /jobs/{id}/scenes/{scene_id}/approve-pending {asset_id, note?, reviewer?}  finish approving+assigning
                                         an asset the two routes above left pending (high risk, no note yet)
+  PATCH /jobs/{id}/scenes/{scene_id}/crop   {center_x?, center_y?, zoom?, reviewer}   GATE 3 manually frame
+                                        this scene's clip -- overrides MoneyPrinterTurbo's own automatic
+                                        center-crop (MPT has no hook to accept a crop itself; this pipeline
+                                        bakes an actually-cropped copy at render time, see pipeline/stages/
+                                        render/crop.py). center_x/center_y 0..1 (0.5,0.5 = MPT's own
+                                        centering), zoom >=1.0. The scene needs a clip first, and any later
+                                        clip_path change (a fresh drag/upload/picker swap) clears the crop --
+                                        it was framed for the old clip, not the new one.
+  POST /jobs/{id}/scenes/{scene_id}/crop/remove   {reviewer}   go back to MoneyPrinterTurbo's own auto-crop
   POST /jobs/{id}/scenes/approve      {reviewer, override_note?}               GATE 3 approve -> rendering.
                                         #12: refused if any visual_checklist item is still unresolved, unless
                                         override_note explains why it's OK to render past it anyway (both the
@@ -271,6 +283,22 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         d = await body(r)
         return await orch.approve_pending_scene_asset(r.path_params["id"], d.get("asset_id", ""), r.path_params["scene_id"],
                                                        reviewer=d.get("reviewer", ""), note=d.get("note", ""))
+
+    async def scene_crop_set(r: Request):
+        d = await body(r)
+        return await orch.set_scene_crop(r.path_params["id"], r.path_params["scene_id"],
+                                         center_x=float(d.get("center_x", 0.5)), center_y=float(d.get("center_y", 0.5)),
+                                         zoom=float(d.get("zoom", 1.0)), reviewer=d.get("reviewer", ""))
+
+    async def scene_crop_remove(r: Request):
+        d = await body(r)
+        return await orch.remove_scene_crop(r.path_params["id"], r.path_params["scene_id"], reviewer=d.get("reviewer", ""))
+
+    async def render_settings_view(_: Request) -> JSONResponse:
+        # Job-independent (the whole deployment renders at one aspect ratio, config/pipeline.toml's
+        # [mpt] aspect) -- Gate 3's crop tool needs this to draw a correctly-proportioned crop box and
+        # to run the same crop_box() math client-side that pipeline/stages/render/crop.py runs server-side.
+        return JSONResponse({"aspect": settings.get("mpt", {}).get("aspect", "9:16")})
 
     async def scenes_approve(r: Request):
         d = await body(r)
@@ -495,6 +523,7 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/visual-coverage", wrap(visual_coverage_view), methods=["GET"]),
         Route("/methods", methods_view, methods=["GET"]),
         Route("/label-reasons", label_reasons_view, methods=["GET"]),
+        Route("/render-settings", render_settings_view, methods=["GET"]),
         Route(f"{P}/decisions", wrap(decisions), methods=["GET"]),
         Route(f"{P}/log", wrap(log_view), methods=["GET"]),
         Route(f"{P}/timing", wrap(timing_view), methods=["GET"]),
@@ -504,6 +533,8 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/scenes/{{scene_id}}/upload", wrap(scene_upload), methods=["POST"]),
         Route(f"{P}/scenes/{{scene_id}}/from-url", wrap(scene_from_url), methods=["POST"]),
         Route(f"{P}/scenes/{{scene_id}}/approve-pending", wrap(scene_approve_pending), methods=["POST"]),
+        Route(f"{P}/scenes/{{scene_id}}/crop", wrap(scene_crop_set), methods=["PATCH"]),
+        Route(f"{P}/scenes/{{scene_id}}/crop/remove", wrap(scene_crop_remove), methods=["POST"]),
         Route(f"{P}/scenes/approve", wrap(scenes_approve), methods=["POST"]),
         Route(f"{P}/scenes/reject", wrap(scenes_reject), methods=["POST"]),
         Route(f"{P}/back-to-keywords", wrap(back), methods=["POST"]),

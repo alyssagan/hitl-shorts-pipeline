@@ -14,6 +14,10 @@ After a successful render, optionally asks MoneyPrinterTurbo to write platform-r
 title/caption/hashtags from the final script (its own /api/v1/social-metadata, see
 mpt_client.py) for each configured platform -- best-effort, never fails the render --
 and writes them to SOCIAL_POST.md in the project folder, paste-ready.
+
+Any scene with a manual crop (Scene.crop, set at Gate 3) gets its clip baked into an
+actually-cropped copy first -- see crop.py's module docstring for why that has to
+happen here rather than being passed through to MoneyPrinterTurbo.
 """
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ from ...core.models import Job
 from ..base import RenderResult, StageContext
 from ...core import joblog
 from ..mpt_client import MptClient, MptError
+from .crop import CropError, Runner as CropRunner, apply_scene_crop, run_subprocess as run_crop_subprocess
 
 # Platform label used in SOCIAL_POST.md; keys must match MoneyPrinterTurbo's own
 # SOCIAL_PLATFORMS (app/services/llm.py) -- an unknown key there just 400s, caught below.
@@ -49,7 +54,9 @@ class MptRenderStage:
                  voice_volume: float = 0.0, voice_rate: float = 0.0,
                  bgm_type: str = "", bgm_volume: float = 0.0, custom_bgm_file: str = "",
                  # Platform copy generation (mpt_client.py::MptClient.social_metadata). Empty = disabled.
-                 social_platforms: tuple[str, ...] = ()):
+                 social_platforms: tuple[str, ...] = (),
+                 # crop.py's ffmpeg runner, injectable so tests never actually invoke ffmpeg.
+                 crop_runner: CropRunner = run_crop_subprocess):
         self.client = client
         self.voice_name = voice_name
         self.language = language
@@ -78,6 +85,7 @@ class MptRenderStage:
         self.bgm_volume = bgm_volume
         self.custom_bgm_file = custom_bgm_file
         self.social_platforms = tuple(social_platforms)
+        self.crop_runner = crop_runner
 
     def _to_mpt_path(self, p: str) -> str:
         for host, mpt in self.path_map:
@@ -131,9 +139,24 @@ class MptRenderStage:
                       f"**Caption:**  \n{meta.get('caption', '')}", "", f"**Hashtags:** {hashtags}", ""]
         (Path(ctx.project_dir) / "SOCIAL_POST.md").write_text("\n".join(lines), encoding="utf-8")
 
+    async def _resolve_clip(self, scene, assets_by_id: dict, ctx: StageContext) -> str:
+        """scene.clip_path, or a freshly-cropped copy of it if the reviewer set scene.crop (see
+        crop.py's module docstring for why MPT itself can't be handed a crop instead). Best-effort:
+        an ffmpeg failure is logged and falls back to the uncropped clip rather than failing the
+        whole render over one scene's framing."""
+        if scene.crop is None or not ctx.project_dir:
+            return scene.clip_path
+        try:
+            return await apply_scene_crop(scene, assets_by_id.get(scene.asset_id), target_aspect=self.aspect,
+                                          out_dir=Path(ctx.project_dir) / "cropped", runner=self.crop_runner)
+        except CropError as exc:
+            joblog.warn("render", f"scene {scene.id} crop failed, using the uncropped clip instead", error=str(exc))
+            return scene.clip_path
+
     async def run(self, job: Job, ctx: StageContext) -> RenderResult:
         scenes = sorted(job.scenes, key=lambda s: s.index)
-        clips = [s.clip_path for s in scenes if s.clip_path]
+        assets_by_id = {a.id: a for a in job.assets}
+        clips = [await self._resolve_clip(s, assets_by_id, ctx) for s in scenes if s.clip_path]
         if not clips:
             raise MptError("no scene has a clip; add clips to the library or edit scenes before rendering")
 

@@ -39,6 +39,55 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: manual crop, Gate 3 (2026-09-23)
+Prompted directly ("do we have a UI for drag and drop and cropping of videos" -> "i definitely want a cropping
+feature"). Investigated MoneyPrinterTurbo first rather than assuming: it always auto-center-crops a clip to the
+render's aspect ratio itself (`vendor/MoneyPrinterTurbo` `app/services/video.py::_fit_clip_to_canvas`), but that
+crop is always centered -- `MaterialInfo` (`app/models/schema.py`) has no field for a custom crop box, so there
+was no way to hand MPT a framing choice even if the pipeline wanted to. A follow-up `AskUserQuestion` scoped the
+build: photos AND video clips (not just stills), the control lives on each Gate 3 scene card (not a separate
+Gate 2 step), and it's a reposition/zoom interaction constrained to the target aspect ratio (not a freeform
+any-aspect rectangle) -- mirroring what MPT's own auto-crop already does, just letting a human move the window.
+
+- **`pipeline/stages/render/crop.py`** (new): `crop_box()` computes the same (x, y, w, h) ffmpeg window MPT's own
+  cover-crop would use at `zoom=1.0`/centered, but positioned by a human's `center_x`/`center_y` (0..1 fractions
+  of the source frame) and tightened by `zoom` (>=1.0); always clamped inside the source frame. `apply_scene_crop()`
+  bakes it into an actual cropped file with one `ffmpeg -vf crop=...` call (images and video alike -- ffmpeg treats
+  a single image as a one-frame stream, so the same command handles both; video keeps its audio via `-c:a copy`),
+  via the same injectable-runner pattern as `pipeline/sources/urls.py::run_subprocess` so tests never invoke real
+  ffmpeg. Falls back to the unmodified clip (letting MPT's own auto-crop handle it) whenever there's nothing to
+  act on: no crop set, no asset, unknown width/height, or a crop window that already covers the whole frame.
+- **`Scene.crop`** (`pipeline/core/models.py`, a new `SceneCrop`): `center_x`/`center_y`/`zoom` plus who/when.
+  `None` means "MoneyPrinterTurbo's own automatic center-crop", same as before this feature existed -- nothing
+  changes for a job that never touches it.
+- **`Orchestrator.set_scene_crop()`/`remove_scene_crop()`**: range-validated (0..1 centers, zoom>=1.0), requires
+  the scene to already have a clip, only allowed during `SCENES_REVIEW` (same gating as `edit_scenes()`). A crop
+  is framed for one specific clip, so `edit_scenes()`, `add_scene_asset()` and `approve_pending_scene_asset()` all
+  clear `scene.crop` whenever they actually change `scene.clip_path` -- a stale crop silently misapplied to a
+  swapped-in clip was the one correctness trap worth guarding against here.
+- **`MptRenderStage`**: resolves each scene's clip through `apply_scene_crop()` before building `video_materials`,
+  writing cropped copies to the project's `cropped/` folder (already mounted into MoneyPrinterTurbo, so no new
+  path mapping needed). An ffmpeg failure is logged and falls back to the uncropped clip -- ffmpeg trouble on one
+  scene's framing never fails the whole render.
+- **New routes**: `PATCH /jobs/{id}/scenes/{scene_id}/crop`, `POST .../crop/remove`, `GET /render-settings`
+  (`{aspect}` -- the frontend's crop tool needs the deployment's configured aspect ratio to draw a correctly
+  proportioned crop box and run the identical `crop_box()` math client-side, so the preview matches the render
+  exactly).
+- **Gate 3 UI (`pipeline/api/review_page.py`)**: a collapsed "Crop: automatic" / "Crop: adjusted" line under each
+  scene's clip picker. Open it to drag a live preview (native `mousedown`/`mousemove`/`mouseup`, restyling the
+  preview's `img`/`video` element directly during the drag rather than calling the full `render()` on every
+  pixel of movement, so it stays smooth despite this page's rebuild-the-whole-DOM-per-render architecture) and a
+  zoom slider, then **Save crop** or **Reset to auto-crop**. Disabled with an explanatory note if the clip's
+  width/height aren't known, or if there's an unsaved clip-picker change pending (crop that, not this).
+- 40 new tests: `tests/test_scene_crop.py` (`crop_box()` math, `apply_scene_crop()` fallbacks/ffmpeg invocation
+  via a fake runner, `MptRenderStage` actually using a cropped path, orchestrator validation/gating/clearing) and
+  `SceneCropEndpointTests` in `tests/test_api_sources.py` (the routes over real HTTP). Embedded JS syntax-checked
+  with `node --check` (no npm registry access in this environment for a real JS test framework). Full suite: 481
+  passing.
+- **Not done**: no live preview of MoneyPrinterTurbo's own pan/zoom effect on top of the crop (the tool shows
+  framing, not motion); no per-job aspect-ratio override (the render aspect is one deployment-wide config value,
+  same as before this feature).
+
 ## Done: five more public sources -- Openverse, DPLA, Flickr, Europeana, Chronicling America (2026-09-23)
 Added after "not getting good results" / wanting real case-related photos beyond what Wikipedia+Commons alone turn up.
 `--sources` now also accepts `openverse` and `chronicling_america` (no key), and `dpla`/`flickr`/`europeana` (free keys,

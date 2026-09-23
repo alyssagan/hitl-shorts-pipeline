@@ -169,3 +169,14 @@ which scorer actually ran), so a run never fails for this reason, but the border
 unrefined. The LLM
 calls that do happen are exposed to the same free-tier rate limits and occasional "busy" 429/503s as keyword and script
 generation (auto-retried; see docs/LOGGING.md), bounded by `max_llm_per_round` even in a worst case.
+
+## 18. Manual crop needs known dimensions, and costs render time
+Gate 3's crop tool (docs/REVIEW_UI.md) needs an asset's width/height to compute the crop window; almost every sourced/
+uploaded asset has this, but if one somehow doesn't, the crop panel says so and MoneyPrinterTurbo's own automatic
+center-crop is used instead -- never a guess. A crop is also only ever applied at render time (`pipeline/stages/render/
+crop.py`, one `ffmpeg` process per cropped scene, still images and video clips alike), not live in the browser, so it adds
+a little to render time and disk use (one cropped copy per cropped scene, written into the project's `cropped/` folder) --
+proportional to how many scenes actually have a crop set, not the whole job. If that one ffmpeg call fails for any reason,
+the render falls back to the uncropped clip and logs a warning rather than failing the whole render over one scene's
+framing. There's also no per-clip preview of the *rendered* result (MoneyPrinterTurbo's own zoom/pan effect on top of the
+crop) before you commit to "Approve and render" -- the crop preview shows framing, not motion.

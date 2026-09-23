@@ -232,6 +232,20 @@ class TextRef(BaseModel):
     retrieved_at: str = Field(default_factory=_now)
 
 
+class SceneCrop(BaseModel):
+    """A human override for the framing MoneyPrinterTurbo would otherwise pick on its own: MPT always
+    center-crops a clip to the target aspect ratio (vendor/MoneyPrinterTurbo app/services/video.py::
+    _fit_clip_to_canvas) with no parameter for choosing what part of the frame survives -- so when
+    that auto-crop would cut off something that matters, a reviewer sets this instead. Not applied
+    live; the render stage bakes an actual cropped file from it just before handing the clip to MPT
+    (pipeline/stages/render/crop.py)."""
+    center_x: float = 0.5     # 0..1, fraction of the source frame, left..right; 0.5 = MPT's own centering
+    center_y: float = 0.5     # 0..1, fraction of the source frame, top..bottom
+    zoom: float = 1.0         # >=1.0; 1.0 = the widest window that still fills the target aspect
+    updated_by: str = ""
+    updated_at: str = Field(default_factory=_now)
+
+
 class Scene(BaseModel):
     id: str = Field(default_factory=_id)
     index: int
@@ -245,6 +259,8 @@ class Scene(BaseModel):
     approved: bool = False
     note: str = ""                          # reviewer's own note on this scene -- never read aloud, never
                                              # sent to MoneyPrinterTurbo; editable at Gate 3 (docs/REVIEW_UI.md)
+    crop: SceneCrop | None = None           # manual framing override for this scene's clip_path, or None
+                                             # for MoneyPrinterTurbo's own automatic center-crop
 
 
 class Event(BaseModel):

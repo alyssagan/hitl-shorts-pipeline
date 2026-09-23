@@ -28,7 +28,7 @@ from . import usage
 from .decisions import Actor, actor_from, ai, human, machine
 from .models import (
     Asset, CaseFact, ChecklistStatus, FactKind, FactStatus, Job, JobState, Keyword, ProviderChoice,
-    QueryGroup, RUNNING_STATES, Scene, VisualChecklistItem, _now,
+    QueryGroup, RUNNING_STATES, Scene, SceneCrop, VisualChecklistItem, _now,
 )
 from .store import JobStore
 from ..stages.base import RenderResult, StageContext
@@ -582,6 +582,7 @@ class Orchestrator:
                         if field == "clip_path":
                             by_id[sid].asset_id = next((a.id for a in job.approved_assets if a.path == changes[field]), None)
                             by_id[sid].clip_reason = "chosen by a human"
+                            by_id[sid].crop = None   # a crop chosen for the old clip doesn't apply to the new one
                         if field != "approved":
                             self._rec(job.id, "scenes", f"edited_scene_{field}", actor, decision="edit",
                                       subject={"scene_id": sid, "index": by_id[sid].index},
@@ -639,6 +640,7 @@ class Orchestrator:
             asset.decision_note = note.strip()
             asset.reviewer, asset.reviewed_at = actor.name, _now()
             scene.clip_path, scene.asset_id, scene.clip_reason = asset.path, asset.id, "dragged in by a human"
+            scene.crop = None   # a crop chosen for whatever was here before doesn't apply to this new clip
             self._rec(job.id, "scenes", "added_scene_asset", actor, decision="add",
                       reason=note.strip() or "(no note)",
                       subject={"scene_id": scene_id, "asset_id": asset.id, "source": asset.source},
@@ -698,10 +700,56 @@ class Orchestrator:
             asset.decision_note = note.strip()
             asset.reviewer, asset.reviewed_at = actor.name, _now()
             scene.clip_path, scene.asset_id, scene.clip_reason = asset.path, asset.id, "dragged in by a human"
+            scene.crop = None   # a crop chosen for whatever was here before doesn't apply to this new clip
             self._rec(job.id, "scenes", "added_scene_asset", actor, decision="add",
                       reason=note.strip() or "(no note)",
                       subject={"scene_id": scene_id, "asset_id": asset.id, "source": asset.source},
                       outputs={"risk": asset.vetting.risk if asset.vetting else "unvetted", "assigned": True, "was_pending": True})
+        return await self._mutate(job_id, fn)
+
+    async def set_scene_crop(self, job_id: str, scene_id: str, *, center_x: float = 0.5, center_y: float = 0.5,
+                              zoom: float = 1.0, reviewer: str = "") -> Job:
+        """Manually override the framing MoneyPrinterTurbo's own automatic center-crop would otherwise
+        pick for this scene's clip (see pipeline/stages/render/crop.py's module docstring for why MPT
+        itself has no hook for this). center_x/center_y are 0..1 fractions of the source frame -- 0.5,
+        0.5 is exactly MPT's own default centering; zoom is >=1.0, tightening the window. This only
+        records the choice; the render stage bakes an actual cropped file from it. Only allowed during
+        SCENES_REVIEW, same as edit_scenes()."""
+        actor = self._who(reviewer, require=True)
+        if not (0.0 <= center_x <= 1.0) or not (0.0 <= center_y <= 1.0):
+            raise ValueError("center_x and center_y must each be between 0 and 1")
+        if zoom < 1.0:
+            raise ValueError("zoom must be at least 1.0 (1.0 is the widest crop that still fills the frame)")
+
+        def fn(job: Job) -> None:
+            if job.state is not JobState.SCENES_REVIEW:
+                raise sm.TransitionError("crop can only be set during scene review")
+            scene = next((s for s in job.scenes if s.id == scene_id), None)
+            if scene is None:
+                raise ValueError(f"unknown scene id {scene_id}")
+            if not scene.clip_path:
+                raise ValueError("this scene has no clip yet -- assign one before cropping it")
+            scene.crop = SceneCrop(center_x=center_x, center_y=center_y, zoom=zoom,
+                                    updated_by=actor.name, updated_at=_now())
+            self._rec(job.id, "scenes", "scene_crop_set", actor, decision="edit",
+                      subject={"scene_id": scene_id, "index": scene.index},
+                      outputs={"center_x": center_x, "center_y": center_y, "zoom": zoom})
+        return await self._mutate(job_id, fn)
+
+    async def remove_scene_crop(self, job_id: str, scene_id: str, *, reviewer: str = "") -> Job:
+        """Go back to MoneyPrinterTurbo's own automatic center-crop for this scene."""
+        actor = self._who(reviewer, require=True)
+
+        def fn(job: Job) -> None:
+            if job.state is not JobState.SCENES_REVIEW:
+                raise sm.TransitionError("crop can only be changed during scene review")
+            scene = next((s for s in job.scenes if s.id == scene_id), None)
+            if scene is None:
+                raise ValueError(f"unknown scene id {scene_id}")
+            if scene.crop is not None:
+                scene.crop = None
+                self._rec(job.id, "scenes", "scene_crop_removed", actor, decision="edit",
+                          subject={"scene_id": scene_id, "index": scene.index})
         return await self._mutate(job_id, fn)
 
     async def approve_scenes(self, job_id: str, approve_all: bool = True, *, reviewer: str = "",

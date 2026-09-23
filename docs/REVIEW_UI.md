@@ -131,6 +131,15 @@ its own within a few seconds of the job getting there, or reload).
   ☰ handle to reorder a scene, or use the ↑/↓ buttons -- either works, and they stay in sync. If this job sources its
   footage from approved assets (not just your local clip library), a **Clip** dropdown lets you swap in any other approved
   asset for that scene.
+- **Crop**, a collapsed "Crop: automatic" / "Crop: adjusted" line under each scene's clip picker. MoneyPrinterTurbo always
+  auto-center-crops a clip to the video's aspect ratio on its own, with no way to choose what part of the frame survives --
+  open this to override that when the auto-crop would cut off a face, a caption, whatever the shot's actually about. Drag
+  the preview to reposition it, use the zoom slider to tighten the window, then **Save crop**; **Reset to auto-crop**
+  goes back to MoneyPrinterTurbo's own centering. Needs the clip's width/height to be known (sourced assets have this;
+  if it's somehow missing, the panel says so and falls back to the auto-crop instead of guessing) and, if there's an
+  unsaved clip change pending in the picker above, save that first -- a crop is framed for one specific clip, so picking
+  a different one clears whatever crop was set for the old one. The actual cropped file is only produced at render time
+  (pipeline/stages/render/crop.py), never live in the browser.
 - **Save changes** persists your edits (and any reordering) without leaving the page or advancing the job -- keep editing
   afterward if you want. **Approve and render** saves whatever's still unsaved too, then starts the render: your last chance to
   change anything, since a render takes a few minutes and re-renders from scratch rather than patching in place. See "Visual
