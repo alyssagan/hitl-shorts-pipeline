@@ -97,7 +97,10 @@ its own within a few seconds of the job getting there, or reload).
   `candidates_found` -- i.e. nobody's actually decided what happens here yet -- which scene(s) it's tied to (matched by
   shared search term, so you know exactly where the gap shows up), and lets you resolve each one right there: pick an
   already-approved asset and **Mark fulfilled**, or type a reason and **Mark not available** / **Mark skipped**. Both of
-  those require the note; there's no way to silently drop an item off the list. If you'd rather get more material first,
+  those require the note; there's no way to silently drop an item off the list. A separate section below that, in red,
+  lists anything already marked fulfilled whose attached asset isn't actually categorized case material (verified_case/
+  unverified_case_candidate) -- the exact silent-substitution case this check exists to catch, one step past "still
+  unresolved" -- with the same **Re-pick fulfilling asset** / not available / skipped options. If you'd rather get more material first,
   the asset strip and the drop-a-file/link-onto-a-scene affordances right below this panel are the fastest way, without
   leaving the page. **Approve and render** refuses to proceed while anything's unresolved unless you also fill in the
   override note at the bottom of this panel, explaining why it's fine to render without it -- that note, and exactly which

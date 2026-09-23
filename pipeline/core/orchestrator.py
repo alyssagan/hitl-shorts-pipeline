@@ -63,7 +63,10 @@ SUGGESTED_LABEL_REASONS = [
 VISUAL_COVERAGE_REMEDIATION_OPTIONS = [
     {"action": "fulfill", "label": "Use a candidate already found",
      "how": "PATCH /jobs/{id}/visual-checklist/{item_id} {status: \"fulfilled\", asset_id, reviewer}",
-     "description": "Pick one of the assets already sourced for this and mark it as fulfilling this need."},
+     "description": "Pick one of the assets already sourced for this and mark it as fulfilling this need. "
+                     "For a case-group item, that asset should actually be categorized verified_case/"
+                     "unverified_case_candidate -- fulfilling with anything else is flagged as a category "
+                     "mismatch, not treated as done (#12)."},
     {"action": "search_more", "label": "Search again / add a link / add your own footage",
      "how": "Gate 2: Next batch, Search again, Add links, or Add your own footage",
      "description": "Go back to sourcing for this specific need before deciding anything."},
@@ -712,17 +715,20 @@ class Orchestrator:
                 if bad:
                     raise ValueError(f"scenes {bad} use a file that is not an approved asset")
             # #12: never silently substitute -- if visual_checklist items are still sitting at needed/
-            # candidates_found, rendering can't proceed on its own; it either needs every item resolved
-            # (fulfilled/not_available/skipped, each already forced through an explicit note/asset_id by
+            # candidates_found, or a "fulfilled" case-group item points at a non-case-categorized asset,
+            # rendering can't proceed on its own; it either needs every item resolved (fulfilled with real
+            # case material/not_available/skipped, each already forced through an explicit note/asset_id by
             # update_checklist_item) or an explicit, recorded reason for rendering past them anyway. A job
             # that never used the checklist (has_checklist False) is never gated -- opt-in, not a new
             # requirement forced onto jobs that don't use this feature.
             coverage = self._visual_coverage(job)
             if not coverage["ready"] and not override_note.strip():
-                labels = "; ".join(f'"{i["label"]}" ({i["status"]})' for i in coverage["unresolved"])
+                bits = [f'"{i["label"]}" ({i["status"]})' for i in coverage["unresolved"]]
+                bits += [f'"{m["label"]}" (fulfilled with a {m["asset_category"] or "uncategorized"} asset, not case material)'
+                         for m in coverage["category_mismatches"]]
                 raise ValueError(
-                    f"{len(coverage['unresolved'])} visual checklist item(s) aren't resolved yet: {labels}. "
-                    "Fulfill each with a specific asset, mark it not available or skipped (with a note), or "
+                    f"{len(bits)} visual checklist item(s) aren't resolved yet: {'; '.join(bits)}. "
+                    "Fulfill each with real case material, mark it not available or skipped (with a note), or "
                     "approve with an explicit override_note explaining why it's OK to render without them.")
             if approve_all:
                 for s in job.scenes:
@@ -733,6 +739,7 @@ class Orchestrator:
             if not coverage["ready"]:
                 reason += f" Rendered with unresolved visual needs -- override: {override_note.strip()}"
                 outputs["rendered_with_unresolved_visual_needs"] = [i["label"] for i in coverage["unresolved"]]
+                outputs["rendered_with_category_mismatches"] = [m["label"] for m in coverage["category_mismatches"]]
                 outputs["override_note"] = override_note.strip()
             self._rec(job.id, "scenes", "approved_scenes", actor, decision="approve",
                       reason=reason, outputs=outputs)
@@ -946,20 +953,38 @@ class Orchestrator:
         the two statuses that mean "nobody has actually decided what happens here yet". fulfilled/not_available/
         skipped are all explicit human calls (enforced by update_checklist_item), so once every item lands on
         one of those three, coverage is ready. A job that never used the visual checklist at all (has_checklist
-        False) is never gated on this -- it's an opt-in feature, not a new requirement forced onto every job."""
+        False) is never gated on this -- it's an opt-in feature, not a new requirement forced onto every job.
+
+        Resolving an item isn't automatically the end of the story, either: `update_checklist_item` will happily
+        let "fulfilled" point at ANY approved asset, with no check that it's actually case material -- that's
+        the exact silent-substitution risk #12 exists to catch, just one step later than "still unresolved".
+        So a `case`-group item marked fulfilled with an asset whose `category` isn't verified_case/
+        unverified_case_candidate (or that lost its category, or its asset entirely) is flagged as a
+        `category_mismatch` -- not blocked outright (a human may have deliberately decided a historical photo
+        is the best available stand-in), but never silent: it counts toward `ready` the same as an unresolved
+        item, so it still needs a resolve (repoint it at real case material, or an override note) before
+        rendering goes ahead."""
         counts = {s: 0 for s in ChecklistStatus.__args__}
         for item in job.visual_checklist:
             counts[item.status] = counts.get(item.status, 0) + 1
+        assets_by_id = {a.id: a for a in job.assets}
         unresolved = []
+        mismatches = []
         for item in job.visual_checklist:
-            if item.status not in ("needed", "candidates_found"):
-                continue
             linked_scene_ids = [s.id for s in job.scenes
                                  if item.linked_keyword_term and item.linked_keyword_term in (s.search_terms or [])]
-            unresolved.append({"id": item.id, "label": item.label, "status": item.status, "group": item.group,
-                                "linked_keyword_term": item.linked_keyword_term, "linked_scene_ids": linked_scene_ids})
-        return {"has_checklist": bool(job.visual_checklist), "ready": not unresolved, "counts": counts,
-                "unresolved": unresolved, "remediation_options": VISUAL_COVERAGE_REMEDIATION_OPTIONS}
+            if item.status in ("needed", "candidates_found"):
+                unresolved.append({"id": item.id, "label": item.label, "status": item.status, "group": item.group,
+                                    "linked_keyword_term": item.linked_keyword_term, "linked_scene_ids": linked_scene_ids})
+            elif item.status == "fulfilled" and item.group == "case":
+                asset = assets_by_id.get(item.asset_id)
+                category = asset.category if asset else None
+                if category not in ("verified_case", "unverified_case_candidate"):
+                    mismatches.append({"id": item.id, "label": item.label, "asset_id": item.asset_id,
+                                        "asset_category": category, "linked_scene_ids": linked_scene_ids})
+        return {"has_checklist": bool(job.visual_checklist), "ready": not unresolved and not mismatches,
+                "counts": counts, "unresolved": unresolved, "category_mismatches": mismatches,
+                "remediation_options": VISUAL_COVERAGE_REMEDIATION_OPTIONS}
 
     def check_visual_coverage(self, job_id: str) -> dict[str, Any]:
         """Read-only -- callable at any job state, not just scenes_review, so Gate 3's review page can show

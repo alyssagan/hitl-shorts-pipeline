@@ -72,6 +72,49 @@ class CheckVisualCoverageTests(Base):
         # FakeScenes gives every one of its 3 scenes the same first approved keyword as its search_terms.
         self.assertEqual(len(report["unresolved"][0]["linked_scene_ids"]), 3)
 
+    async def test_fulfilled_case_item_with_a_non_case_asset_is_a_category_mismatch(self):
+        # #12: "fulfilled" isn't automatically the end of the story -- pointing a case-group need at
+        # generic/historical/stock material is exactly the silent substitution this check exists to catch.
+        orch = self.make()
+        job = await self.to_scenes_review(orch)
+        job = await orch.add_scene_asset(job.id, job.scenes[0].id, self._asset(), reviewer="Aly")
+        aid = job.assets[0].id
+        job = await orch.set_asset_category(job.id, aid, category="illustrative_stock", reviewer="Aly")
+        job = await orch.add_checklist_item(job.id, "a photo of the victim", group="case", reviewer="Aly")
+        iid = job.visual_checklist[0].id
+        job = await orch.update_checklist_item(job.id, iid, status="fulfilled", asset_id=aid, reviewer="Aly")
+        report = orch.check_visual_coverage(job.id)
+        self.assertFalse(report["ready"])
+        self.assertEqual(report["unresolved"], [])
+        self.assertEqual(len(report["category_mismatches"]), 1)
+        self.assertEqual(report["category_mismatches"][0]["asset_category"], "illustrative_stock")
+
+    async def test_fulfilled_case_item_with_verified_case_asset_is_not_a_mismatch(self):
+        orch = self.make()
+        job = await self.to_scenes_review(orch)
+        job = await orch.add_scene_asset(job.id, job.scenes[0].id, self._asset(), reviewer="Aly")
+        aid = job.assets[0].id
+        job = await orch.set_asset_category(job.id, aid, category="verified_case", reviewer="Aly")
+        job = await orch.add_checklist_item(job.id, "a photo of the victim", group="case", reviewer="Aly")
+        iid = job.visual_checklist[0].id
+        job = await orch.update_checklist_item(job.id, iid, status="fulfilled", asset_id=aid, reviewer="Aly")
+        report = orch.check_visual_coverage(job.id)
+        self.assertTrue(report["ready"])
+        self.assertEqual(report["category_mismatches"], [])
+
+    async def test_non_case_group_items_are_never_flagged_as_mismatches(self):
+        # A historical/stock-group item fulfilled with stock footage is exactly the intended use -- not a gap.
+        orch = self.make()
+        job = await self.to_scenes_review(orch)
+        job = await orch.add_scene_asset(job.id, job.scenes[0].id, self._asset(), reviewer="Aly")
+        aid = job.assets[0].id
+        job = await orch.add_checklist_item(job.id, "generic city street", group="stock", reviewer="Aly")
+        iid = job.visual_checklist[0].id
+        job = await orch.update_checklist_item(job.id, iid, status="fulfilled", asset_id=aid, reviewer="Aly")
+        report = orch.check_visual_coverage(job.id)
+        self.assertTrue(report["ready"])
+        self.assertEqual(report["category_mismatches"], [])
+
     async def test_callable_at_any_job_state_not_just_scenes_review(self):
         orch = self.make()
         job = await self.to_scenes_review(orch)
@@ -132,6 +175,26 @@ class ApproveScenesCoverageGateTests(Base):
         job = await orch.add_checklist_item(job.id, "x", reviewer="Aly")
         with self.assertRaises(ValueError):
             await orch.approve_scenes(job.id, reviewer="Aly", override_note="   ")
+
+    async def test_refuses_to_render_past_a_category_mismatch_without_an_override(self):
+        orch = self.make()
+        job = await self.to_scenes_review(orch)
+        job = await orch.add_scene_asset(job.id, job.scenes[0].id, CheckVisualCoverageTests._asset(), reviewer="Aly")
+        aid = job.assets[0].id
+        job = await orch.set_asset_category(job.id, aid, category="reconstruction", reviewer="Aly")
+        job = await orch.add_checklist_item(job.id, "a photo of the victim", group="case", reviewer="Aly")
+        iid = job.visual_checklist[0].id
+        job = await orch.update_checklist_item(job.id, iid, status="fulfilled", asset_id=aid, reviewer="Aly")
+        with self.assertRaises(ValueError) as ctx:
+            await orch.approve_scenes(job.id, reviewer="Aly")
+        self.assertIn("not case material", str(ctx.exception))
+
+        job = await orch.approve_scenes(job.id, reviewer="Aly",
+                                         override_note="best we've got, using the reconstruction still")
+        self.assertEqual(job.state, S.RENDERING)
+        entries = orch.store.decisions(job.id).entries()
+        approved = next(e for e in entries if e["action"] == "approved_scenes")
+        self.assertEqual(approved["outputs"]["rendered_with_category_mismatches"], ["a photo of the victim"])
 
 
 if __name__ == "__main__":

@@ -49,7 +49,9 @@
   PATCH /jobs/{id}/visual-checklist/{item_id}   {status?, note?, asset_id?, reviewer}   edit an item
   POST /jobs/{id}/visual-checklist/{item_id}/remove   {reviewer}   remove an item
   GET  /jobs/{id}/visual-coverage     #12: pre-render report -- which visual_checklist items are still
-                                        unresolved (needed/candidates_found), cross-referenced with scenes via
+                                        unresolved (needed/candidates_found), which "fulfilled" case-group
+                                        items point at an asset that isn't actually categorized case material
+                                        (category_mismatches), both cross-referenced with scenes via
                                         search_terms, plus the 5 remediation options for each. Read-only, any
                                         job state -- Gate 3 calls this before "Approve and render", not just
                                         when actually approving. has_checklist=false means the job never used

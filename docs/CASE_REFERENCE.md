@@ -100,9 +100,10 @@ yet". `Orchestrator.check_visual_coverage(job_id)` is a read-only report, callab
 ```python
 {
   "has_checklist": bool,   # False if this job never used the checklist -- then nothing here gates anything
-  "ready": bool,           # True once every item is fulfilled/not_available/skipped (or there are none)
+  "ready": bool,           # True once every item is fulfilled/not_available/skipped with no mismatches
   "counts": {"needed": 0, "candidates_found": 0, "fulfilled": 0, "not_available": 0, "skipped": 0},
   "unresolved": [{"id", "label", "status", "group", "linked_keyword_term", "linked_scene_ids"}, ...],
+  "category_mismatches": [{"id", "label", "asset_id", "asset_category", "linked_scene_ids"}, ...],
   "remediation_options": [...],   # the same 5-item menu every time, see below
 }
 ```
@@ -111,17 +112,32 @@ yet". `Orchestrator.check_visual_coverage(job_id)` is a read-only report, callab
 `linked_keyword_term` in their own `search_terms`, so the report can say *which scene* a gap actually
 affects, not just that one exists somewhere.
 
+Resolving an item to `fulfilled` isn't automatically the end of the story: `update_checklist_item` requires
+an `asset_id` for `fulfilled`, but doesn't check that the asset is actually case material -- that's exactly
+the silent-substitution risk #12 exists to catch, just one step later than "still unresolved". So
+`category_mismatches` lists every `case`-group item marked `fulfilled` whose `asset_id` points at an asset
+that isn't categorized `verified_case`/`unverified_case_candidate` (or whose asset is missing/uncategorized).
+It's not a hard block on its own -- a human may have deliberately decided a historical photo is the best
+available stand-in -- but it's never silent: it counts toward `ready` exactly like an unresolved item, and
+still needs a resolve (repoint it at real case material, or an explicit override) before rendering proceeds.
+A `historical`/`stock`/`research`-group item fulfilled with non-case material is completely normal and is
+never flagged -- the check only applies where the group itself says this is supposed to be case material.
+
 `Orchestrator.approve_scenes()` calls this internally before it lets a job move to `RENDERING`. If any item
-is unresolved, it refuses (`ValueError`, a 422 over HTTP) unless the caller also passes a non-blank
-`override_note` -- in which case it proceeds, but records the override note and exactly which items were
-left unresolved in that `approved_scenes` decision log entry, so rendering past a gap is always a recorded,
-explicit call, never a silent default. `GET /jobs/{id}/visual-coverage` exposes the same report so a UI can
-show it before the reviewer even reaches "Approve and render" (docs/REVIEW_UI.md's Gate 3 section).
+is unresolved or mismatched, it refuses (`ValueError`, a 422 over HTTP) unless the caller also passes a
+non-blank `override_note` -- in which case it proceeds, but records the override note and exactly which
+items were left unresolved/mismatched in that `approved_scenes` decision log entry (`outputs.
+rendered_with_unresolved_visual_needs` and `outputs.rendered_with_category_mismatches`), so rendering past a
+gap is always a recorded, explicit call, never a silent default. `GET /jobs/{id}/visual-coverage` exposes
+the same report so a UI can show it before the reviewer even reaches "Approve and render" (docs/REVIEW_UI.md's
+Gate 3 section).
 
 The five remediation options a reviewer actually has for an unresolved item (`VISUAL_COVERAGE_REMEDIATION_OPTIONS`
 in `pipeline/core/orchestrator.py`):
 
 1. **Use a candidate already found** -- `PATCH .../visual-checklist/{item_id} {status: "fulfilled", asset_id}`.
+   For a `case`-group item, that asset should actually be `verified_case`/`unverified_case_candidate` --
+   pointing it at anything else lands in `category_mismatches` above, not treated as resolved.
 2. **Search again / add a link / add your own footage** -- Gate 2's existing sourcing tools, or Gate 3's
    drag-and-drop/upload/link-drop straight onto a scene; no new endpoint, just point back at what's already built.
 3. **Mark not available** -- `{status: "not_available", note}`, explaining why nothing could be found. Never

@@ -700,7 +700,8 @@ async function approveScenes(){
   // needs an explicit override note before it will even try (the server enforces the same thing regardless;
   // this just avoids a round trip for the obvious case and makes clear the note is what's missing).
   if (coverage && !coverage.ready && !coverageOverrideNote.trim()){
-    error = `${coverage.unresolved.length} visual checklist item(s) aren't resolved yet -- resolve them below, or explain in the override note why it's OK to render without them.`;
+    const n = coverage.unresolved.length + (coverage.category_mismatches||[]).length;
+    error = `${n} visual checklist item(s) aren't resolved yet -- resolve them below, or explain in the override note why it's OK to render without them.`;
     render();
     return;
   }
@@ -732,30 +733,40 @@ function visualCoveragePanel(){
   // ready=true (everything's resolved) both mean there's nothing to show here.
   if (!coverage || !coverage.has_checklist || coverage.ready) return null;
   const approved = job.assets.filter(a=>a.status==="approved");
+  const mismatches = coverage.category_mismatches||[];
   const sceneNumberOf = id => { const i = job.scenes.findIndex(s=>s.id===id); return i<0 ? "?" : i+1; };
+  const itemRow = (item, mismatchNote) => {
+    const form = checklistForms[item.id]||{};
+    return h("div",{style:"margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"},
+      h("div",{}, h("b",{},item.label), " ", h("span",{class:"b med"}, item.status||"fulfilled"),
+        item.linked_scene_ids.length ? h("span",{class:"meta"}, " -- referenced by scene(s) "+
+          item.linked_scene_ids.map(sceneNumberOf).join(", ")) : null),
+      mismatchNote ? h("div",{class:"meta"}, mismatchNote) : null,
+      h("div",{class:"labelform"},
+        h("select",{onchange:e=>{checklistForms[item.id]=Object.assign({},form,{assetId:e.target.value});}},
+          [["","(pick an approved asset)"], ...approved.map(a=>[a.id,(a.title||a.id).slice(0,50)])]
+            .map(([val,t])=>h("option",{value:val,selected:val===(form.assetId||item.asset_id||"")},t))),
+        h("button",{disabled:busy || !(form.assetId||item.asset_id), onclick:()=>resolveChecklistItem(item.id,"fulfilled",{asset_id: form.assetId||item.asset_id})}, mismatchNote?"Re-pick fulfilling asset":"Mark fulfilled")),
+      h("div",{class:"labelform"},
+        h("input",{type:"text",placeholder:"why isn't there one? (required)",value:form.note||"",
+          oninput:e=>{checklistForms[item.id]=Object.assign({},form,{note:e.target.value});}}),
+        h("button",{disabled:busy || !(form.note||"").trim(), onclick:()=>resolveChecklistItem(item.id,"not_available",{note:(form.note||"").trim()})}, "Mark not available"),
+        h("button",{disabled:busy || !(form.note||"").trim(), onclick:()=>resolveChecklistItem(item.id,"skipped",{note:(form.note||"").trim()})}, "Mark skipped")),
+      h("div",{class:"meta"},"Need more first? Drag a clip from the strip below onto a scene, or drop a link/file "+
+        "straight onto one -- no need to leave this page."));
+  };
   return h("div",{class:"panel", style:"border-color:var(--med)"},
-    h("b",{},`Visual coverage: ${coverage.unresolved.length} need(s) not resolved yet`),
+    h("b",{},`Visual coverage: ${coverage.unresolved.length + mismatches.length} need(s) not resolved yet`),
     h("div",{class:"sub"},"These came from the visual checklist (Gate 1's approved keywords, or added by hand). "+
       "Nothing renders past them silently -- either resolve each one below, or approve with an explicit override "+
       "note explaining why it's OK to go ahead without them."),
-    coverage.unresolved.map(item => {
-      const form = checklistForms[item.id]||{};
-      return h("div",{style:"margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"},
-        h("div",{}, h("b",{},item.label), " ", h("span",{class:"b med"}, item.status),
-          item.linked_scene_ids.length ? h("span",{class:"meta"}, " -- referenced by scene(s) "+
-            item.linked_scene_ids.map(sceneNumberOf).join(", ")) : null),
-        h("div",{class:"labelform"},
-          h("select",{onchange:e=>{checklistForms[item.id]=Object.assign({},form,{assetId:e.target.value});}},
-            [["","(pick an approved asset)"], ...approved.map(a=>[a.id,(a.title||a.id).slice(0,50)])]
-              .map(([val,t])=>h("option",{value:val,selected:val===(form.assetId||item.asset_id||"")},t))),
-          h("button",{disabled:busy || !(form.assetId||item.asset_id), onclick:()=>resolveChecklistItem(item.id,"fulfilled",{asset_id: form.assetId||item.asset_id})}, "Mark fulfilled")),
-        h("div",{class:"labelform"},
-          h("input",{type:"text",placeholder:"why isn't there one? (required)",value:form.note||"",
-            oninput:e=>{checklistForms[item.id]=Object.assign({},form,{note:e.target.value});}}),
-          h("button",{disabled:busy || !(form.note||"").trim(), onclick:()=>resolveChecklistItem(item.id,"not_available",{note:(form.note||"").trim()})}, "Mark not available"),
-          h("button",{disabled:busy || !(form.note||"").trim(), onclick:()=>resolveChecklistItem(item.id,"skipped",{note:(form.note||"").trim()})}, "Mark skipped")),
-        h("div",{class:"meta"},"Need more first? Drag a clip from the strip below onto a scene, or drop a link/file "+
-          "straight onto one -- no need to leave this page.")); }),
+    coverage.unresolved.map(item => itemRow(item, null)),
+    mismatches.length ? h("div",{style:"margin-top:10px;padding-top:10px;border-top:2px solid var(--hi)"},
+      h("div",{class:"meta"}, h("b",{},"Marked fulfilled, but not with case material")),
+      h("div",{class:"sub"},"These are \"fulfilled\" on the checklist, but the asset attached to them isn't categorized "+
+        "verified_case or unverified_case_candidate -- exactly the silent substitution this check exists to catch. "+
+        "Re-pick a real case asset, or explicitly accept the stand-in with not available / skipped.")) : null,
+    mismatches.map(item => itemRow(item, `Currently fulfilled with a ${item.asset_category||"uncategorized"} asset, not case material.`)),
     h("div",{style:"margin-top:12px;padding-top:12px;border-top:1px solid var(--line)"},
       h("div",{class:"meta"},"Or approve anyway, with a reason (recorded in the decision log alongside exactly which items were left unresolved):"),
       h("textarea",{class:"note",placeholder:"why is it OK to render without these? (required to proceed)",

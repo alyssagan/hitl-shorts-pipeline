@@ -867,6 +867,11 @@ Stage 2 (Gate 2 UI, manual-URL-import parity, local-clip inclusion, pre-render c
   a fixed 5-option remediation menu (fulfill with a specific asset / search or add more material at Gate 2
   or 3 / mark not available with a reason / mark skipped with a reason / approve anyway with a written
   override), surfaced in Gate 3's new "Visual coverage" panel with inline mark-fulfilled/not-available/
-  skipped actions and an override-note box feeding "Approve and render". 19 new tests across
-  `tests/test_visual_coverage.py`, `tests/test_case_reference.py` and `tests/test_api_sources.py`, full
-  suite at 436, all passing.
+  skipped actions and an override-note box feeding "Approve and render". Coverage also catches one step
+  further than "unresolved": a `case`-group item already marked `fulfilled` whose asset isn't actually
+  categorized `verified_case`/`unverified_case_candidate` is flagged as a `category_mismatch` (not blocked
+  outright -- a human may deliberately want a historical stand-in -- but never silent, and it still counts
+  toward `ready`/gates `approve_scenes` the same as an unresolved item) -- otherwise "fulfilled" could point
+  at any approved asset with nothing checking it was actually case material, which was exactly the gap #12
+  exists to close. 23 new tests across `tests/test_visual_coverage.py`, `tests/test_case_reference.py` and
+  `tests/test_api_sources.py`, full suite at 440, all passing.
