@@ -149,6 +149,28 @@ wasn't Gemini that answered. The `llm_call` entry (see "Tokens / cost" above) is
 either. `scripts/make_keywords.py`, which has no decision log of its own, prints the same information and
 records it in its `.meta.json` sidecar (below) instead.
 
+### "How do I know when it'll restart?"
+A 429 means "busy," but not every provider says *how long*. When one does -- Groq sends a real `Retry-After`
+header on every 429 it returns, and some Google endpoints nest a `retryDelay` in the error body -- that's what
+actually gets waited on (capped at 120s so a huge ask can't hang a run), and the log says so plainly:
+
+```
+WARN  llm  script writer: model busy (429); server asked to wait 9s; retry 1/4
+```
+
+Gemini's OpenAI-compatible endpoint (`v1beta/openai/...`, what this pipeline actually calls) is the common case
+that sends **neither** -- when that happens, the log says so honestly instead of inventing a countdown:
+
+```
+WARN  llm  script writer: model busy (429, no wait-time hint from the server); retry 1/4 in 4s
+```
+
+When neither the pipeline nor `make_keywords.py` gets a real number and gives up entirely, the final message
+explains the two different things a 429 with no explanation could mean: Gemini's per-minute limit (a rolling
+window -- just try again shortly) versus its per-day limit (resets at midnight Pacific Time), and points at
+[aistudio.google.com/rate-limit](https://aistudio.google.com/rate-limit) to see which one actually applies to
+your key right now, since that's not something this pipeline can see from the outside.
+
 ## Where a keywords file came from
 `scripts/make_keywords.py` writes `<file>.meta.json` next to every keywords file it generates -- which
 provider/model answered, tokens used, and when -- since that script runs before any job exists and has nowhere

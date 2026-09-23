@@ -18,6 +18,7 @@ without every call site having to know about it. See docs/LOGGING.md "Tokens / c
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import httpx
@@ -27,6 +28,33 @@ from ..sources.base import DEFAULT_USER_AGENT
 
 RETRY_STATUS = (429, 500, 502, 503, 504)
 WAITS = (4.0, 10.0, 25.0, 45.0)
+# Never sleep longer than this even if a provider asks for more -- a huge Retry-After shouldn't turn one
+# retry into an effectively-hung stage. If a provider's real ask is bigger than this, that's surfaced in the
+# log line (the true number is logged), just not slept for in full.
+MAX_SERVER_WAIT = 120.0
+
+
+def _server_retry_hint(resp: httpx.Response) -> float | None:
+    """The provider's OWN suggested wait, in seconds, if it gave one -- a standard `Retry-After` header
+    (Groq sends this on every 429: docs/LOGGING.md "LLM fallback provider"), or Google's gRPC-style `retryDelay`
+    nested in `error.details[]` on some endpoints. Returns None when neither is present, which is the common
+    case for Gemini's OpenAI-compatible endpoint specifically -- it doesn't reliably send either, so callers
+    must not assume a hint exists and must say so plainly rather than inventing a countdown."""
+    ra = resp.headers.get("retry-after")
+    if ra:
+        try:
+            return max(0.0, float(ra))
+        except ValueError:
+            pass  # an HTTP-date Retry-After, not a plain number of seconds -- not parsed, treated as no hint
+    try:
+        data = resp.json()
+        for d in (data.get("error", {}).get("details") or []):
+            rd = d.get("retryDelay")
+            if isinstance(rd, str) and rd.endswith("s"):
+                return max(0.0, float(rd[:-1]))
+    except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
+        pass
+    return None
 
 
 def _with_user_agent(headers: dict[str, str] | None) -> dict[str, str]:
@@ -57,11 +85,14 @@ def _usage_block(resp: httpx.Response) -> dict[str, Any] | None:
 
 async def post_chat(client: httpx.AsyncClient, url: str, headers: dict[str, str], payload: dict[str, Any], *,
                     what: str = "LLM", waits: tuple[float, ...] | None = None,
-                    fallback: dict[str, Any] | None = None) -> httpx.Response:
+                    fallback: dict[str, Any] | None = None, sleep=asyncio.sleep) -> httpx.Response:
     """`fallback`, when given, is {"provider": str, "base_url": str, "model": str, "api_key": str} -- see
     pipeline/stages/registry.py::build_llm_fallback(). Passing None (the default) reproduces the exact
     behavior this function had before a fallback provider existed: no second attempt, and a network error that
-    survives every retry is still raised rather than returned."""
+    survives every retry is still raised rather than returned.
+
+    `sleep`, injectable for tests (default `asyncio.sleep`): a provider's own Retry-After/retryDelay hint
+    (_server_retry_hint()) can ask for up to MAX_SERVER_WAIT seconds, which a test must not actually block on."""
     waits = WAITS if waits is None else waits
     headers = _with_user_agent(headers)
     resp: httpx.Response | None = None
@@ -75,12 +106,21 @@ async def post_chat(client: httpx.AsyncClient, url: str, headers: dict[str, str]
             if attempt >= len(waits):
                 break
             joblog.warn("llm", f"{what}: network error ({type(exc).__name__}); retry {attempt + 1}/{len(waits)} in {waits[attempt]:.0f}s")
-            await asyncio.sleep(waits[attempt])
+            await sleep(waits[attempt])
             continue
         joblog.debug("llm", f"{what}: {resp.status_code}", model=payload.get("model"))
         if resp.status_code in RETRY_STATUS and attempt < len(waits):
-            joblog.warn("llm", f"{what}: model busy ({resp.status_code}); retry {attempt + 1}/{len(waits)} in {waits[attempt]:.0f}s")
-            await asyncio.sleep(waits[attempt])
+            hint = _server_retry_hint(resp)
+            if hint is not None:
+                wait = min(hint, MAX_SERVER_WAIT)
+                capped = f" (capped at {MAX_SERVER_WAIT:.0f}s)" if hint > MAX_SERVER_WAIT else ""
+                joblog.warn("llm", f"{what}: model busy ({resp.status_code}); server asked to wait {hint:.0f}s{capped}; "
+                                   f"retry {attempt + 1}/{len(waits)}")
+            else:
+                wait = waits[attempt]
+                joblog.warn("llm", f"{what}: model busy ({resp.status_code}, no wait-time hint from the server); "
+                                   f"retry {attempt + 1}/{len(waits)} in {wait:.0f}s")
+            await sleep(wait)
             continue
         break   # a 200, a non-retryable error status, or retries exhausted -- nothing more to do against the primary
 
@@ -110,7 +150,10 @@ async def post_chat(client: httpx.AsyncClient, url: str, headers: dict[str, str]
                 joblog.info("llm", f"{what}: backup provider {provider} ({fallback['model']}) answered")
                 usage.record(f"{what} (fallback: {provider})", fallback["model"], _usage_block(fb_resp))
                 return fb_resp
-            joblog.warn("llm", f"{what}: backup provider {provider} also failed ({fb_resp.status_code}); giving up")
+            fb_hint = _server_retry_hint(fb_resp)
+            hint_note = f"; server asked to wait {fb_hint:.0f}s (not retried again -- only one backup attempt per call)" \
+                if fb_hint is not None else "; no wait-time hint from the server"
+            joblog.warn("llm", f"{what}: backup provider {provider} also failed ({fb_resp.status_code}){hint_note}; giving up")
             return fb_resp
 
     if last_exc is not None:

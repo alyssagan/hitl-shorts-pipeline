@@ -1,0 +1,39 @@
+# Keywords for: Corazon Amurao the ninth nurse Richard Speck murders 1966 Chicago survivor  (made by scripts/make_keywords.py with an LLM; edit freely)
+# One per line. # lines are ignored. Use with: poc.py --keywords manual --keywords-file <this file>
+
+# places
+Chicago West Loop 1966 streets
+Lakeview Avenue Chicago 1966
+Chicago police headquarters 1966
+John Hancock Center Chicago 1966
+Chicago Cook County Courthouse 1966
+
+# documents and press
+Chicago Tribune front page 1966
+Chicago Sun Times crime 1966
+1966 Chicago police blotter scan
+Illinois court docket 1966 Speck
+
+# investigation and justice
+Richard Speck trial courtroom 1967
+Chicago police squad car 1966
+Illinois State Police badge 1966
+1960s forensic lab Chicago interior
+
+# era and daily life
+1960s Chicago streetcar interior
+Chicago diner counter 1966
+1960s Chicago women's fashion
+Chicago residential apartment building 1966
+
+# atmosphere broll
+foggy Chicago river 1960s
+rainy Chicago night street 1966
+Chicago skyline dusk 1966
+neon signage Chicago 1960s
+
+# people and context
+Chicago police chief 1966 portrait
+Governor Otto Kerner Illinois 1966
+Richard Speck mugshot 1966
+1960s Chicago nurses uniform

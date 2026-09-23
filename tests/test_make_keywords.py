@@ -191,6 +191,51 @@ class Retry(unittest.TestCase):
         self.assertIn("answered", log_text)
         self.assertIn("jack the ripper", log_text)
 
+    def test_retry_after_header_drives_the_actual_wait(self):
+        # Prompted directly: "how do I know when it'll restart" -- when a provider actually says how long
+        # (Groq sends Retry-After on every 429), use that real number instead of the fixed guess-schedule.
+        import io, urllib.error
+        def script(url, n):
+            if n == 1:
+                raise urllib.error.HTTPError("u", 429, "busy", {"Retry-After": "9"}, io.BytesIO(b"busy"))
+            return self._ok("ok")
+        self._fake_urlopen(script)
+        slept = []
+        mk.call_llm("http://x", "m", "k", "p", waits=(4, 10, 25, 45), sleep=slept.append)
+        self.assertEqual(slept, [9.0])            # the server's real number, not RETRY_WAITS[0] (4)
+
+    def test_no_hint_falls_back_to_the_fixed_schedule_and_says_so(self):
+        # Gemini's OpenAI-compatible endpoint is the common case that sends no hint at all.
+        import io, urllib.error
+        def script(url, n):
+            if n == 1:
+                raise urllib.error.HTTPError("u", 429, "busy", {}, io.BytesIO(b'{"error":{"message":"busy"}}'))
+            return self._ok("ok")
+        self._fake_urlopen(script)
+        slept = []
+        mk.call_llm("http://x", "m", "k", "p", waits=(4, 10, 25, 45), sleep=slept.append)
+        self.assertEqual(slept, [4])              # falls back to RETRY_WAITS[0]
+
+    def test_final_message_reports_the_real_wait_when_the_server_gave_one(self):
+        import io, urllib.error
+        def script(url, n):
+            raise urllib.error.HTTPError("u", 429, "busy", {"Retry-After": "17"}, io.BytesIO(b"busy"))
+        self._fake_urlopen(script)
+        with self.assertRaises(SystemExit) as ctx:
+            mk.call_llm("http://primary", "m", "k", "p", waits=(), fallback=None)
+        self.assertIn("17s", str(ctx.exception))
+
+    def test_final_message_explains_rpm_vs_rpd_when_the_server_gave_no_hint(self):
+        import io, urllib.error
+        def script(url, n):
+            raise urllib.error.HTTPError("u", 429, "busy", {}, io.BytesIO(b"busy"))
+        self._fake_urlopen(script)
+        with self.assertRaises(SystemExit) as ctx:
+            mk.call_llm("http://primary", "m", "k", "p", waits=(), fallback=None)
+        msg = str(ctx.exception)
+        self.assertIn("didn't say how long to wait", msg)
+        self.assertIn("midnight Pacific", msg)
+
     def test_request_carries_a_real_user_agent(self):
         # Groq/Cloudflare rejected a real request with a bare "Python-urllib/..." User-Agent as a bot
         # signature (403, unrelated to the key or rate limit) -- guards against that regressing.

@@ -135,6 +135,32 @@ moment the window closed.
   line with real detail; a successful call writes an INFO line; existing tests isolate `mk.LOG_PATH` to a temp
   file via a new `setUp`, so the test suite itself never writes junk into the real log). Full suite: 243 passing.
 
+**Third follow-up, same day**: asked directly -- "how do I know when it'll restart" -- after a 429. Checked
+rather than guessed: Groq sends a real `Retry-After` header on every 429 it returns (its docs confirm it), but
+Gemini's OpenAI-compatible endpoint specifically (`v1beta/openai/...`, what this pipeline actually calls) does
+**not** reliably send either a `Retry-After` header or a `retryDelay` body field -- confirmed against real
+reported response bodies, not assumed. So this had to be built to use whatever a provider actually gives, and
+say plainly when nothing was given, rather than inventing a countdown either way.
+- **`pipeline/stages/llm_http.py::_server_retry_hint()`** (new) and its duplicate in `scripts/make_keywords.py`
+  (same standard-library-only reasoning as `USER_AGENT`): reads a `Retry-After` header first, then falls back
+  to a Google-style `retryDelay` nested in `error.details[]`. When either is present, THAT real number now
+  drives the actual wait (capped at `MAX_SERVER_WAIT` = 120s so a huge ask can't hang a run), and the retry log
+  line says so (`"server asked to wait 9s"`) instead of silently using the fixed backoff schedule. When neither
+  is present -- the common case for Gemini -- the log says so explicitly (`"no wait-time hint from the
+  server"`) and falls back to the existing fixed schedule, never fabricating a number.
+- `post_chat()` gained an injectable `sleep` parameter (default `asyncio.sleep`), the same pattern
+  `make_keywords.py`'s `call_llm()` already used, so tests can assert on the real wait value without a test
+  actually blocking for it.
+- The final give-up message (both scripts) now explains what a 429 with no hint could mean rather than leaving
+  it a mystery: Gemini's per-minute limit is a rolling window (try again shortly), its per-day limit resets at
+  midnight Pacific Time, and [aistudio.google.com/rate-limit](https://aistudio.google.com/rate-limit) shows
+  which one actually applies to a given key -- something this pipeline has no way to see from the outside.
+- 5 new tests in `tests/test_llm_fallback.py` (header-driven wait, body-field-driven wait, honest "no hint"
+  reporting, capping an absurd value while still logging the real number, the backup provider's own hint on
+  final failure) and 5 more in `tests/test_make_keywords.py` (the same shape, plus the final-message wording).
+  One existing test in `tests/test_script_writer.py` updated for the new (more informative) log message
+  wording. See docs/LOGGING.md "How do I know when it'll restart?" for the full read. Full suite: 252 passing.
+
 
 ## Done: drag-and-drop scene reorder + private per-scene notes (2026-09-23)
 Follow-up to the clip-matching/looping fix above. That same feedback message also raised two more things --

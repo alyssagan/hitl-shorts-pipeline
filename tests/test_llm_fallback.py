@@ -162,5 +162,74 @@ class PostChatFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen["ua"], "custom/1.0")
 
 
+class RetryHintTests(unittest.IsolatedAsyncioTestCase):
+    """Prompted directly: "how do I know when it'll restart" -- a provider's own Retry-After header or
+    retryDelay body field (when it sends one) now drives the actual wait and gets surfaced in the log, instead
+    of the pipeline silently guessing on its own fixed backoff schedule every time."""
+
+    async def _run(self, handler, waits=(0.0,), fallback=None):
+        slept = []
+        async def fake_sleep(s):
+            slept.append(s)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            from pipeline.core import joblog
+            import tempfile
+            from pathlib import Path
+            with tempfile.TemporaryDirectory() as d:
+                tok = joblog.bind(Path(d))
+                try:
+                    resp = await post_chat(client, "http://primary.example/chat/completions", {},
+                                           {"model": "primary-model", "messages": []}, what="x", waits=waits,
+                                           fallback=fallback, sleep=fake_sleep)
+                finally:
+                    joblog.unbind(tok)
+                lines, _ = joblog.read(Path(d), min_level="WARN")
+        return resp, slept, lines
+
+    async def test_retry_after_header_drives_the_actual_wait(self):
+        calls = {"n": 0}
+        def h(req: httpx.Request):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(429, headers={"retry-after": "7"}, json={"error": "busy"})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        resp, slept, lines = await self._run(h)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(slept, [7.0])                      # the server's real number, not the fixed schedule
+        self.assertTrue(any("server asked to wait 7s" in ln for ln in lines))
+
+    async def test_retry_delay_body_field_is_read_when_no_header(self):
+        def h(req: httpx.Request):
+            return httpx.Response(429, json={"error": {"details": [{"retryDelay": "12s"}]}})
+        resp, slept, lines = await self._run(h, waits=(0.0,))
+        self.assertEqual((resp.status_code, slept), (429, [12.0]))
+        self.assertTrue(any("server asked to wait 12s" in ln for ln in lines))
+
+    async def test_no_hint_present_is_reported_honestly_not_guessed(self):
+        # Gemini's OpenAI-compatible endpoint sends neither -- must never fabricate a number.
+        def h(req: httpx.Request):
+            return httpx.Response(429, json={"error": {"message": "Resource has been exhausted (e.g. check quota)."}})
+        resp, slept, lines = await self._run(h, waits=(0.0,))
+        self.assertTrue(any("no wait-time hint from the server" in ln for ln in lines))
+        self.assertFalse(any("server asked to wait" in ln for ln in lines))
+
+    async def test_absurd_retry_after_is_capped_but_the_real_number_is_still_logged(self):
+        def h(req: httpx.Request):
+            return httpx.Response(429, headers={"retry-after": "99999"}, json={"error": "busy"})
+        resp, slept, lines = await self._run(h, waits=(0.0,))
+        self.assertEqual(slept, [120.0])                     # MAX_SERVER_WAIT, not the full 99999s
+        self.assertTrue(any("server asked to wait 99999s" in ln and "capped at 120s" in ln for ln in lines))
+
+    async def test_backup_providers_own_retry_after_is_surfaced_on_final_failure(self):
+        def h(req: httpx.Request):
+            if req.url.host == "primary.example":
+                return httpx.Response(503, json={"error": "down"})
+            return httpx.Response(429, headers={"retry-after": "30"}, json={"error": "busy"})
+        fallback = {"provider": "groq", "base_url": "http://backup.example", "model": "backup-model", "api_key": "bk"}
+        resp, slept, lines = await self._run(h, waits=(), fallback=fallback)
+        self.assertEqual(resp.status_code, 429)
+        self.assertTrue(any("server asked to wait 30s" in ln and "not retried again" in ln for ln in lines))
+
+
 if __name__ == "__main__":
     unittest.main()

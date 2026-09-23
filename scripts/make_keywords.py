@@ -161,7 +161,34 @@ def render(topic: str, groups: dict[str, list[str]]) -> str:
     return "\n".join(lines)
 
 
-RETRY_WAITS = (4, 10, 25, 45)          # seconds; Google's free tier says 503/429 "usually temporary"
+RETRY_WAITS = (4, 10, 25, 45)          # seconds; Google's free tier says 503/429 "usually temporary" -- used
+                                        # only when a provider doesn't say how long itself (see below)
+# Never sleep longer than this even if a provider asks for more (same rule and reasoning as
+# pipeline/stages/llm_http.py::MAX_SERVER_WAIT).
+MAX_SERVER_WAIT = 120.0
+
+
+def _server_retry_hint(headers, body_text: str) -> float | None:
+    """Same idea as pipeline/stages/llm_http.py::_server_retry_hint() (duplicated, not imported, for the same
+    standard-library-only reason as USER_AGENT above): the provider's OWN suggested wait, in seconds, read
+    from a `Retry-After` header (Groq sends one on every 429) or a Google-style `retryDelay` in the error
+    body. Returns None when neither is present -- the common case for Gemini's OpenAI-compatible endpoint,
+    which doesn't reliably send either. Callers must not invent a number when this returns None."""
+    ra = headers.get("Retry-After") if headers else None
+    if ra:
+        try:
+            return max(0.0, float(ra))
+        except (TypeError, ValueError):
+            pass  # an HTTP-date Retry-After, not a plain number of seconds -- treated as no hint
+    try:
+        data = json.loads(body_text)
+        for d in (data.get("error", {}).get("details") or []):
+            rd = d.get("retryDelay")
+            if isinstance(rd, str) and rd.endswith("s"):
+                return max(0.0, float(rd[:-1]))
+    except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
+        pass
+    return None
 
 
 def _post_chat(base: str, model: str, key: str, prompt: str) -> tuple[str, dict]:
@@ -191,7 +218,7 @@ def call_llm(base: str, model: str, key: str, prompt: str, waits: tuple = RETRY_
     config/pipeline.toml), is tried once after the primary model is still failing after its own retries --
     same one-more-try rule as the pipeline's own post_chat() (pipeline/stages/llm_http.py)."""
     log_line("INFO", f"asking {model} for keywords", topic=topic, base_url=base)
-    last_code, last_detail, last_reason, last_who = None, "", "", model
+    last_code, last_detail, last_reason, last_who, last_hint = None, "", "", model, None
     for attempt in range(len(waits) + 1):
         try:
             text, usage = _post_chat(base, model, key, prompt)
@@ -199,15 +226,22 @@ def call_llm(base: str, model: str, key: str, prompt: str, waits: tuple = RETRY_
             return text, usage, "primary", model, base
         except urllib.error.HTTPError as e:
             last_code, last_detail, last_who = e.code, e.read().decode("utf-8", "replace")[:300], model
+            last_hint = _server_retry_hint(e.headers, last_detail)
             if e.code in (429, 500, 502, 503, 504) and attempt < len(waits):
-                msg = f"The free tier is busy ({e.code}). Retrying in {waits[attempt]}s... ({attempt + 1}/{len(waits)})"
+                if last_hint is not None:
+                    wait = min(last_hint, MAX_SERVER_WAIT)
+                    capped = f" (capped at {MAX_SERVER_WAIT:.0f}s)" if last_hint > MAX_SERVER_WAIT else ""
+                    msg = f"The free tier is busy ({e.code}). Server asked to wait {last_hint:.0f}s{capped}. Retrying... ({attempt + 1}/{len(waits)})"
+                else:
+                    wait = waits[attempt]
+                    msg = f"The free tier is busy ({e.code}, no wait-time hint from the server). Retrying in {wait}s... ({attempt + 1}/{len(waits)})"
                 print(f"  {msg}")
                 log_line("WARN", msg, topic=topic, model=model)
-                sleep(waits[attempt])
+                sleep(wait)
                 continue
             break     # non-retryable, or retries exhausted -- try the backup provider (if any), below
         except urllib.error.URLError as e:
-            last_reason, last_who = str(e.reason), model
+            last_reason, last_who, last_hint = str(e.reason), model, None
             if attempt < len(waits):
                 sleep(waits[attempt])
                 continue
@@ -231,19 +265,25 @@ def call_llm(base: str, model: str, key: str, prompt: str, waits: tuple = RETRY_
             # not what happened first. (Previously this was a real bug: a Gemini 429 followed by a Groq 404
             # reported "Still busy (429)" at exit, hiding the fact Groq had actually rejected the model name.)
             last_code, last_detail, last_who = e.code, e.read().decode("utf-8", "replace")[:300], f"backup provider {provider} ({fb_model})"
-            msg = f"Backup provider {provider} also failed ({e.code}): {last_detail}"
+            last_hint = _server_retry_hint(e.headers, last_detail)
+            hint_note = f" Server asked to wait {last_hint:.0f}s (not retried again -- only one backup attempt per call)." \
+                if last_hint is not None else ""
+            msg = f"Backup provider {provider} also failed ({e.code}): {last_detail}{hint_note}"
             print(f"  {msg}")
             log_line("WARN", msg, topic=topic)
         except urllib.error.URLError as e:
-            last_reason, last_who = str(e.reason), f"backup provider {provider} ({fb_model})"
+            last_reason, last_who, last_hint = str(e.reason), f"backup provider {provider} ({fb_model})", None
             msg = f"Backup provider {provider} also unreachable ({e.reason})."
             print(f"  {msg}")
             log_line("WARN", msg, topic=topic)
 
     if last_code in (429, 503):
-        error_msg = (f"Still busy after {len(waits)} retries ({last_code}, from {last_who}). This is the free tier being "
-                     "overloaded, not your setup. Try again in a few minutes, add a backup provider ([llm_fallback] in "
-                     "config/pipeline.toml -- see docs/LOGGING.md 'LLM fallback provider'), or try another model with --model.")
+        when = f" It said to try again in {last_hint:.0f}s." if last_hint is not None else \
+               " It didn't say how long to wait -- Gemini's free tier RPM limit is a rolling window (try again shortly), " \
+               "while its daily limit resets at midnight Pacific Time; check aistudio.google.com/rate-limit for which one you hit."
+        error_msg = (f"Still busy after {len(waits)} retries ({last_code}, from {last_who}).{when} This is the free tier being "
+                     "overloaded, not your setup. Add a backup provider ([llm_fallback] in config/pipeline.toml -- see "
+                     "docs/LOGGING.md 'LLM fallback provider'), or try another model with --model.")
     elif last_code in (401, 403):
         error_msg = f"The API key was refused ({last_code}, from {last_who}). Check your .env key for that provider."
     elif last_code == 404:

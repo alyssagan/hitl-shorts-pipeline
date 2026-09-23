@@ -1,0 +1,17 @@
+{
+  "topic": "Corazon Amurao the ninth nurse Richard Speck murders 1966 Chicago survivor",
+  "generated_at": "2026-09-23T03:31:36Z",
+  "generator": "scripts/make_keywords.py",
+  "provider": "groq",
+  "base_url": "https://api.groq.com/openai/v1",
+  "model": "openai/gpt-oss-120b",
+  "era": "1966 Chicago",
+  "requested_count": 25,
+  "kept_count": 25,
+  "dropped_count": 0,
+  "usage": {
+    "prompt_tokens": 497,
+    "completion_tokens": 1693,
+    "total_tokens": 2190
+  }
+}

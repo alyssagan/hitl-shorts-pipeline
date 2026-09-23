@@ -125,4 +125,6 @@ class LlmRetryTests(unittest.TestCase):
             lines, _ = joblog.read(Path(d), min_level="WARN")
         self.assertEqual((r.status_code, calls["n"]), (200, 3))
         self.assertEqual(len(lines), 2)
-        self.assertIn("model busy (503)", lines[0])
+        # httpx.Response(503, json=...) carries no Retry-After/retryDelay -- honestly reported as no hint,
+        # not a fabricated wait time (pipeline/stages/llm_http.py::_server_retry_hint()).
+        self.assertIn("model busy (503, no wait-time hint from the server)", lines[0])
