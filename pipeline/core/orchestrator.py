@@ -28,7 +28,7 @@ from . import usage
 from .decisions import Actor, actor_from, ai, human, machine
 from .models import Asset, Job, JobState, Keyword, ProviderChoice, RUNNING_STATES, Scene, _now
 from .store import JobStore
-from ..stages.base import StageContext
+from ..stages.base import RenderResult, StageContext
 from ..stages.registry import Registry
 from ..stages.sourcing import write_credits, write_manifests
 from ..vetting.rules import RELEVANCE_MIN, RULES, STOPWORDS, VERSION as VETTING_VERSION, asset_text, clean_term, vet_all
@@ -660,11 +660,12 @@ class Orchestrator:
                       subject={"scene_id": s.id, "index": s.index, "narration": s.narration[:120]},
                       outputs={"clip": s.clip_path, "asset_id": s.asset_id})
 
-    def _apply_render(self, job: Job, stage: Any, out: str) -> None:
-        job.output_path = out
-        digest = _sha256(out) if Path(out).exists() else ""
+    def _apply_render(self, job: Job, stage: Any, out: RenderResult) -> None:
+        job.output_path = out.output_path
+        job.social_metadata = out.social_metadata
+        digest = _sha256(out.output_path) if Path(out.output_path).exists() else ""
         self._rec(job.id, "render", "render_completed", actor_from(stage, machine("renderer")), decision="complete",
-                  outputs={"file": out, "sha256": digest})
+                  outputs={"file": out.output_path, "sha256": digest, "social_platforms": sorted(out.social_metadata)})
 
     async def _commit(self, job_id: str, expected: JobState, event: str, apply: Callable[[Job], None]) -> Job:
         async with self._locks[job_id]:

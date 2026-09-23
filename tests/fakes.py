@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 
 from pipeline.core.models import Job, Keyword, Scene
-from pipeline.stages.base import SceneResult, StageContext
+from pipeline.stages.base import RenderResult, SceneResult, StageContext
 from pipeline.stages.registry import Registry
 
 
@@ -35,7 +35,7 @@ class FakeRender:
         self.orders.append([s.narration for s in job.scenes])
         out = ctx.assets_dir / "final.mp4"
         out.write_bytes(b"fake-mp4")
-        return str(out)
+        return RenderResult(output_path=str(out))
 
 
 class Boom:

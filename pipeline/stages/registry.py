@@ -216,5 +216,26 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
         clip_root_host=os.getenv("CLIPS_DIR_HOST", lib_cfg.get("clips_dir_host", "")),
         clip_root_mpt=os.getenv("CLIPS_DIR_IN_MPT", lib_cfg.get("clips_dir_in_mpt", "")),
         path_map=parse_path_map(os.getenv("PATH_MAP", "")),
+        # Retention styling -- see config/pipeline.toml [mpt] for what each one does and why these
+        # particular defaults. Left at "" / 0 here, the class itself never overrides MoneyPrinterTurbo's
+        # own default; every value below comes from pipeline.toml so it's one place to tune.
+        subtitle_display_mode=mpt_cfg.get("subtitle_display_mode", ""),
+        subtitle_animation=mpt_cfg.get("subtitle_animation", ""),
+        font_name=mpt_cfg.get("font_name", ""),
+        font_size=int(mpt_cfg.get("font_size", 0)),
+        text_fore_color=mpt_cfg.get("text_fore_color", ""),
+        stroke_color=mpt_cfg.get("stroke_color", ""),
+        stroke_width=float(mpt_cfg.get("stroke_width", 0.0)),
+        subtitle_position=mpt_cfg.get("subtitle_position", ""),
+        subtitle_background_enabled=mpt_cfg.get("subtitle_background_enabled"),
+        subtitle_background_color=mpt_cfg.get("subtitle_background_color", ""),
+        video_transition_mode=mpt_cfg.get("video_transition_mode", ""),
+        video_fit_mode=mpt_cfg.get("video_fit_mode", ""),
+        voice_volume=float(mpt_cfg.get("voice_volume", 0.0)),
+        voice_rate=float(mpt_cfg.get("voice_rate", 0.0)),
+        bgm_type=mpt_cfg.get("bgm_type", ""),
+        bgm_volume=float(mpt_cfg.get("bgm_volume", 0.0)),
+        custom_bgm_file=mpt_cfg.get("custom_bgm_file", ""),
+        social_platforms=tuple(mpt_cfg.get("social_platforms", [])),
     ))
     return reg

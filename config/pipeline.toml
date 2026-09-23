@@ -131,10 +131,45 @@ requests_per_day = 1500
 [mpt]
 base_url = "http://localhost:8080"     # docker-compose overrides via MPT_BASE_URL
 aspect = "9:16"
-clip_seconds = 5
+# How long MoneyPrinterTurbo shows a single clip/image before cutting to the next (its own
+# video_clip_duration). Was 5; 3 is MoneyPrinterTurbo's own WebUI default and cuts noticeably faster,
+# which matters for short-form retention -- a video that lingers on one still is an easy scroll-past.
+clip_seconds = 3
 paragraphs = 3
 language = ""
 # Free Edge voice (needs internet). Other examples: "en-US-GuyNeural-Male", or "elevenlabs:<voice_id>:<name>"
 voice_name = "en-US-AriaNeural-Female"
 # Per-scene audio previews at the scene-review gate (slower; one TTS call per scene).
 generate_scene_audio = false
+
+# --- Retention styling, forwarded to MoneyPrinterTurbo's /api/v1/videos -----------------------------
+# Every field below used to go unsent, so every render used MoneyPrinterTurbo's own bare defaults --
+# unstyled "sentence" captions, no animation, no music. Full option reference:
+# vendor/MoneyPrinterTurbo/config.example.toml, the commented-out [ui] block. Leave any field "" (or
+# 0 / commented out) to fall back to MoneyPrinterTurbo's own default for that one field.
+subtitle_display_mode = "word_by_word"   # "sentence" or "word_by_word" -- word-by-word reveal reads as
+                                          # punchier and more native to TikTok/Reels than a full caption
+                                          # appearing all at once.
+subtitle_animation = "pop_spring"        # "none" or "pop_spring"
+font_name = ""              # "" = MoneyPrinterTurbo's own default font
+font_size = 0                # 0 = MoneyPrinterTurbo's own default (60)
+text_fore_color = ""
+stroke_color = ""
+stroke_width = 0.0
+subtitle_position = ""       # "top" | "center" | "bottom" | "two_thirds_bottom" | "custom"
+subtitle_background_enabled = false
+subtitle_background_color = ""
+# "" = MoneyPrinterTurbo's own default (no transition). Try "Shuffle" or "FadeIn" for more movement
+# between clips -- left off by default since we haven't watched a rendered example with one yet.
+video_transition_mode = ""
+video_fit_mode = ""          # "" = MoneyPrinterTurbo's own default ("cover": fills the frame, crops overflow)
+voice_volume = 0.0           # 0 = MoneyPrinterTurbo's own default (1.0)
+voice_rate = 0.0             # 0 = MoneyPrinterTurbo's own default (1.0)
+bgm_type = "random"          # "random" (MoneyPrinterTurbo's built-in library) | "" (off) | set custom_bgm_file
+bgm_volume = 0.12            # kept low and under the narration; MoneyPrinterTurbo's own default is 0.2
+custom_bgm_file = ""
+# Platform-ready title/caption/hashtags, generated from the final script after every render (MoneyPrinterTurbo's
+# own /api/v1/social-metadata) and written to SOCIAL_POST.md in the project folder, paste-ready. One extra LLM
+# call per platform per render. Options: "tiktok", "youtube_shorts", "instagram_reels", "facebook_reels".
+# Empty list disables this.
+social_platforms = ["instagram_reels", "tiktok", "youtube_shorts"]

@@ -7,6 +7,12 @@ Endpoints used (verified against MoneyPrinterTurbo main):
   POST /api/v1/videos    -> {"data": {"task_id": str}}
   GET  /api/v1/tasks/{id}-> {"data": {"state": 1|-1|4, "videos": [...], ...}}
   GET  /tasks/{id}/audio.mp3   (static file of a finished audio task)
+  POST /api/v1/social-metadata -> {"data": {"title": str, "caption": str, "hashtags": [str, ...]}}
+    Platform-ready title/caption/hashtags for the finished video, written by MoneyPrinterTurbo's own
+    LLM prompt (a "short-video social media copywriter" role -- catchy title, caption ending in a call
+    to action, platform-sized hashtag count). Supports "tiktok", "youtube_shorts", "instagram_reels",
+    "facebook_reels" (vendor/MoneyPrinterTurbo app/services/llm.py::SOCIAL_PLATFORMS). Degrades to a
+    heuristic fallback server-side rather than erroring outright if its own LLM call fails.
 Task state codes: 1 = complete, -1 = failed, 4 = processing.
 """
 from __future__ import annotations
@@ -82,6 +88,14 @@ class MptClient:
             "video_script": script, "voice_name": voice_name, "video_language": language,
         })
         return data["task_id"]
+
+    async def social_metadata(self, subject: str, script: str, language: str = "", platform: str = "tiktok") -> dict[str, Any]:
+        data = await self._request("POST", "/api/v1/social-metadata", json={
+            "video_subject": subject, "video_script": script,
+            "language": language or "auto", "platform": platform,
+        })
+        return {"title": data.get("title", ""), "caption": data.get("caption", ""),
+                "hashtags": list(data.get("hashtags") or [])}
 
     async def create_video(self, params: dict[str, Any]) -> str:
         data = await self._request("POST", "/api/v1/videos", json=params)

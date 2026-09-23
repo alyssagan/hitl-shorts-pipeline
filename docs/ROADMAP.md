@@ -207,6 +207,61 @@ by never letting the item reach vetting (or the human reviewer) in the first pla
   photography sitting in the free public-domain corpora these sources draw from.
 
 
+## Done: retention styling + platform post copy, from MoneyPrinterTurbo's own unused features (2026-09-23)
+Prompted directly -- the real goal isn't just "a video," it's "a viral reel that makes money": addicting, a
+strong storyline, and nobody swipes away. That reframed what was missing, and a full architecture pass (see
+the "Shorts Pipeline Architecture" artifact from this session) turned up several gaps -- caption styling, cut
+pacing, background music, a cover-frame choice, and no title/caption/hashtag generation at all.
+
+Before building anything new, checked what MoneyPrinterTurbo (vendored, already running) actually supports,
+rather than assuming a gap meant new code was needed. It turned out most of this was **already built into
+MoneyPrinterTurbo and simply never requested** by this pipeline's render call:
+- `vendor/MoneyPrinterTurbo/app/models/schema.py::VideoParams` (the real `/api/v1/videos` request schema, not
+  just a WebUI preference) already accepts `subtitle_display_mode` ("sentence" vs "word_by_word"),
+  `subtitle_animation` ("none" vs "pop_spring"), font/stroke/position/background styling, `bgm_type` +
+  `bgm_volume` (a built-in background-music library, or point it at your own file), and
+  `video_transition_mode`. `pipeline/stages/render/mpt.py` sent none of these -- every render used
+  MoneyPrinterTurbo's bare defaults: static "sentence" captions, no animation, no music.
+- Still images already get automatic Ken-Burns-style motion (`render_image_zoom_video()`, a ~3%/second zoom)
+  with **no configuration at all** -- the "photos with motion added" behavior `docs/KNOWN_LIMITATIONS.md` #5
+  already described as unverified turns out to come for free; nothing needed building there.
+- `POST /api/v1/social-metadata` (`app/services/llm.py::generate_social_metadata`) already runs its own LLM
+  prompt -- "Role: Short-Video Social Media Copywriter" -- to produce a platform-sized title (a hook), a
+  caption ending in a call to action, and the right hashtag count for `tiktok` / `youtube_shorts` /
+  `instagram_reels` / `facebook_reels`. This pipeline's `MptClient` never called it, so nothing generated the
+  CTA a content calendar's "CTA" column implies should exist.
+
+What changed:
+- **`pipeline/stages/mpt_client.py`**: new `social_metadata()` method wrapping the endpoint above.
+- **`pipeline/stages/render/mpt.py`**: `MptRenderStage` now forwards every retention-styling field above when
+  configured (each defaults to "" / 0 / `None` at the class level -- meaning "don't override MoneyPrinterTurbo's
+  own default" -- so nothing changes unless `config/pipeline.toml` sets it), and, after a successful render,
+  best-effort-generates social copy for every configured platform (a failure on one platform is logged and
+  skipped, never fails the render -- it's a bonus on a finished video, not something the video depends on).
+  Writes a paste-ready `SOCIAL_POST.md` (title/caption/hashtags per platform) into the project folder.
+- **`pipeline/stages/base.py`**: `RenderStage.run()` now returns a new `RenderResult` (`output_path` +
+  `social_metadata`) instead of a bare path string, so the generated copy actually reaches the job record --
+  not just a side-effect file. `pipeline/core/orchestrator.py::_apply_render` unpacks it onto
+  `job.output_path` / `job.social_metadata` (a new field on `Job`, so it's visible over the API for free via
+  `job.model_dump()`), and the `render_completed` decision-log entry now also lists which platforms got copy.
+- **`config/pipeline.toml` `[mpt]`**: every new field lives here with its own comment explaining what it does
+  and why. Concrete defaults chosen: `clip_seconds` 5 -> 3 (MoneyPrinterTurbo's own WebUI default, and shorter
+  clips mean more cuts, which matters for short-form retention); `subtitle_display_mode = "word_by_word"` +
+  `subtitle_animation = "pop_spring"` (a punchier, more native-feeling caption reveal than a full sentence
+  appearing at once); `bgm_type = "random"` at a low `bgm_volume = 0.12` (music under the narration, not over
+  it); `social_platforms = ["instagram_reels", "tiktok", "youtube_shorts"]` on by default. Left alone on
+  purpose: font/color/stroke and `video_transition_mode` -- those are closer to brand/taste than a settled
+  short-form convention, and nobody here has watched a rendered example with one yet to judge it.
+- **Tests**: 4 new tests in `tests/test_stages.py::RenderTests` -- unset fields never override MoneyPrinterTurbo's
+  default; set fields are forwarded exactly; social metadata is generated per platform and written to
+  `SOCIAL_POST.md`; one platform's call failing doesn't stop the others or the render. Full suite: 256 passing.
+- **Not done here, still open**: the actual hook/narrative-structure rewrite of `ScriptWriter`'s prompt (cold
+  open on the most shocking beat instead of chronological order) and the performance-feedback loop (pulling
+  real watch-time/retention data back in) -- both discussed and prioritized in the same conversation, neither
+  started yet. A cover-frame *choice* (vs. whatever frame the render happens to open on) also isn't addressed;
+  MoneyPrinterTurbo doesn't appear to expose one via this API.
+
+
 ## Done: drag-and-drop scene reorder + private per-scene notes (2026-09-23)
 Follow-up to the clip-matching/looping fix above. That same feedback message also raised two more things --
 "we haven't added the UI to move things around option" and "Notes: what would be a good way to put it.." -- and
@@ -489,3 +544,71 @@ matching quality" above for why that gap exists at all).
   - Cost: image generation is usually metered even on a "free tier" (rate-limited, not unlimited) -- worth a
     usage/cost entry the same way LLM calls already get one (`pipeline/core/usage.py`), so it doesn't become
     an invisible cost the way tokens used to be before that was built.
+
+### F. Story-aware shot planning: let an LLM decide what each scene needs (added 2026-09-23, not started)
+Prompted directly -- "what would make a good story, good video, what different frames would be good with the
+script, maybe have an LLM plan this and help find photos and videos" -- after the Internet Archive fix above
+turned out to only patch one over-filtering bug, not the deeper reason a job can come back thin: **nothing in
+this pipeline currently reasons about the script when deciding what to search for or which asset goes where.**
+Checked in the actual code, not assumed:
+- `scripts/make_keywords.py` runs *before the job even exists*, so the keyword list is generated from the raw
+  topic string alone, with no view of what the eventual script will actually say scene by scene.
+- Sourcing then searches those topic-level keywords and a human approves a pool of assets -- still before any
+  script exists (`JobState` order is `KEYWORDS_RUNNING -> SOURCING_RUNNING -> VETTING_RUNNING -> SCENES_RUNNING`,
+  `pipeline/core/orchestrator.py`).
+- Once the script is finally written and split into scenes, each scene's `search_terms` is just
+  `[keywords[i % len(keywords)]]` -- round-robin cycling through the same pre-script keyword list, blind to
+  what that specific paragraph is actually about (`pipeline/stages/scenes/mpt.py` line ~97).
+- The clip for each scene is then picked by `AssetClipSource.fetch()` (`pipeline/stages/scenes/clips.py`) via
+  plain bag-of-words overlap between the scene's narration/search terms and each approved asset's title/
+  description/query -- no semantics, no sense of "this paragraph is about the trial, that photo is a hospital
+  exterior." Gate 3 (`edit_scenes()` in `orchestrator.py`) lets a human manually reassign a scene's clip, but
+  only to an asset that was *already approved before the script existed* -- there's currently no way to go back
+  to sourcing for one specific scene once the script is written.
+- `ScriptWriter`'s own prompt (`pipeline/stages/scenes/writer.py`) already half-anticipates this gap -- it
+  explicitly tells the model to keep every paragraph anchored to "one concrete, picturable subject" *because* a
+  clip gets matched to it afterward by shared words -- but nothing downstream actually uses that structure; it
+  still just gets bag-of-words matched against a pool that was never asked to cover it.
+
+**Proposed shape** (a new pass, not a rewrite of what already works): after the script is written and split
+into scenes (still inside `SCENES_RUNNING`, before scenes go to human review), add an LLM "shot list" step that
+reads the finished narration and, per scene, produces (a) 2-4 specific search queries for what that paragraph
+needs visually (e.g. "Corazon Amurao nursing school photo," "1966 Chicago townhouse dormitory exterior," "Cook
+County courthouse 1966" -- not the flat topic-level keywords used today), and (b) a fallback query one level
+more generic for the same scene ("1960s Chicago nursing student," "vintage American courthouse exterior") to
+use only if the specific one comes up empty. This is the decision layer the other three ideas plug into rather
+than being four separate point fixes:
+- **Broader source coverage** and a **newspaper-archive source** become more search targets this planner can
+  route a given scene's specific query to (case-specific -> newspaper/Openverse/Commons; generic B-roll ->
+  Pexels/Pixabay).
+- The **tiered fallback strategy** from the ideas discussion above (broader retry, generic era B-roll, text/
+  quote cards) becomes what happens, per scene, when even the shot planner's generic query comes up empty --
+  the planner is what decides a scene has exhausted real options and should fall through, rather than that
+  being a blind, pipeline-wide retry.
+- **AI-generated image fallback (item E)** becomes the shot planner's last resort for a specific scene, with
+  its own prompt informed by what that scene's narration actually says, instead of a generic per-topic trigger.
+- **Open questions to settle before building:**
+  - **Stage ordering is the real design decision.** Today assets are approved by a human *before* the script
+    exists (deliberate: nothing gets sourced or shown to a reviewer without going through vetting first). A
+    shot planner needs the finished script, so either (a) it runs as a *second*, scene-targeted sourcing round
+    after SCENES_RUNNING, adding a new mini review step for just the new candidates it pulls in (extends the
+    existing "search again" mechanic already used at asset review, reusing `prior_searches` paging in
+    `pipeline/sources/base.py::HttpSource.fetch()`), or (b) script writing moves earlier in the job so shot
+    planning can inform the *first* and only sourcing round. (a) is the smaller, safer change and keeps every
+    existing gate intact; (b) is a bigger reorder with real benefits (one sourcing pass, not two) but touches
+    the orchestrator's state machine and every stage that currently assumes assets exist before scenes do.
+  - Cost/latency: one more LLM call per job (or one per scene, if done per-scene rather than batched) on top of
+    keywords, script, and relevance scoring -- worth batching all scenes into a single call the way relevance
+    scoring already batches assets (`pipeline/vetting/relevance.py`, "LLM scored N of N in 1 batch(es)").
+  - How much this should also replace vs. supplement `AssetClipSource`'s bag-of-words matching -- an LLM
+    judging "which of these 15 approved assets best fits this paragraph" is a more direct fix for mismatched
+    photos than better search alone, and doesn't require any stage-ordering change, so it may be worth building
+    first/independently as a smaller step.
+  - Whether the newspaper-archive question (does LOC's Chronicling America actually cover papers into the
+    1960s for a given title, or is it mostly pre-1960s copyright-cleared material) gets answered before or
+    after this, since it determines whether "route case-specific scenes to the newspaper archive" is even a
+    real option for a case this recent.
+- **Smallest useful first slice, if we want a quick win before the bigger stage-ordering decision**: LLM-based
+  scene-to-asset matching only (replace/augment `AssetClipSource`'s word-overlap scoring with an LLM judging
+  the existing approved pool against each scene's narration) -- no new sourcing round, no stage reorder, and it
+  directly targets "the photos don't fit the script" without deciding the bigger architecture question yet.

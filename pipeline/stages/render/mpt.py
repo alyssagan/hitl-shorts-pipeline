@@ -3,22 +3,53 @@
 Uses MoneyPrinterTurbo's existing `local` video source with the `sequential`
 concat mode, which takes your clips in exactly the order supplied -- that is
 what makes the human reorder/approve step meaningful.
+
+Also forwards MoneyPrinterTurbo's own retention features -- caption style/animation,
+background music, transitions -- which the pipeline used to leave at MoneyPrinterTurbo's
+bare defaults (unstyled "sentence" captions, no animation, no music). All still images
+already get MoneyPrinterTurbo's automatic slow zoom (vendor/MoneyPrinterTurbo
+app/services/video.py::render_image_zoom_video) with no configuration needed here.
+
+After a successful render, optionally asks MoneyPrinterTurbo to write platform-ready
+title/caption/hashtags from the final script (its own /api/v1/social-metadata, see
+mpt_client.py) for each configured platform -- best-effort, never fails the render --
+and writes them to SOCIAL_POST.md in the project folder, paste-ready.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from ...core.models import Job
-from ..base import StageContext
+from ..base import RenderResult, StageContext
 from ...core import joblog
 from ..mpt_client import MptClient, MptError
+
+# Platform label used in SOCIAL_POST.md; keys must match MoneyPrinterTurbo's own
+# SOCIAL_PLATFORMS (app/services/llm.py) -- an unknown key there just 400s, caught below.
+PLATFORM_LABELS = {
+    "tiktok": "TikTok", "youtube_shorts": "YouTube Shorts",
+    "instagram_reels": "Instagram Reels", "facebook_reels": "Facebook Reels",
+}
 
 
 class MptRenderStage:
     def __init__(self, client: MptClient, voice_name: str = "", language: str = "",
                  aspect: str = "9:16", clip_seconds: int = 5,
                  clip_root_host: str = "", clip_root_mpt: str = "",
-                 path_map: list[tuple[str, str]] | None = None):
+                 path_map: list[tuple[str, str]] | None = None,
+                 # Retention styling forwarded to MoneyPrinterTurbo's /api/v1/videos. Every one of these
+                 # defaults to "don't override MoneyPrinterTurbo's own default" (empty string / 0 / None,
+                 # the same sentinel convention `voice_name` already used below) -- config/pipeline.toml
+                 # is where this pipeline's own recommended defaults actually live (pipeline/stages/registry.py).
+                 subtitle_display_mode: str = "", subtitle_animation: str = "",
+                 font_name: str = "", font_size: int = 0, text_fore_color: str = "",
+                 stroke_color: str = "", stroke_width: float = 0.0, subtitle_position: str = "",
+                 subtitle_background_enabled: bool | None = None, subtitle_background_color: str = "",
+                 video_transition_mode: str = "", video_fit_mode: str = "",
+                 voice_volume: float = 0.0, voice_rate: float = 0.0,
+                 bgm_type: str = "", bgm_volume: float = 0.0, custom_bgm_file: str = "",
+                 # Platform copy generation (mpt_client.py::MptClient.social_metadata). Empty = disabled.
+                 social_platforms: tuple[str, ...] = ()):
         self.client = client
         self.voice_name = voice_name
         self.language = language
@@ -29,6 +60,24 @@ class MptRenderStage:
         self.path_map = list(path_map or [])
         if clip_root_host:
             self.path_map.append((clip_root_host, clip_root_mpt))
+        self.subtitle_display_mode = subtitle_display_mode
+        self.subtitle_animation = subtitle_animation
+        self.font_name = font_name
+        self.font_size = font_size
+        self.text_fore_color = text_fore_color
+        self.stroke_color = stroke_color
+        self.stroke_width = stroke_width
+        self.subtitle_position = subtitle_position
+        self.subtitle_background_enabled = subtitle_background_enabled
+        self.subtitle_background_color = subtitle_background_color
+        self.video_transition_mode = video_transition_mode
+        self.video_fit_mode = video_fit_mode
+        self.voice_volume = voice_volume
+        self.voice_rate = voice_rate
+        self.bgm_type = bgm_type
+        self.bgm_volume = bgm_volume
+        self.custom_bgm_file = custom_bgm_file
+        self.social_platforms = tuple(social_platforms)
 
     def _to_mpt_path(self, p: str) -> str:
         for host, mpt in self.path_map:
@@ -36,15 +85,62 @@ class MptRenderStage:
                 return mpt + p[len(host):]
         return p
 
-    async def run(self, job: Job, ctx: StageContext) -> str:
+    def _extra_params(self) -> dict:
+        """Retention-styling fields, included only when set (see the sentinel note above)."""
+        out: dict = {}
+        for key, val in (
+            ("subtitle_display_mode", self.subtitle_display_mode), ("subtitle_animation", self.subtitle_animation),
+            ("font_name", self.font_name), ("text_fore_color", self.text_fore_color),
+            ("stroke_color", self.stroke_color), ("subtitle_position", self.subtitle_position),
+            ("subtitle_background_color", self.subtitle_background_color),
+            ("video_transition_mode", self.video_transition_mode), ("video_fit_mode", self.video_fit_mode),
+            ("bgm_type", self.bgm_type), ("custom_bgm_file", self.custom_bgm_file),
+        ):
+            if val:
+                out[key] = val
+        for key, val in (
+            ("font_size", self.font_size), ("stroke_width", self.stroke_width),
+            ("voice_volume", self.voice_volume), ("voice_rate", self.voice_rate), ("bgm_volume", self.bgm_volume),
+        ):
+            if val:
+                out[key] = val
+        if self.subtitle_background_enabled is not None:
+            out["subtitle_background_enabled"] = self.subtitle_background_enabled
+        return out
+
+    async def _social_metadata(self, job: Job, script: str) -> dict[str, dict]:
+        """Platform-ready title/caption/hashtags, one call per configured platform. Best-effort: a
+        platform that errors is skipped (logged), never fails the render -- this is a bonus on top of
+        a finished video, not something the video depends on."""
+        out: dict[str, dict] = {}
+        for platform in self.social_platforms:
+            try:
+                out[platform] = await self.client.social_metadata(job.subject, script, language=self.language, platform=platform)
+            except Exception as exc:
+                joblog.warn("render", f"social metadata for {platform} failed, skipping", error=str(exc))
+        return out
+
+    def _write_social_post(self, ctx: StageContext, social: dict[str, dict]) -> None:
+        if not social or not ctx.project_dir:
+            return
+        lines = ["# Social post copy", "", "Paste-ready. Generated by MoneyPrinterTurbo from the final script.", ""]
+        for platform, meta in social.items():
+            label = PLATFORM_LABELS.get(platform, platform)
+            hashtags = " ".join(meta.get("hashtags") or [])
+            lines += [f"## {label}", "", f"**Title:** {meta.get('title', '')}", "",
+                      f"**Caption:**  \n{meta.get('caption', '')}", "", f"**Hashtags:** {hashtags}", ""]
+        (Path(ctx.project_dir) / "SOCIAL_POST.md").write_text("\n".join(lines), encoding="utf-8")
+
+    async def run(self, job: Job, ctx: StageContext) -> RenderResult:
         scenes = sorted(job.scenes, key=lambda s: s.index)
         clips = [s.clip_path for s in scenes if s.clip_path]
         if not clips:
             raise MptError("no scene has a clip; add clips to the library or edit scenes before rendering")
 
+        script = "\n\n".join(s.narration for s in scenes)
         params = {
             "video_subject": job.subject,
-            "video_script": "\n\n".join(s.narration for s in scenes),
+            "video_script": script,
             "video_terms": [t for s in scenes for t in s.search_terms],
             "video_aspect": self.aspect,
             "video_source": "local",
@@ -52,11 +148,13 @@ class MptRenderStage:
             "video_clip_duration": self.clip_seconds,
             "video_language": self.language,
             "video_materials": [{"provider": "local", "url": self._to_mpt_path(c), "duration": 0} for c in clips],
+            **self._extra_params(),
         }
         if self.voice_name:          # an empty voice_name would override MoneyPrinterTurbo's default and break TTS
             params["voice_name"] = self.voice_name
-        joblog.info("render", f"sending {len(clips)} clip(s) and {len(params['video_script'].split())} words to MoneyPrinterTurbo",
-                    voice=self.voice_name or "(default)", aspect=self.aspect)
+        joblog.info("render", f"sending {len(clips)} clip(s) and {len(script.split())} words to MoneyPrinterTurbo",
+                    voice=self.voice_name or "(default)", aspect=self.aspect,
+                    captions=self.subtitle_display_mode or "(default)", bgm=self.bgm_type or "(off)")
         task_id = await self.client.create_video(params)
         job.log("note", f"MoneyPrinterTurbo render task {task_id} started", task_id=task_id)
         done = await self.client.wait_task(task_id)
@@ -66,4 +164,9 @@ class MptRenderStage:
         dest = Path(ctx.assets_dir) / "final.mp4"
         await self.client.download(videos[0], dest)
         joblog.info("render", f"video saved ({dest.stat().st_size // 1024} KB)", file=str(dest))
-        return str(dest)
+
+        social = await self._social_metadata(job, script) if self.social_platforms else {}
+        if social:
+            self._write_social_post(ctx, social)
+            joblog.info("render", f"social post copy written for {', '.join(social)}")
+        return RenderResult(output_path=str(dest), social_metadata=social)

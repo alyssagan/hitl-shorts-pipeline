@@ -24,6 +24,14 @@ class SceneResult:
     scenes: list[Scene]
 
 
+@dataclass
+class RenderResult:
+    output_path: str
+    # {platform: {"title": ..., "caption": ..., "hashtags": [...]}}, e.g. {"tiktok": {...}}.
+    # Empty when social-metadata generation is disabled or every platform's call failed.
+    social_metadata: dict[str, Any] = field(default_factory=dict)
+
+
 @runtime_checkable
 class KeywordStage(Protocol):
     async def run(self, job: Job, ctx: StageContext) -> list[Keyword]:
@@ -41,6 +49,6 @@ class SceneStage(Protocol):
 
 @runtime_checkable
 class RenderStage(Protocol):
-    async def run(self, job: Job, ctx: StageContext) -> str:
+    async def run(self, job: Job, ctx: StageContext) -> RenderResult:
         """Render the approved scenes (in `job.scenes` order) and return the
-        path of the finished video."""
+        path of the finished video, plus any generated social-post copy."""

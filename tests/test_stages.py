@@ -228,12 +228,68 @@ class RenderTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as assets:
             stage = MptRenderStage(client, voice_name="v", clip_root_host="/lib", clip_root_mpt="/data/clips")
             out = await stage.run(job, StageContext(Path(assets)))
-            self.assertEqual(Path(out).read_bytes(), b"bytes")
+            self.assertEqual(Path(out.output_path).read_bytes(), b"bytes")
+            self.assertEqual(out.social_metadata, {})    # no social_platforms configured -> no calls at all
         params = next(b for m, p, b in mpt.requests if p == "/api/v1/videos")
         self.assertEqual([m["url"] for m in params["video_materials"]], ["/data/clips/a.mp4", "/data/clips/b.mp4"])
         self.assertEqual(params["video_source"], "local")
         self.assertEqual(params["video_concat_mode"], "sequential")
         self.assertEqual(params["video_script"], "first\n\nsecond")
+        self.assertNotIn("subtitle_display_mode", params)    # unset fields never override MoneyPrinterTurbo's own default
+        self.assertFalse(any(p == "/api/v1/social-metadata" for _, p, _ in mpt.requests))
+
+    async def test_render_forwards_retention_styling_only_when_set(self):
+        mpt = FakeMpt(video_states=(1,))
+        client = MptClient("http://mpt", transport=httpx.MockTransport(mpt))
+        job = Job(subject="cats"); job.scenes = [Scene(index=0, narration="n", clip_path="/lib/a.mp4")]
+        with tempfile.TemporaryDirectory() as assets:
+            stage = MptRenderStage(client, subtitle_display_mode="word_by_word", subtitle_animation="pop_spring",
+                                    bgm_type="random", bgm_volume=0.12, font_size=60, video_fit_mode="cover")
+            await stage.run(job, StageContext(Path(assets)))
+        params = next(b for m, p, b in mpt.requests if p == "/api/v1/videos")
+        self.assertEqual(params["subtitle_display_mode"], "word_by_word")
+        self.assertEqual(params["subtitle_animation"], "pop_spring")
+        self.assertEqual(params["bgm_type"], "random")
+        self.assertEqual(params["bgm_volume"], 0.12)
+        self.assertEqual(params["font_size"], 60)
+        self.assertEqual(params["video_fit_mode"], "cover")
+        self.assertNotIn("stroke_color", params)     # left unset -> not sent
+
+    async def test_render_generates_social_metadata_per_platform_and_writes_it(self):
+        def h(req: httpx.Request) -> httpx.Response:
+            body = json.loads(req.content) if req.content else {}
+            if req.url.path == "/api/v1/social-metadata":
+                p = body["platform"]
+                return ok({"title": f"{p} title", "caption": f"{p} caption, follow for more",
+                           "hashtags": [f"#{p}"]})
+            return FakeMpt(video_states=(1,))(req)
+        client = MptClient("http://mpt", transport=httpx.MockTransport(h))
+        job = Job(subject="cats"); job.scenes = [Scene(index=0, narration="n", clip_path="/lib/a.mp4")]
+        with tempfile.TemporaryDirectory() as d:
+            ctx = StageContext(Path(d) / "assets", project_dir=Path(d))
+            stage = MptRenderStage(client, social_platforms=("tiktok", "instagram_reels"))
+            out = await stage.run(job, ctx)
+            self.assertEqual(set(out.social_metadata), {"tiktok", "instagram_reels"})
+            self.assertEqual(out.social_metadata["tiktok"]["title"], "tiktok title")
+            post = (Path(d) / "SOCIAL_POST.md").read_text()
+            self.assertIn("TikTok", post)
+            self.assertIn("Instagram Reels", post)
+            self.assertIn("instagram_reels caption, follow for more", post)
+
+    async def test_render_keeps_going_when_one_platforms_social_metadata_call_fails(self):
+        def h(req: httpx.Request) -> httpx.Response:
+            body = json.loads(req.content) if req.content else {}
+            if req.url.path == "/api/v1/social-metadata":
+                if body["platform"] == "tiktok":
+                    return httpx.Response(500, json={"status": 500, "message": "boom"})
+                return ok({"title": "yt title", "caption": "yt caption", "hashtags": ["#shorts"]})
+            return FakeMpt(video_states=(1,))(req)
+        client = MptClient("http://mpt", transport=httpx.MockTransport(h))
+        job = Job(subject="cats"); job.scenes = [Scene(index=0, narration="n", clip_path="/lib/a.mp4")]
+        with tempfile.TemporaryDirectory() as assets:
+            stage = MptRenderStage(client, social_platforms=("tiktok", "youtube_shorts"))
+            out = await stage.run(job, StageContext(Path(assets)))    # no project_dir -> file write is skipped, not fatal
+        self.assertEqual(set(out.social_metadata), {"youtube_shorts"})
 
     async def test_render_fails_clearly_without_clips(self):
         stage = MptRenderStage(MptClient("http://mpt", transport=httpx.MockTransport(FakeMpt())))

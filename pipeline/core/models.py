@@ -198,6 +198,9 @@ class Job(BaseModel):
     script: str = ""
     scenes: list[Scene] = Field(default_factory=list)
     output_path: str | None = None
+    # {platform: {"title": ..., "caption": ..., "hashtags": [...]}}, written by the render stage
+    # from the final script -- see SOCIAL_POST.md in the project folder for the paste-ready version.
+    social_metadata: dict[str, Any] = Field(default_factory=dict)
 
     # Human feedback given when rejecting a gate; fed into the re-run.
     keyword_feedback: list[str] = Field(default_factory=list)
