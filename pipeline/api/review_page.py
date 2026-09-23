@@ -419,6 +419,12 @@ function findMoreQuery(){ return findQuery===null ? (job.subject||"") : findQuer
 async function searchYoutube(){
   // The one site in FIND_SITES that's actually automatable (requested directly): yt-dlp's own search
   // syntax, no paid API key. Metadata only -- nothing downloads until a specific result is added below.
+  // The backend only allows this during assets_review (same guard as "Add links"); findMorePanel() disables
+  // the button outside that state, but this is a second check in case something still reaches this function.
+  if (job.state !== "assets_review"){
+    ytError = `Search becomes available once this job reaches asset review (it's currently "${job.state}").`;
+    render(); return;
+  }
   const q = findMoreQuery().trim();
   if (!q){ ytError="Type or pick a search term above first."; render(); return; }
   ytLoading=true; ytError=""; ytResults=null; ytLastQuery=q; render();
@@ -456,6 +462,7 @@ function ytResultCard(c){
 }
 function findMorePanel(){
   const suggestions = findMoreSuggestions();
+  const ytReady = job.state === "assets_review";
   return h("div",{class:"panel"},
     h("b",{},"Find more -- search outside the automated sources"),
     h("div",{class:"sub"},"The pipeline's own search only reaches free, openly-licensed archives -- it can't see platform "+
@@ -472,9 +479,13 @@ function findMorePanel(){
         onclick:()=>{window.open(site.url(findMoreQuery()), "_blank", "noopener");}},
         site.label))),
     h("div",{class:"bar",style:"margin-top:10px"},
-      h("button",{class:"primary",disabled:busy||ytLoading,onclick:searchYoutube}, ytLoading?"Searching YouTube...":"Search YouTube here (metadata only, nothing downloads yet)"),
+      h("button",{class:"primary",disabled:busy||ytLoading||!ytReady,
+        title: ytReady?"":`Only available during asset review -- this job is currently "${job.state}"`,
+        onclick:searchYoutube}, ytLoading?"Searching YouTube...":"Search YouTube here (metadata only, nothing downloads yet)"),
       h("select",{onchange:e=>{ytCount=Number(e.target.value);}},
         [3,5,10].map(n=>h("option",{value:n,selected:n===ytCount},`${n} results`)))),
+    !ytReady ? h("div",{class:"sub",style:"margin-top:2px"},
+      `Becomes available once this job reaches asset review -- it's currently "${job.state}".`) : null,
     ytError?h("div",{class:"err"}, ytError):null,
     ytResults ? (ytResults.length
       ? h("div",{},
