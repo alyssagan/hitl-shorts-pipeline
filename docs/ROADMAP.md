@@ -39,6 +39,37 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: "Find more" panel, Gate 2 (2026-09-23)
+Prompted directly by a real coverage gap during testing: Aly asked why a well-documented, decades-old
+case wasn't turning up photos, newspapers, or footage. Traced honestly rather than promised a fix --
+every automated source in this pipeline is a free, openly-licensed archive API (Wikipedia/Commons,
+Internet Archive, LOC/Chronicling America, Smithsonian, DPLA, Europeana, Openverse, Flickr, plus generic
+stock sites, `docs/SEARCH_PLANNING.md`). That's a structural boundary, not a bug: the specific press
+photos, platform videos, and public records that would actually cover a case like this mostly live
+outside that pool entirely, in places with no bulk search API a source adapter could call (a state court
+archive, a specific department's mugshot page, a documentary on YouTube). The honest fix isn't a new
+automated source -- it's making the manual search a person already has to do faster, and making sure
+whatever they find lands back in the review flow the normal way.
+
+- **`pipeline/api/review_page.py`**: new Gate 2 panel, `findMorePanel()`, between the visual checklist
+  and the "Added by link" panel. A text box defaults to the job's subject; `findMoreSuggestions()` offers
+  every approved keyword's `term`/`entity`/`aliases` plus every visual-checklist item's `label` as
+  one-click chips (deduped case-insensitively), so a reviewer isn't retyping case details by hand. Six
+  buttons (`FIND_SITES`) each `window.open()` a real, properly-encoded search URL on a free site --
+  Internet Archive, Chronicling America (the Library of Congress's own public search UI for that
+  collection, not the JSON API the automated source calls, so it's not limited to what that adapter
+  already tried), Wikimedia Commons, YouTube, Google Images, and FindAGrave -- in a new tab. This makes
+  zero network calls of its own and adds nothing to the job; it only opens a page for a human to look at
+  and judge. Google Images and YouTube's buttons carry an explicit note in the UI that they're discovery
+  tools, not rights sources -- whatever turns up there still needs its license checked, and a documentary
+  clip goes back in through "Add links" (already auto-flagged high risk, #9) rather than a screen
+  recording.
+- 9 new tests (`tests/test_review_page_find_more.py`), same approach as the other review-page test
+  files: pull `FIND_SITES`/`findMoreSuggestions()`/`findMoreQuery()` out of `review_page.PAGE` and run
+  them for real in Node, including a check that every site's URL is correctly percent-encoded (a raw
+  space or `&` in a query would silently break or truncate the search) and points at the expected host.
+  Full suite: 497 passing.
+
 ## Done: "Added by link" panel, Gate 2 (2026-09-23)
 Prompted directly by a real bug report during testing: Aly added an Instagram link through "Add links,"
 got a success message, then couldn't find it anywhere on the page. Traced it rather than guessing --

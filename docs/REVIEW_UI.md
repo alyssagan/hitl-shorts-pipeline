@@ -95,6 +95,19 @@ docs/SCORING_CHANGELOG.md), every risk rule that fired with its evidence, and wh
   below it adds one by hand (a label, a group -- research/case/historical/stock -- and an optional linked keyword
   term, which is what lets the coverage check later match the item back to a specific scene). Every new item starts
   at `needed`; nothing here marks one fulfilled or not available -- that only happens explicitly, at Gate 3.
+- **"Find more"** (requested directly, after a specific well-documented case turned up little through the automated
+  sources) is a search-elsewhere helper, not another source: the pipeline's own search only reaches free,
+  openly-licensed archive APIs, which structurally can't carry platform videos, press photo archives, or public
+  records -- often exactly what a specific case needs. The box defaults to the job's subject; clicking one of the
+  suggestion chips (every approved keyword's term/entity/aliases, plus every visual-checklist label) swaps it in
+  without retyping. The six buttons below each open a real search on a free site in a new tab, prefilled with
+  whatever's in the box -- Internet Archive, Chronicling America (Library of Congress's own newspaper search, wider
+  than the automated source's query), Wikimedia Commons, YouTube, Google Images, and FindAGrave. Nothing here is
+  fetched, downloaded, or added to the job automatically -- it only opens a search page for you to look at and judge
+  yourself. Google Images in particular is a discovery tool, not a rights source: it's there to help you find where
+  a photo actually lives, and whatever you find still needs its own license checked before use. Anything worth using
+  comes back in the normal way, through **Add links** or a Gate-3 scene drop, and still goes through the same
+  vetting/decision flow as everything else.
 
 In the terminal, after submitting in the browser, type `web` at the asset prompt so the script carries on.
 

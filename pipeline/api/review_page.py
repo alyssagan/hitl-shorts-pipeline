@@ -100,6 +100,7 @@ let assetReport=null, assetReportOpen=false;   // per-job/per-source summary pan
 let coverage=null, coverageLoadedFor=null, coverageOverrideNote="", checklistForms={};   // pre-render visual coverage check (#12)
 let checklistOpen=false, newChecklistItem={label:"",group:"case",linked_keyword_term:""};   // adding items (#6/#12)
 let renderSettings={aspect:"9:16"}, cropOpen={}, cropDraft={};   // Gate 3 manual crop tool
+let findQuery = null;   // "Find more" panel -- null means "not touched yet, show job.subject"
 const CATEGORY_LABELS = {verified_case:"verified case", unverified_case_candidate:"unverified case candidate",
   historical_context:"historical context", illustrative_stock:"illustrative stock", reconstruction:"reconstruction"};
 const IDENTITY_LABELS = {unverified:"unverified", verified:"verified", disputed:"disputed"};
@@ -373,6 +374,54 @@ function checklistPanel(){
           h("input",{type:"text",placeholder:"linked keyword (optional)", value:newChecklistItem.linked_keyword_term,
             oninput:e=>{newChecklistItem=Object.assign({},newChecklistItem,{linked_keyword_term:e.target.value});}}),
           h("button",{disabled:busy, onclick:addChecklistItem}, "Add item")))));
+}
+// "Find more" (requested directly): the pipeline's own search only reaches free, openly-licensed archive
+// APIs (Internet Archive, LOC, Wikimedia Commons, and similar, see docs/SEARCH_PLANNING.md) -- it has no
+// way to see platform videos, press photo archives, or public records, which is often exactly what a
+// specific case needs. This never fetches or adds anything itself; it just opens a real search on other
+// free sites, prefilled from a term you pick or type, so you're not retyping case details into six
+// different search boxes by hand. Whatever you find still comes back in through "Add links" or a scene
+// drop, same as always, and still goes through the normal vetting/decision flow.
+const FIND_SITES = [
+  {label:"Internet Archive", note:"old newsreels, TV news archive footage, public-domain film -- this is the same site one of this job's own sources already searches, just its full public search rather than the narrower automated query",
+   url:q=>`https://archive.org/search?query=${encodeURIComponent(q)}`},
+  {label:"Chronicling America", note:"historic newspaper pages -- the Library of Congress's own search page for this collection, broader than the automated source's query",
+   url:q=>`https://chroniclingamerica.loc.gov/search/pages/results/?andtext=${encodeURIComponent(q)}`},
+  {label:"Wikimedia Commons", note:"openly-licensed photos -- rare for a specific recent case, but worth checking, and always confirm the license tag on whatever you find",
+   url:q=>`https://commons.wikimedia.org/w/index.php?search=${encodeURIComponent(q)}&title=Special:MediaSearch&type=image`},
+  {label:"YouTube", note:"documentaries and news retrospectives -- if you find one worth using, paste its URL into \"Add links\" below rather than screen-recording; it's auto-flagged high risk either way so you decide before it's used",
+   url:q=>`https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`},
+  {label:"Google Images", note:"a discovery tool, not a rights source -- use it to find where a photo actually lives, then check that source's own license before adding it",
+   url:q=>`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(q)}`},
+  {label:"FindAGrave", note:"often has family or school photos for named individuals, sometimes with clearer permission than press photos",
+   url:q=>`https://www.findagrave.com/memorial/search?q=${encodeURIComponent(q)}`},
+];
+function findMoreSuggestions(){
+  const seen = new Set(), out = [];
+  const add = t => { t=(t||"").trim(); if(t && !seen.has(t.toLowerCase())){ seen.add(t.toLowerCase()); out.push(t); } };
+  add(job.subject);
+  (job.keywords||[]).filter(k=>k.approved).forEach(k=>{ add(k.term); add(k.entity); (k.aliases||[]).forEach(add); });
+  (job.visual_checklist||[]).forEach(it=>add(it.label));
+  return out;
+}
+function findMoreQuery(){ return findQuery===null ? (job.subject||"") : findQuery; }
+function findMorePanel(){
+  const suggestions = findMoreSuggestions();
+  return h("div",{class:"panel"},
+    h("b",{},"Find more -- search outside the automated sources"),
+    h("div",{class:"sub"},"The pipeline's own search only reaches free, openly-licensed archives -- it can't see platform "+
+      "videos, press photo archives, or public records, which is often exactly what a specific case needs. These open a "+
+      "real search on other free sites so you can look yourself. Nothing here is fetched or added automatically -- bring "+
+      "back what's worth using through \"Add links\" below or a scene drop."),
+    h("div",{class:"bar"},
+      h("input",{type:"text",value:findMoreQuery(),size:44,placeholder:"what to search for",
+        oninput:e=>{findQuery=e.target.value;}})),
+    suggestions.length ? h("div",{class:"bar",style:"flex-wrap:wrap;margin-top:2px"},
+      suggestions.map(s=>h("button",{class:"chip",style:"cursor:pointer",onclick:()=>{findQuery=s;}}, s))) : null,
+    h("div",{class:"bar",style:"flex-wrap:wrap;margin-top:2px"},
+      FIND_SITES.map(site=>h("button",{title:site.note,
+        onclick:()=>{window.open(site.url(findMoreQuery()), "_blank", "noopener");}},
+        site.label))));
 }
 function card(a){
   const v = a.vetting||{}, d = decisions[a.id], r = risk(a), lbl = labels[a.id];
@@ -1091,6 +1140,7 @@ function assetReviewBody(xs){
       `Items under ${pct(minScore)} are hidden. Anything you leave undecided or hidden when you submit is not used (logged as rejected with a note) and is NOT counted as a training label. Only your Use / Duplicate / Irrelevant clicks are saved as labels, immediately, one per click (RELEVANCE_LABELS.jsonl in the project folder) -- separately from "Save and continue", which records the approve/reject decision.`),
     assetReportPanel(),
     checklistPanel(),
+    findMorePanel(),
     manualLinksPanel(),
     h("div",{class:"grid"}, xs.map(card)));
 }
