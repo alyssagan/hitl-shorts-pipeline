@@ -40,6 +40,44 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
 
+## Done: keyword files, always -- proposed/approved always saved, manual edits get a real file, subjects get a reusable library (2026-09-23)
+Prompted directly, after asking where keyword generation happens: Aly wanted a file created every time,
+including for `--keywords manual`. Scoped with three `AskUserQuestion` rounds into: both a proposed-before-Gate-1
+and an approved-after-Gate-1 file (not just one or the other); `manual` folded into the same file-based flow
+instead of staying a separate typed-into-the-terminal path; and a per-subject reusable library on top, so a
+later job on the same subject can be offered what was approved before instead of redoing it.
+
+- **Every job, every provider**: `Orchestrator._apply_keywords()`/`review_keywords()` now write
+  `keywords_proposed.json` and `keywords_approved.json` into the job's own project folder unconditionally --
+  `llm`, `manual`, a reused library set, or an edited draft all go through the exact same two writes, since
+  they all pass through `_apply_keywords`/`review_keywords` either way. A second round after a Gate-1
+  rejection overwrites `keywords_proposed.json` with the current round only; the full history of every round
+  already lives in `decisions.jsonl` (append-only, never touched by this).
+- **`--keywords manual` with no `--keywords-file`** no longer silently guesses from the subject the instant
+  the job starts. `scripts/poc.py`'s `edit_keywords_draft()` writes an empty, editable file
+  (`library/keywords/_drafts/<slug>-<timestamp>.txt`), prints its path and waits for Enter; leaving it blank
+  falls back to the old subject-derived guess, so nothing regresses for anyone who liked the old behavior.
+- **Reusable per-subject library**: once a job's keywords clear Gate 1, `review_keywords()` also copies them to
+  `<library keywords_dir>/<subject slug>/<job id>.json` (new `config/pipeline.toml` key, `[library]
+  keywords_dir`, default `library/keywords`, blank turns it off). `scripts/poc.py`'s `choose_library_set()`
+  offers whatever's saved for the current subject before generating anything new; picking one only *reads* that
+  file (never modifies or overwrites it -- every job's copy is named by its own job id) and still goes through
+  Gate 1 like anything else. An explicit `--keywords-file FILE` always wins over both the reuse prompt and the
+  draft-file flow, unchanged from before.
+- **Test-safety by design, not by convention**: `keywords_library_dir` defaults to `None` (feature off) unless
+  `settings["library"]["keywords_dir"]` is actually present, rather than a hardcoded `Path("library/keywords")`
+  CWD-relative fallback -- every existing unit test builds its own `Orchestrator` with a bare `settings={}`
+  and would otherwise have started writing real files into this repo's own `library/keywords/` on every test
+  run. Production gets the key automatically from `config/pipeline.toml`; the per-job
+  `keywords_proposed.json`/`keywords_approved.json` files are unaffected either way, since they live inside the
+  job's own already-sandboxed project folder.
+- 7 new orchestrator tests (`tests/test_keywords_files.py`): both files' contents, a second round overwriting
+  cleanly, the library copy off by default vs. on when configured, and two jobs on the same subject getting
+  separate files rather than one overwriting the other. Plus a scripted smoke test of every new `poc.py`
+  function (`slug`, `library_sets_for`, `choose_library_set`, `edit_keywords_draft`, `resolve_keywords_source`)
+  with `input()` mocked, since poc.py itself has no automated test file (it's a thin HTTP client, same as
+  before). Full suite: 273 passing.
+
 ## Done: drag-and-drop footage + link extraction, the two RankReel features Aly asked for by name (2026-09-23)
 Prompted directly: comparing this pipeline against three different "RankReel" products turned up two real gaps
 worth closing -- RankReel's drag-and-drop editing, and pulling video straight off a URL the way RankReels.ai

@@ -15,11 +15,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+# Where the pipeline copies an approved keyword set once it clears Gate 1 (config/pipeline.toml's [library]
+# keywords_dir, same value -- duplicated here since poc.py is deliberately standard-library only, same
+# reasoning as scripts/make_keywords.py's own duplicated constants), and where this script parks an
+# editable draft when --keywords manual has no --keywords-file to read. See docs/RUNNING.md "Keyword files,
+# always".
+LIBRARY_KEYWORDS_DIR = Path("library/keywords")
+
+
+def slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "project"
 
 
 class Api:
@@ -120,6 +132,112 @@ def ask(prompt: str) -> str:
         return input(prompt).strip()
     except EOFError:
         sys.exit("\nNo input available; run this in an interactive terminal.")
+
+
+def load_keywords_file(path: Path, max_queries: int | None) -> tuple[list[str], dict]:
+    """Reads a plain keywords file (one search phrase per line, # comments) -- the format --keywords-file has
+    always accepted, and scripts/make_keywords.py writes. Returns (terms, provenance); provenance carries the
+    file path and, if a .meta.json sidecar sits next to it, which API/model/tokens produced it (docs/LOGGING.md
+    "Where a keywords file came from")."""
+    terms = [ln.strip().strip("\"'") for ln in path.expanduser().read_text(encoding="utf-8").splitlines()
+             if ln.strip() and not ln.strip().startswith("#")]
+    print(f"Read {len(terms)} keyword(s) from {path}")
+    if max_queries is not None and max_queries > 0:
+        rounds = -(-len(terms) // max_queries)          # ceil
+        print(f"  Searching {max_queries} keyword(s) per round -> {rounds} round(s) to cover all of them "
+              f"(type 'more' at the asset prompt for each next round)")
+    provenance = {"file": str(path)}
+    meta_path = path.expanduser().with_suffix(".meta.json")
+    if meta_path.exists():
+        try:
+            provenance.update(json.loads(meta_path.read_text(encoding="utf-8")))
+            usage_bit = f", {provenance['usage']['total_tokens']} tokens" if provenance.get("usage") else ""
+            print(f"  Provenance: {provenance.get('provider', '?')}/{provenance.get('model', '?')}{usage_bit} ({meta_path})")
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"  (couldn't read provenance sidecar {meta_path}: {e})")
+    return terms, provenance
+
+
+def library_sets_for(subject: str) -> list[dict]:
+    """Every approved-keywords set the pipeline has saved for this exact subject (library/keywords/<slug>/
+    <job id>.json -- written automatically once a job's keywords clear Gate 1, see docs/RUNNING.md "Keyword
+    files, always"), newest first. An unreadable entry is skipped with a note rather than crashing the run."""
+    out = []
+    for p in sorted((LIBRARY_KEYWORDS_DIR / slug(subject)).glob("*.json")):
+        try:
+            out.append(json.loads(p.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"  (skipping unreadable saved set {p}: {e})")
+    return sorted(out, key=lambda d: d.get("approved_at", ""), reverse=True)
+
+
+def choose_library_set(subject: str) -> tuple[list[str], dict] | None:
+    """Offers previously-approved keyword sets for this subject, if any, so a later video on the same topic
+    doesn't need a fresh LLM call (or fresh typing) to get back to the same keywords. Only ever READS the
+    saved file -- picking one just copies its terms into THIS job, which gets its own fresh
+    keywords_proposed.json/keywords_approved.json once it goes through Gate 1 again; nothing already saved
+    is modified. Returns None (generate fresh instead) if there's nothing to offer, or the person skips."""
+    sets = library_sets_for(subject)
+    if not sets:
+        return None
+    print(f"\nFound {len(sets)} saved keyword set(s) for '{subject}':")
+    for i, s in enumerate(sets, 1):
+        terms = s.get("keywords") or []
+        preview = ", ".join(terms[:6]) + (", ..." if len(terms) > 6 else "")
+        print(f"  {i}. {s.get('approved_at', '?')} -- job {s.get('job_id', '?')}, {len(terms)} keyword(s): {preview}")
+    ans = ask(f"Reuse one of these (1-{len(sets)}), or press Enter to generate fresh keywords instead: ")
+    if not ans.strip():
+        return None
+    try:
+        chosen = sets[int(ans.strip()) - 1]
+    except (ValueError, IndexError):
+        print("  That didn't match one of the numbers above -- generating fresh keywords instead.")
+        return None
+    terms = list(chosen.get("keywords") or [])
+    provenance = {"reused_from_job": chosen.get("job_id"),
+                  "reused_from_file": str(LIBRARY_KEYWORDS_DIR / slug(subject) / f"{chosen.get('job_id')}.json"),
+                  "originally_approved_at": chosen.get("approved_at")}
+    print(f"  Reusing {len(terms)} keyword(s) from job {chosen.get('job_id')} -- you can still add, drop or reject them at Gate 1.")
+    return terms, provenance
+
+
+def edit_keywords_draft(subject: str) -> tuple[list[str], dict | None]:
+    """--keywords manual with no --keywords-file and nothing to reuse: rather than silently guessing keywords
+    from the subject, write an empty, editable keywords file and wait for you to fill it in -- still no LLM
+    call, just a file instead of a blind guess. Leaving it empty (pressing Enter with no edits) falls back to
+    that old subject-derived guess, same as --keywords manual alone always did."""
+    (LIBRARY_KEYWORDS_DIR / "_drafts").mkdir(parents=True, exist_ok=True)
+    path = LIBRARY_KEYWORDS_DIR / "_drafts" / f"{slug(subject)}-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+    path.write_text(f"# Keywords for: {subject}  (one search phrase per line, # lines are ignored)\n"
+                     "# e.g. victorian london street, whitechapel 1888, period newspaper front page\n\n",
+                     encoding="utf-8")
+    print(f"\n--keywords manual makes no LLM call, and no --keywords-file was given -- an editable keywords "
+          f"file is waiting for you instead, at:\n  {path}\nOpen it, add one search phrase per line, save it, "
+          "then come back here.")
+    ask("Press Enter once you've saved your edits (or right away to skip and fall back to the subject itself): ")
+    terms = [ln.strip().strip("\"'") for ln in path.read_text(encoding="utf-8").splitlines()
+             if ln.strip() and not ln.strip().startswith("#")]
+    if not terms:
+        print("  No keywords found in the file -- falling back to the subject itself, same as before.")
+        return [], None
+    print(f"  Read {len(terms)} keyword(s) from {path}")
+    return terms, {"file": str(path), "manual_edit": True}
+
+
+def resolve_keywords_source(subject: str, keywords_arg: str) -> tuple[str, list[str], dict | None]:
+    """Called when no --keywords-file was given explicitly. Checks the reusable library for this subject
+    first, regardless of --keywords: reusing a saved set always means `manual` (the terms are already
+    decided, no LLM call needed). If nothing's offered or it's skipped, falls through to --keywords as given:
+    `llm` makes its own call as always; `manual` opens an editable file (edit_keywords_draft) instead of
+    silently guessing from the subject."""
+    reused = choose_library_set(subject)
+    if reused is not None:
+        terms, provenance = reused
+        return "manual", terms, provenance
+    if keywords_arg == "manual":
+        terms, provenance = edit_keywords_draft(subject)
+        return "manual", terms, provenance
+    return keywords_arg, [], None
 
 
 def keyword_gate(api: Api, job: dict, reviewer: str = "", file_terms: list[str] | None = None) -> dict:
@@ -319,27 +437,7 @@ def main() -> None:
     LOG["show"], LOG["level"] = not args.quiet, "DEBUG" if args.debug else "INFO"
     file_terms: list[str] = []
     keywords_provenance: dict | None = None
-    if args.keywords_file:
-        file_terms = [ln.strip().strip("\"'") for ln in Path(args.keywords_file).expanduser().read_text(encoding="utf-8").splitlines()
-                      if ln.strip() and not ln.strip().startswith("#")]
-        print(f"Read {len(file_terms)} keyword(s) from {args.keywords_file}")
-        if args.max_queries is not None and args.max_queries > 0:
-            rounds = -(-len(file_terms) // args.max_queries)          # ceil
-            print(f"  Searching {args.max_queries} keyword(s) per round -> {rounds} round(s) to cover all of them "
-                  f"(type 'more' at the asset prompt for each next round)")
-        # Where these keywords actually came from (docs/LOGGING.md "Where a keywords file came from"): at
-        # minimum the file path; if scripts/make_keywords.py made this file, its .meta.json sidecar next to it
-        # also has which API/model/tokens produced it, and that travels into this job's decision log below.
-        keywords_provenance = {"file": str(args.keywords_file)}
-        meta_path = Path(args.keywords_file).expanduser().with_suffix(".meta.json")
-        if meta_path.exists():
-            try:
-                keywords_provenance.update(json.loads(meta_path.read_text(encoding="utf-8")))
-                usage_bit = f", {keywords_provenance['usage']['total_tokens']} tokens" if keywords_provenance.get("usage") else ""
-                print(f"  Provenance: {keywords_provenance.get('provider', '?')}/{keywords_provenance.get('model', '?')}{usage_bit} "
-                      f"({meta_path})")
-            except (json.JSONDecodeError, OSError) as e:
-                print(f"  (couldn't read provenance sidecar {meta_path}: {e})")
+    keywords_provider = args.keywords
     reviewer = args.reviewer or ask("Your name (recorded in the decision log next to your choices): ")
 
     if args.resume:
@@ -352,6 +450,13 @@ def main() -> None:
         sources = job["providers"].get("sources") or []
     else:
         subject = args.subject or ask("What is the video about? ")
+        # Where these keywords actually came from (docs/LOGGING.md "Where a keywords file came from") always
+        # travels into this job's decision log below, and (docs/RUNNING.md "Keyword files, always") this job's
+        # own keywords_proposed.json/keywords_approved.json get written no matter which path below was taken.
+        if args.keywords_file:
+            file_terms, keywords_provenance = load_keywords_file(Path(args.keywords_file), args.max_queries)
+        else:
+            keywords_provider, file_terms, keywords_provenance = resolve_keywords_source(subject, args.keywords)
         sources = [x.strip() for x in args.sources.split(",") if x.strip()]
         options = {"min_relevance": args.min_relevance}
         if args.max_queries is not None:
@@ -360,8 +465,8 @@ def main() -> None:
             options["per_query"] = args.per_query
         if args.videos_per_query is not None:
             options["videos_per_query"] = args.videos_per_query
-        if file_terms and args.keywords == "manual":
-            options["seed_keywords"] = file_terms          # Gate 1 will show exactly your file's keywords
+        if file_terms and keywords_provider == "manual":
+            options["seed_keywords"] = file_terms          # Gate 1 will show exactly these keywords
             if keywords_provenance:
                 options["keywords_provenance"] = keywords_provenance
         if args.urls:
@@ -390,7 +495,7 @@ def main() -> None:
                 sources.append("urls")
             print(f"Read {len(options['urls'])} URL(s) from {origin}")
         job = api.call("POST", "/jobs", {"subject": subject, "reviewer": reviewer,
-                                         "providers": {"keywords": args.keywords, "sources": sources, "options": options}})
+                                         "providers": {"keywords": keywords_provider, "sources": sources, "options": options}})
         print(f"Created job {job['id']}  ->  folder: projects/{job['slug']}-{job['id']}/")
         api.call("POST", f"/jobs/{job['id']}/start", {"reviewer": reviewer})
 
@@ -402,7 +507,7 @@ def main() -> None:
         return (order.index(state) if state in order else len(order)) <= order.index(name)
     if at("keywords_review"):
         job = wait_for(api, job["id"], {"keywords_review"}, "researching keywords")
-        job = keyword_gate(api, job, reviewer, [] if args.keywords == "manual" else file_terms)
+        job = keyword_gate(api, job, reviewer, [] if keywords_provider == "manual" else file_terms)
     if sources and at("assets_review"):
         job = wait_for(api, job["id"], {"assets_review"}, "pulling and vetting sources", every=4)
         job = asset_gate(api, job, reviewer)

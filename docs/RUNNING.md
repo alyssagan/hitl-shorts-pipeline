@@ -86,6 +86,58 @@ true-crime reels: 2 to 5 word phrases with years and places, spread over places,
 atmosphere b-roll and people, aimed at archive-friendly material, no graphic content, no victims' names. Single words and repeats are dropped.
 Read and edit the file, then use it with `--keywords-file`. Files live in `library/keywords/` (the first one, `jack-the-ripper.txt`, was hand-written).
 
+## Keyword files, always
+Every job writes its own `keywords_proposed.json` (what the keyword stage came up with, before you decide
+anything) and, once you approve at Gate 1, `keywords_approved.json` (the final list, in
+`projects/<name>-<id>/`) -- for **every** `--keywords` provider, not just `llm`. This is what those two files
+look like:
+
+```json
+// keywords_proposed.json
+{"generated_at": "2026-09-23T15:04:00Z", "provider": "llm", "logic": {"model": "gemini-3.6-flash", "...": "..."},
+ "keywords": [{"id": "...", "term": "whitechapel 1888", "rank": 1, "search_volume": 720, "difficulty": 34, "why": "..."}]}
+
+// keywords_approved.json
+{"job_id": "a1b2c3d4e5f6", "subject": "jack the ripper", "approved_at": "2026-09-23T15:06:12Z", "reviewer": "Aly",
+ "note": "", "keywords": ["whitechapel 1888", "victorian london"], "added_by_human": ["victorian london"],
+ "rejected_by_omission": ["gothic horror generic"]}
+```
+
+**`--keywords manual` with no `--keywords-file`** no longer silently guesses keywords from the subject the
+moment you run it. Instead `poc.py` writes an empty, editable file and waits for you:
+
+```
+--keywords manual makes no LLM call, and no --keywords-file was given -- an editable keywords file
+is waiting for you instead, at:
+  library/keywords/_drafts/jack-the-ripper-20260923-150400.txt
+Open it, add one search phrase per line, save it, then come back here.
+Press Enter once you've saved your edits (or right away to skip and fall back to the subject itself):
+```
+
+Open it in any editor, add one phrase per line, save, press Enter in the terminal. Leaving it blank (pressing
+Enter right away) falls back to the old subject-derived guess, exactly like before this existed -- nothing is
+worse off, you just get a real file to work from if you want one.
+
+**Reusing a subject's keywords**: once a job's keywords clear Gate 1, they're also copied into
+`library/keywords/<subject slug>/<job id>.json` -- a small per-subject library (config/pipeline.toml's
+`[library] keywords_dir`; blank to turn this off). The next time you run `poc.py` with the same subject (and no
+`--keywords-file`), it offers what's there before doing anything else:
+
+```
+Found 2 saved keyword set(s) for 'jack the ripper':
+  1. 2026-09-22T18:14:00Z -- job f4f4cd217aa7, 11 keyword(s): whitechapel 1888, victorian london, ...
+  2. 2026-09-20T09:02:11Z -- job 2648b26311fe, 8 keyword(s): scotland yard, gaslight street, ...
+Reuse one of these (1-2), or press Enter to generate fresh keywords instead:
+```
+
+Picking one only *reads* that saved file -- your new job gets its own `keywords_proposed.json`/
+`keywords_approved.json` and still goes through Gate 1 for you to add, drop or reject terms; nothing already
+saved is ever modified or overwritten (every job's copy is named by its own job id). Pressing Enter falls
+through to whatever `--keywords` you passed, same as if nothing had been saved yet.
+
+An explicit `--keywords-file FILE` always wins over both of these -- it skips the reuse prompt and the draft
+file entirely and loads exactly that file, same as it always has.
+
 ## See what's happening
 The terminal now streams the pipeline's activity log while it works (`--quiet` to hide, `--debug` for more). Every project has its own
 `logs/pipeline.log`, and the review page has an Activity log panel. Details and a debugging checklist: docs/LOGGING.md.

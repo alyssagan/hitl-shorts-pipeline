@@ -36,6 +36,13 @@ clips_dir = "library/clips"
 # container, so render requests can translate paths. Leave blank outside Docker.
 clips_dir_host = ""
 clips_dir_in_mpt = ""
+# Where an approved keyword set is copied once a job clears Gate 1, organized by subject
+# (<this>/<subject slug>/<job id>.json), so a later job on the same subject can offer to
+# reuse it instead of asking an LLM or you to redo the same keywords (docs/RUNNING.md
+# "Keyword files, always"). Leave blank to turn this off; every job's own
+# keywords_proposed.json/keywords_approved.json (in its own project folder) are written
+# either way.
+keywords_dir = "library/keywords"
 
 [keywords]
 # Used with `--keywords llm`. Any OpenAI-compatible endpoint works: Gemini (free tier, the default here),

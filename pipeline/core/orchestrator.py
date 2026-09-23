@@ -82,6 +82,15 @@ class Orchestrator:
         # Optional hook, e.g. the API uses it to launch run_pending in the background.
         self.on_running: Callable[[str], None] | None = None
         usage.configure_prices(self.settings)  # [usage] price table / free-quota info from config/pipeline.toml
+        # Where an approved keyword set is copied so a later job on the same subject can reuse it
+        # (docs/RUNNING.md "Keyword files, always") -- [library] keywords_dir in config/pipeline.toml, same
+        # convention as [library] clips_dir. Deliberately None (feature off) rather than defaulting to a
+        # hardcoded "library/keywords" when the key is simply absent from `settings`: every unit test builds
+        # its own Orchestrator with settings={} (or without a [library] section), and a hardcoded CWD-relative
+        # fallback would have those tests writing real files into this repo's own library/keywords/ every time
+        # they run. Production always has the key -- config/pipeline.toml ships it under [library].
+        lib_cfg = self.settings.get("library", {})
+        self.keywords_library_dir = Path(lib_cfg["keywords_dir"]) if lib_cfg.get("keywords_dir") else None
 
     # ------------------------------------------------------------------ helpers
     def _who(self, reviewer: str = "", require: bool = False) -> Actor:
@@ -158,12 +167,39 @@ class Orchestrator:
                     job.keywords.append(Keyword(term=term, source="human", approved=True))
                     added.append(term)
             sm.apply(job, "approve_keywords")
-            self._rec(job.id, "keywords", "approved_keywords", self._who(reviewer), decision="approve",
+            who = self._who(reviewer)
+            self._rec(job.id, "keywords", "approved_keywords", who, decision="approve",
                       reason=note or "Selected the keywords to build the video around.",
                       subject={"approved": [k.term for k in job.approved_keywords]},
                       outputs={"rejected_by_omission": [k.term for k in job.keywords if not k.approved], "added_by_human": added,
                                "next": "sourcing" if job.uses_sources else "scenes"})
+            self._write_keywords_approved_file(job, reviewer=who.name, note=note, added=added)
         return await self._mutate(job_id, fn)
+
+    def _write_keywords_approved_file(self, job: Job, *, reviewer: str, note: str, added: list[str]) -> None:
+        """keywords_approved.json in the project folder: the final, human-approved list once Gate 1 closes --
+        what sourcing actually searches with (job.approved_keywords). Companion to keywords_proposed.json
+        above; see docs/RUNNING.md "Keyword files, always".
+
+        Also copies that same list into `self.keywords_library_dir/<subject slug>/<job id>.json` when that's
+        configured (production only -- see __init__) -- a small, topic-organised library a LATER job on the
+        same subject can offer to reuse (scripts/poc.py's `choose_library_set`), without ever touching an
+        earlier job's own copy: every job has its own id, so nothing already saved here is ever overwritten
+        or modified by a later run picking it up."""
+        d = self.store.job_dir(job.id)
+        data = {
+            "job_id": job.id, "subject": job.subject, "approved_at": _now(), "reviewer": reviewer, "note": note,
+            "keywords": [k.term for k in job.approved_keywords], "added_by_human": added,
+            "rejected_by_omission": [k.term for k in job.keywords if not k.approved],
+        }
+        (d / "keywords_approved.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        if self.keywords_library_dir is not None:
+            try:
+                lib_dir = self.keywords_library_dir / job.slug
+                lib_dir.mkdir(parents=True, exist_ok=True)
+                (lib_dir / f"{job.id}.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            except OSError as e:
+                joblog.warn("keywords", f"couldn't save a reusable copy of the approved keywords: {e}")
 
     async def reject_keywords(self, job_id: str, feedback: str = "", *, reviewer: str = "") -> Job:
         def fn(job: Job) -> None:
@@ -604,11 +640,31 @@ class Orchestrator:
     # ---- what each finished stage writes to the job and the decision log ----------
     def _apply_keywords(self, job: Job, stage: Any, result: list[Keyword]) -> None:
         job.keywords = result
+        trace = getattr(stage, "last_trace", {})
         self._rec(job.id, "keywords", "proposed_keywords", actor_from(stage, machine("keyword-stage")), decision="propose",
-                  logic=getattr(stage, "last_trace", {}),
+                  logic=trace,
                   outputs={"count": len(result), "keywords": [
                       {"id": k.id, "term": k.term, "rank": k.rank, "volume": k.search_volume, "difficulty": k.difficulty,
                        "why": k.meta.get("why", "")} for k in result]})
+        self._write_keywords_proposed_file(job, trace, result)
+
+    def _write_keywords_proposed_file(self, job: Job, trace: dict, result: list[Keyword]) -> None:
+        """keywords_proposed.json in the project folder: the candidate list exactly as this round's keyword
+        stage produced it -- an LLM's suggestions, seeds read from --keywords-file, a reused library set, or
+        whatever a human typed into an editable draft file (scripts/poc.py) -- BEFORE any human decision at
+        Gate 1 (docs/RUNNING.md "Keyword files, always"). Always written, for every provider, not just `llm`:
+        this is what lets `manual` runs be reviewed/reused the same way `llm` ones are.
+
+        Written every time this stage runs, so after a Gate-1 rejection and re-run it reflects the CURRENT
+        round only -- the full history of every round already lives in decisions.jsonl (`proposed_keywords`,
+        above), which is append-only and never overwritten."""
+        path = self.store.job_dir(job.id) / "keywords_proposed.json"
+        data = {
+            "generated_at": _now(), "provider": job.providers.keywords, "logic": trace,
+            "keywords": [{"id": k.id, "term": k.term, "rank": k.rank, "search_volume": k.search_volume,
+                          "difficulty": k.difficulty, "why": k.meta.get("why", "")} for k in result],
+        }
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     def _apply_sourcing(self, job: Job, stage: Any, res: Any) -> None:
         job.assets.extend(res.assets)
