@@ -166,6 +166,95 @@ class AssetsAddUrlEndpointTests(ApiSourcesTests):
         self.assertIn("doesn't look like a direct video/photo link", r.json()["error"])
 
 
+class YoutubeSearchEndpointTests(ApiSourcesTests):
+    """POST /jobs/{id}/youtube-search -- Gate 2's "Find more" panel, the one automatable gap in it
+    (Internet Archive/Chronicling America/Commons are already automated sources; Google Images/FindAGrave
+    have no API). Metadata only, mocked the same way as Add links above -- no real yt-dlp/network involved.
+    Deliberately NOT subclassing AssetsAddUrlEndpointTests -- that would silently re-run its own five test_
+    methods a second time under this class name too, rather than adding new coverage."""
+    def to_assets_review(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        jid = r.json()["id"]
+        self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        j = self.wait(jid, "keywords_review")
+        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        j = self.wait(jid, "assets_review")
+        return jid, j
+
+    def candidate(self, **kw):
+        base = dict(id="abc123", title="A period newsreel", url="https://www.youtube.com/watch?v=abc123",
+                    uploader="Archive Channel", duration=95, thumbnail="https://i.ytimg.com/vi/abc123/hq.jpg",
+                    upload_date="20240101", description="")
+        base.update(kw)
+        return base
+
+    def test_query_is_required(self):
+        jid, _ = self.to_assets_review()
+        r = self.client.post(f"/jobs/{jid}/youtube-search", json={"reviewer": "Aly"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_wrong_job_state_is_a_409_before_any_search_is_attempted(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake"}})
+        jid = r.json()["id"]      # still keywords_running/keywords_review, not assets_review
+        with patch("pipeline.api.app.search_youtube") as fn:
+            r = self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "richard speck", "reviewer": "Aly"})
+            fn.assert_not_called()
+        self.assertEqual(r.status_code, 409)
+
+    def test_successful_search_returns_candidates_and_nothing_is_added_to_the_job(self):
+        jid, before = self.to_assets_review()
+        with patch("pipeline.api.app.search_youtube", AsyncMock(return_value=[self.candidate()])) as fn:
+            r = self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "richard speck 1966", "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), [self.candidate()])
+        fn.assert_awaited_once_with("richard speck 1966", 5)     # default count
+        after = self.client.get(f"/jobs/{jid}").json()
+        self.assertEqual(len(after["assets"]), len(before["assets"]))   # search alone adds nothing
+
+    def test_count_is_clamped_between_one_and_ten(self):
+        jid, _ = self.to_assets_review()
+        with patch("pipeline.api.app.search_youtube", AsyncMock(return_value=[])) as fn:
+            self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "x", "count": 999, "reviewer": "Aly"})
+            fn.assert_awaited_with("x", 10)
+        with patch("pipeline.api.app.search_youtube", AsyncMock(return_value=[])) as fn:
+            self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "x", "count": 0, "reviewer": "Aly"})
+            fn.assert_awaited_with("x", 1)
+
+    def test_yt_dlp_missing_is_a_503(self):
+        from pipeline.sources.base import SourceUnavailable
+        jid, _ = self.to_assets_review()
+        with patch("pipeline.api.app.search_youtube", AsyncMock(side_effect=SourceUnavailable("yt-dlp is not installed"))):
+            r = self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "x", "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 503)
+        self.assertIn("yt-dlp is not installed", r.json()["error"])
+
+    def test_other_search_failure_is_a_422_with_the_reason(self):
+        jid, _ = self.to_assets_review()
+        with patch("pipeline.api.app.search_youtube", AsyncMock(side_effect=RuntimeError("network is unreachable"))):
+            r = self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "x", "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("network is unreachable", r.json()["error"])
+
+    def test_every_call_is_logged_to_its_own_requests_jsonl_success_or_failure(self):
+        jid, _ = self.to_assets_review()
+        with patch("pipeline.api.app.search_youtube", AsyncMock(return_value=[self.candidate()])):
+            self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "richard speck", "reviewer": "Aly"})
+        with patch("pipeline.api.app.search_youtube", AsyncMock(side_effect=RuntimeError("boom"))):
+            self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "corazon amurao", "reviewer": "Aly"})
+        log = JobStore(self.tmp.name).job_dir(jid) / "sources" / "youtube_search" / "requests.jsonl"
+        lines = [l for l in log.read_text(encoding="utf-8").splitlines() if l.strip()]
+        self.assertEqual(len(lines), 2)
+        import json as _json
+        entries = [_json.loads(l) for l in lines]
+        self.assertIn("richard speck", entries[0]["url"])
+        self.assertEqual(entries[0]["status"], 200)
+        self.assertIn("corazon amurao", entries[1]["url"])
+        self.assertIsNone(entries[1]["status"])
+        self.assertIn("boom", entries[1]["error"])
+
+
 class FolderFilesEndpointTests(unittest.TestCase):
     """GET /jobs/{id}/folder-files (#10): browse-only listing of the server's own-footage folder, with
     which files (if any) are already queued for this specific job."""

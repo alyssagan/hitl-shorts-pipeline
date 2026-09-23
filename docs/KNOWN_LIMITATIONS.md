@@ -144,6 +144,14 @@ Still to judge by watching and comparing runs (record in OPTIONS_TO_TRY.md):
   reported in the source's trace and the others continue.
 - **Also:** the pipeline image now includes ffmpeg and yt-dlp, so it is larger and takes longer to build.
   Rebuild (`docker compose up --build`) to get a newer yt-dlp when links start failing.
+- **As of the "Find more" panel's YouTube search** (Gate 2, `pipeline/sources/youtube_search.py`), this
+  dependency now also covers search, not just download: it uses yt-dlp's own `ytsearchN:` syntax rather than
+  YouTube's official Data API, so there's no key/quota to manage, but also no guarantee it keeps working --
+  it's reading the same search results page a browser would, and if YouTube changes that page or starts
+  rate-limiting/blocking the requests, search fails the same way a broken download link does (a clear error
+  in the review page, logged to `sources/youtube_search/requests.jsonl`, nothing silently wrong). It's also
+  metadata-only by design -- nothing downloads until a specific result is picked -- specifically so a batch
+  search doesn't multiply the platform-download risk of a single pasted link into ten at once.
 
 ## Resolved
 

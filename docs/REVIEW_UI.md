@@ -11,7 +11,12 @@ author, size/length and a link to the original page. "Why this score and risk" o
 decision at scoring time, `scored by: <method> [<version>]` (e.g. `scored by: tfidf [tfidf-v1]`), every contribution when more than
 one method scored the asset that round, a plain-English note on how the final decision was reached, a nested "What does `<version>`
 do?" panel with that method's full definition (description, formula/prompt, parameters -- fetched once from `GET /methods`, see
-docs/SCORING_CHANGELOG.md), every risk rule that fired with its evidence, and which search found it.
+docs/SCORING_CHANGELOG.md), every risk rule that fired (its rule id, severity, plain-English message and the actual evidence text
+that triggered it -- e.g. `PLATFORM_SOURCE`, `LIC_SA`, `LIC_UNKNOWN`), and which search found it. It's **open by default** on every
+card (requested directly, after "high risk" was mistaken for "rejected" during testing) -- collapsing one sticks across
+re-renders (`whyOpen`, per asset id) rather than silently popping back open the next time the page refreshes. The category/
+identity/rights badges below (#13) are the other half of this: click "Case connection & rights" on a card for who's actually
+pictured and where the usage rights stand, beyond what the automated flags alone can tell you.
 
 - **Use / Duplicate / Irrelevant** per card -- the three human review labels (docs/EVALUATION.md). Use = approve; Duplicate and
   Irrelevant both reject, since neither should end up in the video, but they're saved as different labels: Duplicate means "this is
@@ -102,12 +107,24 @@ docs/SCORING_CHANGELOG.md), every risk rule that fired with its evidence, and wh
   suggestion chips (every approved keyword's term/entity/aliases, plus every visual-checklist label) swaps it in
   without retyping. The six buttons below each open a real search on a free site in a new tab, prefilled with
   whatever's in the box -- Internet Archive, Chronicling America (Library of Congress's own newspaper search, wider
-  than the automated source's query), Wikimedia Commons, YouTube, Google Images, and FindAGrave. Nothing here is
-  fetched, downloaded, or added to the job automatically -- it only opens a search page for you to look at and judge
-  yourself. Google Images in particular is a discovery tool, not a rights source: it's there to help you find where
-  a photo actually lives, and whatever you find still needs its own license checked before use. Anything worth using
-  comes back in the normal way, through **Add links** or a Gate-3 scene drop, and still goes through the same
-  vetting/decision flow as everything else.
+  than the automated source's query), Wikimedia Commons, YouTube, Google Images, and FindAGrave. These six never
+  fetch, download, or add anything -- they only open a search page for you to look at and judge yourself. Google
+  Images in particular is a discovery tool, not a rights source: it's there to help you find where a photo actually
+  lives, and whatever you find still needs its own license checked before use.
+  **Search YouTube here** (below the six buttons, requested directly) is the one of those six that's actually
+  automatable: it runs the same search through yt-dlp (no paid API key) and lists candidates right on the page --
+  thumbnail, title, uploader, duration, a description snippet -- for you to judge before anything downloads.
+  Nothing downloads or gets added until you click **Add this one** on a specific result, which calls the exact same
+  path as pasting that video's link into **Add links** below: synchronous download, lands `pending`, still
+  auto-flagged high risk (`PLATFORM_SOURCE`) and still needs a written note before you can approve it. Every search
+  (successful or not) is logged to `sources/youtube_search/requests.jsonl`, same spirit as every other source's
+  request log. Internet Archive, Chronicling America and Wikimedia Commons are deliberately NOT offered this way --
+  they're already automated sources in the pipeline's normal per-round search (docs/SEARCH_PLANNING.md), so a
+  second on-page search button would just duplicate what a `case`/`historical`-group keyword already searches;
+  their "Find more" buttons exist for their sites' own full public search UI, broader than what one round's
+  keyword query covers, not because they're otherwise unreachable. Anything worth using -- from a link-out button
+  or the YouTube search -- comes back in the normal way and still goes through the same vetting/decision flow as
+  everything else.
 
 In the terminal, after submitting in the browser, type `web` at the asset prompt so the script carries on.
 

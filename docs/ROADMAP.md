@@ -39,6 +39,48 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: YouTube auto-search in "Find more", and risk reasons open by default (2026-09-23)
+Two follow-ups requested directly right after the "Find more" panel shipped. First: "is there a way to
+automate searching from here and pulling it and placing it a different section to review?" -- answered
+honestly per site rather than building blind: Internet Archive/Chronicling America/Commons are already
+automated sources (`docs/SEARCH_PLANNING.md`), Google Images/FindAGrave have no API and no rights metadata
+worth automating, and YouTube was the one real, buildable gap -- yt-dlp already does the searching the
+"Add links" download uses, `ytsearchN:query` needs no paid key. Second: "reasons why high risk etc any
+information to make decisions" -- that information already existed (every card's "Why this score and
+risk" section: rule id, severity, message, evidence, plus category/identity/rights badges) but was
+collapsed by default, which is very likely why a high-risk asset read as broken/rejected earlier
+(`89b0faa`) instead of merely undecided.
+
+- **`pipeline/sources/youtube_search.py`** (new): `search_youtube(query, count, runner)` runs
+  `yt-dlp --skip-download --dump-json ytsearchN:query` and parses one candidate per JSON line (id, title,
+  url, uploader, duration, thumbnail, upload_date, description) -- metadata only, nothing downloaded here.
+  Deliberately NOT registered as a sourcing-round source (`pipeline/stages/registry.py`): that loop
+  downloads everything it finds automatically, which is the wrong default for platform video -- would
+  multiply the rights exposure #9/#14 already flag for one pasted link across a whole batch.
+- **`pipeline/api/app.py`**: `POST /jobs/{id}/youtube-search` (Gate 2 state only, same guard as
+  `/assets/add-url`) -- `{query, count?}` (count clamped 1-10, default 5) -> the candidate list. Every
+  call, success or failure, is logged to `sources/youtube_search/requests.jsonl` via the same `LoggedHttp`
+  every other source uses. Picking a result doesn't call anything new -- the frontend posts the video's own
+  `url` to the existing `/assets/add-url`, so it goes through the identical download/pending/high-risk/note
+  path as a hand-pasted link.
+- **`pipeline/api/review_page.py`**: `findMorePanel()` gained a "Search YouTube here" button (`searchYoutube()`)
+  using whatever's already in the query box, a result-count picker, and `ytResultCard()` per candidate with
+  an "Add this one" button (`addYoutubeCandidate()`) that posts to `/assets/add-url` with a note recording
+  which search found it, then drops that candidate from the results list and reloads the job so it shows up
+  in "Added by link" like any other pending manual asset. Separately: `card()`'s "Why this score and risk"
+  `<details>` is now `open` by default, with a new `whyOpen` (asset id -> bool) tracking any reviewer
+  collapse across re-renders -- same pattern `checklistOpen`/`cropOpen` already established for exactly this
+  reason (a hardcoded `open:true` would silently snap back open on the next re-render even after a reviewer
+  closed it).
+- 16 new tests: `tests/test_youtube_search.py` (8, fake-runner unit tests for `search_youtube()`, same style
+  as `UrlListTests` in `test_more_sources.py`) and `YoutubeSearchEndpointTests` in `tests/test_api_sources.py`
+  (8, HTTP-level, mocking `search_youtube` the same way `AssetsAddUrlEndpointTests` already mocks
+  `UrlListSource` -- deliberately NOT subclassing that class, to avoid silently re-running its own five
+  tests under a new name). Caught one real bug along the way: `count = max(1, min(int(d.get("count") or 5),
+  10))` treated an explicit `count: 0` the same as "not provided" (`0 or 5` -> `5` in JS-adjacent Python
+  truthiness) instead of clamping it up to 1 -- fixed to check for `None`/missing explicitly. Full suite:
+  513 passing.
+
 ## Done: "Find more" panel, Gate 2 (2026-09-23)
 Prompted directly by a real coverage gap during testing: Aly asked why a well-documented, decades-old
 case wasn't turning up photos, newspapers, or footage. Traced honestly rather than promised a fix --

@@ -20,6 +20,10 @@
                                         ONE link synchronously (#9), same yt-dlp/direct pattern Gate 3's
                                         from-url uses, with an immediate success/failure result. The asset
                                         lands `pending`, same as a searched one -- never auto-approved.
+  POST /jobs/{id}/youtube-search       {query, count?}   Gate 2 "Find more": list up to `count` (default 5,
+                                        max 10) YouTube candidates via yt-dlp's own search, metadata only --
+                                        nothing downloaded or added. Pick one by posting its `url` to
+                                        /assets/add-url above, same as any pasted link.
   GET  /jobs/{id}/folder-files        what's currently in the server's configured own-footage folder (#10),
                                         each with whether it's already selected for this job -- read-only,
                                         pick from this list for assets/reject's folder_files.
@@ -109,10 +113,11 @@ from ..core import state_machine as sm
 from ..core.models import Job, JobState, ProviderChoice
 from ..core.orchestrator import LABELS, Orchestrator, SUGGESTED_LABEL_REASONS
 from ..core.store import JobNotFound, JobStore
-from ..sources.base import LoggedHttp, SourceContext
+from ..sources.base import LoggedHttp, SourceContext, SourceUnavailable
 from ..sources.folder import list_available as list_folder_files, normalize_selection as normalize_folder_entry
 from ..sources.upload import asset_from_upload
 from ..sources.urls import UrlListSource
+from ..sources.youtube_search import search_youtube
 from ..stages.registry import Registry, build_default_registry
 from ..vetting.method_registry import as_json as method_definitions_json
 from .review_page import PAGE
@@ -278,6 +283,39 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         except Exception as exc:
             raise HTTPException(422, f"couldn't get that link: {type(exc).__name__}: {exc}") from None
         return await orch.add_reviewable_asset(job_id, asset, reviewer=d.get("reviewer", ""), note=d.get("note", ""))
+
+    async def youtube_search_view(r: Request):
+        """Gate 2's "Find more" panel: list up to `count` YouTube candidates for `query` via yt-dlp's own
+        search (pipeline/sources/youtube_search.py) -- metadata only, nothing downloaded or added to the job.
+        Pick one by POSTing its `url` to assets_add_url above, same as any pasted link (still auto-flagged
+        high risk, still needs a note). JSON: {query, count?} -> [{id, title, url, uploader, duration,
+        thumbnail, upload_date, description}, ...]. Logged to sources/youtube_search/requests.jsonl like any
+        other outbound call, success or failure."""
+        job_id = r.path_params["id"]
+        d = await body(r)
+        query = (d.get("query") or "").strip()
+        if not query:
+            raise HTTPException(400, "query is required")
+        raw_count = d.get("count")
+        count = max(1, min(int(raw_count) if raw_count not in (None, "") else 5, 10))
+        job = orch.get(job_id)                       # 404 if unknown
+        if job.state is not JobState.ASSETS_REVIEW:
+            raise HTTPException(409, f"YouTube search is only available during asset review (job is '{job.state.value}')")
+        log_dir = orch.store.job_dir(job_id) / "sources" / "youtube_search"
+        log = LoggedHttp(log_dir, "youtube_search")
+        try:
+            results = await search_youtube(query, count)
+        except SourceUnavailable as exc:
+            log._log(method="yt-dlp-search", url=f"ytsearch{count}:{query}", status=None,
+                     purpose=f"search YouTube for '{query}'", error=str(exc))
+            raise HTTPException(503, str(exc)) from None
+        except Exception as exc:
+            log._log(method="yt-dlp-search", url=f"ytsearch{count}:{query}", status=None,
+                     purpose=f"search YouTube for '{query}'", error=str(exc))
+            raise HTTPException(422, f"YouTube search failed: {exc}") from None
+        log._log(method="yt-dlp-search", url=f"ytsearch{count}:{query}", status=200,
+                 purpose=f"search YouTube for '{query}'", found=len(results))
+        return JSONResponse(results)
 
     async def scene_approve_pending(r: Request):
         d = await body(r)
@@ -505,6 +543,7 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/assets/approve", wrap(assets_approve), methods=["POST"]),
         Route(f"{P}/assets/reject", wrap(assets_reject), methods=["POST"]),
         Route(f"{P}/assets/add-url", wrap(assets_add_url), methods=["POST"]),
+        Route(f"{P}/youtube-search", wrap(youtube_search_view), methods=["POST"]),
         Route(f"{P}/folder-files", wrap(folder_files_list), methods=["GET"]),
         Route(f"{P}/assets/label", wrap(assets_label), methods=["POST"]),
         Route(f"{P}/assets/{{asset_id}}/identity", wrap(asset_identity), methods=["POST"]),

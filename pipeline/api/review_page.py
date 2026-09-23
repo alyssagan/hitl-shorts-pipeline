@@ -101,6 +101,10 @@ let coverage=null, coverageLoadedFor=null, coverageOverrideNote="", checklistFor
 let checklistOpen=false, newChecklistItem={label:"",group:"case",linked_keyword_term:""};   // adding items (#6/#12)
 let renderSettings={aspect:"9:16"}, cropOpen={}, cropDraft={};   // Gate 3 manual crop tool
 let findQuery = null;   // "Find more" panel -- null means "not touched yet, show job.subject"
+let whyOpen = {};        // asset id -> bool. Open by default (requested directly) so the score/risk reasons
+                          // are visible without a click; explicit false once a reviewer collapses one, so a
+                          // later re-render doesn't silently pop it back open under them.
+let ytCount = 5, ytResults = null, ytLoading = false, ytError = "", ytLastQuery = "";   // "Find more" YouTube search
 const CATEGORY_LABELS = {verified_case:"verified case", unverified_case_candidate:"unverified case candidate",
   historical_context:"historical context", illustrative_stock:"illustrative stock", reconstruction:"reconstruction"};
 const IDENTITY_LABELS = {unverified:"unverified", verified:"verified", disputed:"disputed"};
@@ -405,6 +409,44 @@ function findMoreSuggestions(){
   return out;
 }
 function findMoreQuery(){ return findQuery===null ? (job.subject||"") : findQuery; }
+async function searchYoutube(){
+  // The one site in FIND_SITES that's actually automatable (requested directly): yt-dlp's own search
+  // syntax, no paid API key. Metadata only -- nothing downloads until a specific result is added below.
+  const q = findMoreQuery().trim();
+  if (!q){ ytError="Type or pick a search term above first."; render(); return; }
+  ytLoading=true; ytError=""; ytResults=null; ytLastQuery=q; render();
+  try{
+    ytResults = await api("POST", `/jobs/${JOB}/youtube-search`, {query:q, count:ytCount});
+  }catch(e){ ytError=String(e.message||e); }
+  ytLoading=false; render();
+}
+async function addYoutubeCandidate(c){
+  // Reuses the exact same /assets/add-url endpoint "Add links" below already calls -- a YouTube search
+  // result is not treated any differently from a link you found and pasted yourself: still downloaded
+  // synchronously, still lands pending, still auto-flagged high risk (PLATFORM_SOURCE) and needs a note.
+  const missing = missingHighRiskNotes();
+  if (missing){ error = `${missing} high-risk Use pick(s) need a note before adding a video -- add the note, or un-pick them.`; render(); return; }
+  busy=true; error=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    await persistDecisions(reviewer);
+    const note = `Found via Gate 2's YouTube search for "${ytLastQuery}"` + (c.uploader?` (uploader: ${c.uploader})`:"") + ".";
+    await api("POST", `/jobs/${JOB}/assets/add-url`, {url:c.url, note, reviewer});
+    if (ytResults) ytResults = ytResults.filter(x=>x.id!==c.id);
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+function ytResultCard(c){
+  return h("div",{class:"card", style:"max-width:240px"},
+    c.thumbnail ? h("div",{class:"media"}, h("img",{src:c.thumbnail,loading:"lazy",alt:c.title||""})) : null,
+    h("div",{class:"body"},
+      h("div",{class:"title"}, c.title||"(untitled)"),
+      h("div",{class:"meta"}, (c.uploader||"unknown uploader") + (c.duration?` · ${Math.round(c.duration)}s`:"")),
+      c.description ? h("div",{class:"meta"}, c.description.slice(0,160)) : null,
+      h("div",{class:"meta"}, h("a",{href:c.url,target:"_blank",rel:"noopener"},"open on YouTube"))),
+    h("div",{class:"acts"},
+      h("button",{disabled:busy, onclick:()=>addYoutubeCandidate(c)}, "Add this one")));
+}
 function findMorePanel(){
   const suggestions = findMoreSuggestions();
   return h("div",{class:"panel"},
@@ -421,7 +463,18 @@ function findMorePanel(){
     h("div",{class:"bar",style:"flex-wrap:wrap;margin-top:2px"},
       FIND_SITES.map(site=>h("button",{title:site.note,
         onclick:()=>{window.open(site.url(findMoreQuery()), "_blank", "noopener");}},
-        site.label))));
+        site.label))),
+    h("div",{class:"bar",style:"margin-top:10px"},
+      h("button",{class:"primary",disabled:busy||ytLoading,onclick:searchYoutube}, ytLoading?"Searching YouTube...":"Search YouTube here (metadata only, nothing downloads yet)"),
+      h("select",{onchange:e=>{ytCount=Number(e.target.value);}},
+        [3,5,10].map(n=>h("option",{value:n,selected:n===ytCount},`${n} results`)))),
+    ytError?h("div",{class:"err"}, ytError):null,
+    ytResults ? (ytResults.length
+      ? h("div",{},
+          h("div",{class:"sub",style:"margin-top:6px"},`${ytResults.length} result(s) for "${ytLastQuery}" -- nothing downloaded yet; `+
+            `"Add this one" downloads that video and adds it pending, same as pasting its link into "Add links" (still high-risk, still needs a note).`),
+          h("div",{class:"grid"}, ytResults.map(ytResultCard)))
+      : h("div",{class:"sub",style:"margin-top:6px"},`No YouTube results for "${ytLastQuery}".`)) : null);
 }
 function card(a){
   const v = a.vetting||{}, d = decisions[a.id], r = risk(a), lbl = labels[a.id];
@@ -442,7 +495,8 @@ function card(a){
   const defText = def ? [def.description, def.formula_or_prompt, def.model_note,
       Object.keys(def.parameters||{}).length ? "Parameters: "+Object.entries(def.parameters).map(([k,val])=>`${k} = ${val}`).join("; ") : "",
       def.why_changed ? "Why this version: "+def.why_changed : ""].filter(Boolean).join("\n\n") : "";
-  const why = h("details",{}, h("summary",{},"Why this score and risk"),
+  const why = h("details",{open: whyOpen[a.id]!==false, ontoggle:e=>{whyOpen[a.id]=e.target.open;}},
+    h("summary",{},"Why this score and risk"),
     h("div",{class:"why"},
       `Relevance score: ${pct(score(a))}  (threshold at scoring time: ${pct(v.relevance_threshold)}, machine decision: ${v.relevance_decision||"n/a"})\n` +
       `${scoredBy}\n${v.relevance_why||"(no keyword to score against)"}\n` + contribLines +
