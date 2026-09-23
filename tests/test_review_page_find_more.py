@@ -106,6 +106,8 @@ class FindMoreTests(unittest.TestCase):
             "YouTube": "www.youtube.com",
             "Google Images": "www.google.com",
             "FindAGrave": "www.findagrave.com",
+            "TikTok": "www.tiktok.com",
+            "Facebook": "www.facebook.com",
         }
         out = self._run(
             'let q = "Richard Speck nurses & Cook County";\n'
@@ -120,6 +122,13 @@ class FindMoreTests(unittest.TestCase):
             # either break the request or silently drop part of the search
             self.assertNotIn(" ", url)
             self.assertNotIn("nurses &", url)
+
+    def test_instagram_is_deliberately_not_offered(self):
+        # Unlike the others, Instagram has no plain query-string search URL to link to at all (its search
+        # is a logged-in, JS-driven experience) -- a button would just be a dead link to its login page,
+        # not a shortcut to anything. Guards against it being added back without that being reconsidered.
+        out = self._run('console.log(JSON.stringify(FIND_SITES.map(s=>s.label)));')
+        self.assertNotIn("Instagram", json.loads(out))
 
 
 if __name__ == "__main__":

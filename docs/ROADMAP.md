@@ -39,6 +39,24 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: TikTok and Facebook link-outs in "Find more"; Instagram explicitly excluded (2026-09-23)
+Immediate follow-up: "what about facebook, instagram, tiktok?" -- same honest split as the rest of the
+panel rather than adding all three for symmetry. TikTok and Facebook got a genuine free query-string
+search URL added to `FIND_SITES` (`pipeline/api/review_page.py`), same discovery-link-only pattern as
+Google Images/YouTube -- Facebook's carries an explicit note that it almost always needs you already
+logged in to that browser to show anything. **Automated pull/search for any of the three was ruled out**,
+not deferred: yt-dlp's search shortcut is YouTube-specific, it has no equivalent for these, and all three
+have some of the strongest anti-scraping/login-wall protection of any platform -- building automated
+search against them would mean working around that at volume, a materially bigger step into ToS exposure
+than one deliberately pasted link. **Instagram got no button at all**, not even a link-out: unlike the
+other seven, it has no plain query-string search URL to link to -- its search is entirely logged-in and
+JS-driven -- so a button would only ever land on Instagram's login page, not a shortcut to anything.
+
+- 1 new test (`tests/test_review_page_find_more.py`, now 10): `expected_hosts` extended with
+  `www.tiktok.com`/`www.facebook.com`, plus a dedicated guard, `test_instagram_is_deliberately_not_offered`,
+  so Instagram's absence stays a documented decision rather than something that could silently drift back
+  in unnoticed. Full suite: 514 passing.
+
 ## Done: YouTube auto-search in "Find more", and risk reasons open by default (2026-09-23)
 Two follow-ups requested directly right after the "Find more" panel shipped. First: "is there a way to
 automate searching from here and pulling it and placing it a different section to review?" -- answered

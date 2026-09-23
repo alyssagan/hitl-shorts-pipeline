@@ -399,6 +399,13 @@ const FIND_SITES = [
    url:q=>`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(q)}`},
   {label:"FindAGrave", note:"often has family or school photos for named individuals, sometimes with clearer permission than press photos",
    url:q=>`https://www.findagrave.com/memorial/search?q=${encodeURIComponent(q)}`},
+  {label:"TikTok", note:"short clips and retrospectives, including for older cases -- same rule as YouTube: paste the URL into \"Add links\" rather than screen-recording, and it's auto-flagged high risk either way",
+   url:q=>`https://www.tiktok.com/search?q=${encodeURIComponent(q)}`},
+  {label:"Facebook", note:"local news pages and community/history groups sometimes carry period photos -- this almost always needs you to already be logged into Facebook in this browser to show anything",
+   url:q=>`https://www.facebook.com/search/top/?q=${encodeURIComponent(q)}`},
+  // Instagram deliberately not offered here -- unlike the others, it has no plain query-string search URL
+  // to link to at all (its search is a logged-in, JS-driven experience), so a button would just be a dead
+  // link to Instagram's own login page every time, not a shortcut to anything.
 ];
 function findMoreSuggestions(){
   const seen = new Set(), out = [];

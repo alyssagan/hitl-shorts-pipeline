@@ -105,13 +105,17 @@ pictured and where the usage rights stand, beyond what the automated flags alone
   openly-licensed archive APIs, which structurally can't carry platform videos, press photo archives, or public
   records -- often exactly what a specific case needs. The box defaults to the job's subject; clicking one of the
   suggestion chips (every approved keyword's term/entity/aliases, plus every visual-checklist label) swaps it in
-  without retyping. The six buttons below each open a real search on a free site in a new tab, prefilled with
+  without retyping. The eight buttons below each open a real search on a free site in a new tab, prefilled with
   whatever's in the box -- Internet Archive, Chronicling America (Library of Congress's own newspaper search, wider
-  than the automated source's query), Wikimedia Commons, YouTube, Google Images, and FindAGrave. These six never
-  fetch, download, or add anything -- they only open a search page for you to look at and judge yourself. Google
-  Images in particular is a discovery tool, not a rights source: it's there to help you find where a photo actually
-  lives, and whatever you find still needs its own license checked before use.
-  **Search YouTube here** (below the six buttons, requested directly) is the one of those six that's actually
+  than the automated source's query), Wikimedia Commons, YouTube, Google Images, FindAGrave, TikTok, and Facebook.
+  These eight never fetch, download, or add anything -- they only open a search page for you to look at and judge
+  yourself. Google Images in particular is a discovery tool, not a rights source: it's there to help you find where
+  a photo actually lives, and whatever you find still needs its own license checked before use. Facebook's search
+  almost always needs you to already be logged into Facebook in that same browser to show anything at all --
+  otherwise it's just a login page. Instagram is deliberately not in this list: unlike the others, it has no plain
+  query-string search URL to link to (its search is a logged-in, JS-driven experience), so a button for it would
+  only ever land on its login screen, not a shortcut to anything.
+  **Search YouTube here** (below the eight buttons, requested directly) is the one of those that's actually
   automatable: it runs the same search through yt-dlp (no paid API key) and lists candidates right on the page --
   thumbnail, title, uploader, duration, a description snippet -- for you to judge before anything downloads.
   Nothing downloads or gets added until you click **Add this one** on a specific result, which calls the exact same
