@@ -19,8 +19,10 @@ wikipedia_articles = 2
 pexels_videos = true
 pixabay_videos = true
 nasa_videos = true
-# Internet Archive: keep only items that carry a license or public-domain mark (most don't).
-archive_require_license = true
+# Internet Archive: most items have no licenseurl even when they're public domain, so by default
+# they're kept anyway (license shows as unknown, and vetting flags it for you to check) rather than
+# silently dropped from search results. Set true to go back to only keeping explicitly-licensed items.
+archive_require_license = false
 archive_max_mb = 60
 # URL list (yt-dlp): biggest download and tallest video to accept.
 url_max_mb = 200

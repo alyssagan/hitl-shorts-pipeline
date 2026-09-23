@@ -116,8 +116,10 @@ Still to judge by watching and comparing runs (record in OPTIONS_TO_TRY.md):
   (`response.rows[].content.descriptiveNonRepeating`) is from memory, because its docs page could not be read.
 - **Effect:** the first live search on each may reveal a difference. `sources/<name>/requests.jsonl` shows
   exactly what was asked and what status came back; a source that fails is skipped without stopping the others.
-- **Also:** Internet Archive search may match poorly for topics with few licensed items; Library of Congress leaves
-  items without a clear rights statement unlicensed (flagged high risk).
+- **Also:** Library of Congress and, as of 2026-09-23, Internet Archive both leave items without a clear rights
+  statement unlicensed rather than dropping them, so vetting can flag them high risk instead of you never seeing
+  them (see ROADMAP.md); set `archive_require_license = true` in `config/pipeline.toml` to go back to Archive
+  only surfacing explicitly-licensed items.
 - **Not built:** AI image generation (paid or heavy), by choice for now.
 
 ### 14. Terms of use for some sources are only partly met

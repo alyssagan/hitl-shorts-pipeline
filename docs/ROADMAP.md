@@ -162,6 +162,51 @@ say plainly when nothing was given, rather than inventing a countdown either way
   wording. See docs/LOGGING.md "How do I know when it'll restart?" for the full read. Full suite: 252 passing.
 
 
+## Done: Internet Archive no longer silently drops unlicensed items (2026-09-23)
+Prompted by a real job (Corazon Amurao / "The Ninth Nurse") coming back from asset search with zero usable
+assets. Investigated rather than assumed: the "0 found" number logged for Internet Archive on that job wasn't
+Archive's actual search-hit count -- `note["found"]` (`pipeline/sources/base.py::HttpSource.fetch()`) counts
+what a source's `search()` returns, and `InternetArchiveSource.search()` was `continue`-ing past (dropping)
+every result that lacked a `licenseurl` field *before* fetching that item's real metadata, title, or rights
+info -- so a topic like this, whose actual mid-20th-century crime-case photography mostly predates Archive's
+modern `licenseurl` convention, could search-match plenty of real items and still report zero.
+
+This is a real logic bug, not a keyword-length or query-matching problem (checked and ruled out separately --
+Commons/Archive/LOC all do relevance-ranked or literal-substring search on the query as given, none of them
+require an exact phrase match, so a longer keyword phrase isn't the mechanism here). The actual cause: Archive
+only populates `licenseurl` for items with an explicit modern CC declaration -- unlike Library of Congress,
+which writes a plain-English rights note (`rights_advisory`) on almost every record. `loc.py` already handles
+its own "rights unclear" case correctly: it never drops the item, it just ships it with `license=""` and lets
+`pipeline/vetting/rules.py::r_license()`'s `LIC_UNKNOWN` rule (severity high) flag it for a human to check.
+Internet Archive's `require_license = true` default was bypassing that same, already-built safety net entirely
+by never letting the item reach vetting (or the human reviewer) in the first place.
+
+- **`pipeline/sources/internet_archive.py`**: `require_license` now defaults to `False`. An item with no
+  `licenseurl` is still fetched (title, creator, description, the actual file) and included as a `Candidate`
+  with `license=""`, exactly mirroring `loc.py`'s pattern -- vetting's existing `LIC_UNKNOWN` flag is the real
+  gate now, not this source's search-side filter. Its description also gets a short note appended ("No license
+  info in the Archive.org record -- check the item page before use.") so a human reviewing it in the assets
+  page has the context without opening the source log. `require_license` stays a constructor parameter (and
+  `archive_require_license` in `config/pipeline.toml`, also now defaulting to `false`) for anyone who wants the
+  old, stricter "only explicitly-licensed items" behavior back.
+- **`pipeline/stages/registry.py`**: the `archive_require_license` config default flipped from `True` to
+  `False` to match, with a comment explaining why.
+- **Docs**: `docs/ADD_A_SOURCE.md`'s source table and `docs/KNOWN_LIMITATIONS.md` (#13) updated to describe the
+  new default and how to opt back into the old behavior.
+- **Tests**: `tests/test_more_sources.py::ArchiveTests` split into two cases -- default behavior now asserts
+  BOTH the licensed and unlicensed item come through (unlicensed one at `license == ""`, flagged `LIC_UNKNOWN`,
+  risk `high`), and a second test confirms `require_license=True` still reproduces the old, stricter behavior
+  for anyone relying on it. Caught and fixed an unrelated bug in the test fixture itself while doing this: both
+  mock file downloads returned identical byte content, so the pipeline's own hash-based duplicate-file dedup
+  (`HttpSource.fetch()`, correct, real behavior) was silently eating the second item in the old single-item
+  test -- fixed by giving each mocked download distinct content. Full suite: 253 passing.
+- **Not fixed by this change, still true**: the Corazon Amurao job may still come back thin on assets --
+  Wikipedia never contributes images (text-only by design), `pexels`/`pixabay` weren't in that job's
+  `--sources` list, and Commons hit its own rate limit mid-run on that attempt. This fix addresses one
+  confirmed over-filtering bug in one source; it doesn't guarantee any particular topic has enough historical
+  photography sitting in the free public-domain corpora these sources draw from.
+
+
 ## Done: drag-and-drop scene reorder + private per-scene notes (2026-09-23)
 Follow-up to the clip-matching/looping fix above. That same feedback message also raised two more things --
 "we haven't added the UI to move things around option" and "Notes: what would be a good way to put it.." -- and

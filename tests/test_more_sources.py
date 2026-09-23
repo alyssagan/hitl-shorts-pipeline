@@ -112,7 +112,7 @@ class NasaTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ArchiveTests(unittest.IsolatedAsyncioTestCase):
-    async def test_only_licensed_items_and_right_file(self):
+    def _handler(self):
         def h(req):
             if req.url.path == "/advancedsearch.php":
                 return httpx.Response(200, json={"response": {"docs": [
@@ -123,10 +123,30 @@ class ArchiveTests(unittest.IsolatedAsyncioTestCase):
                                                  "files": [{"name": "old.mp4", "size": "5000000", "format": "h.264"},
                                                            {"name": "old.ogv", "size": "9000000"},
                                                            {"name": "huge.mp4", "size": "900000000"}]})
-            return httpx.Response(200, content=BYTES)
+            if req.url.path == "/metadata/nolicense":
+                return httpx.Response(200, json={"metadata": {"title": "Random upload", "creator": "Someone"},
+                                                 "files": [{"name": "random.mp4", "size": "4000000"}]})
+            return httpx.Response(200, content=BYTES + str(req.url.path).encode())
+        return h
+
+    async def test_by_default_unlicensed_items_are_kept_and_flagged_not_dropped(self):
         with tempfile.TemporaryDirectory() as d:
-            ctx = make_ctx(Path(d), "archive", h)
+            ctx = make_ctx(Path(d), "archive", self._handler())
             res = await InternetArchiveSource().fetch(["film"], ctx)
+            self.assertEqual(len(res.assets), 2)
+            licensed = next(a for a in res.assets if a.source_url.endswith("/licensed/old.mp4"))
+            self.assertEqual(licensed.license, "Public Domain Mark 1.0")
+            self.assertEqual(risk(licensed), "low")
+            unlicensed = next(a for a in res.assets if a.source_url.endswith("/nolicense/random.mp4"))
+            self.assertEqual(unlicensed.license, "")
+            self.assertIn("check the item page before use", unlicensed.description)
+            self.assertIn("LIC_UNKNOWN", rules(unlicensed))
+            self.assertEqual(risk(unlicensed), "high")
+
+    async def test_require_license_true_still_drops_unlicensed_items(self):
+        with tempfile.TemporaryDirectory() as d:
+            ctx = make_ctx(Path(d), "archive", self._handler())
+            res = await InternetArchiveSource(require_license=True).fetch(["film"], ctx)
             self.assertEqual(len(res.assets), 1)
             a = res.assets[0]
             self.assertTrue(a.source_url.endswith("/licensed/old.mp4"))

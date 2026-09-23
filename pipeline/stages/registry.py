@@ -141,7 +141,9 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
     reg.register_source("unsplash", lambda: UnsplashSource(per_query=per_query))
     reg.register_source("nasa", lambda: NasaSource(per_query=per_query, videos_per_query=vids, videos=bool(src_cfg.get("nasa_videos", True))))
     reg.register_source("archive", lambda: InternetArchiveSource(
-        per_query=per_query, videos_per_query=vids, require_license=bool(src_cfg.get("archive_require_license", True)),
+        # Default is False: keep items with no licenseurl too (license="" -> vetting's LIC_UNKNOWN
+        # flags them for review) instead of silently dropping them search-side. See internet_archive.py.
+        per_query=per_query, videos_per_query=vids, require_license=bool(src_cfg.get("archive_require_license", False)),
         max_mb=int(src_cfg.get("archive_max_mb", 60))))
     reg.register_source("loc", lambda: LibraryOfCongressSource(per_query=per_query, videos_per_query=vids))
     reg.register_source("smithsonian", lambda: SmithsonianSource(per_query=per_query))

@@ -1,8 +1,14 @@
-"""Internet Archive (archive.org): films and photos that carry a license or public-domain mark.
+"""Internet Archive (archive.org): films and photos pulled from search, license or not.
 
-Most items have no license information, so by default only items with a `licenseurl` are kept
-(`require_license = true`); this is about search relevance, and the vetting step still flags
-what remains. Files over `max_mb` are skipped to keep downloads reasonable.
+Most items have no `licenseurl` in their metadata even when they're genuinely public domain --
+unlike Library of Congress, which writes a plain-English rights note on almost everything, Archive
+only populates `licenseurl` for explicit modern CC declarations. So, like `loc.py`, this source
+keeps items either way: one with no `licenseurl` is still fetched and included, just with
+`license=""`, and the vetting step's LIC_UNKNOWN rule (high severity) flags it for a human to check
+before use -- vetting is the real gate, not this source silently dropping things search-side.
+Set `require_license = true` (`archive_require_license` in pipeline.toml) to go back to the old,
+stricter behavior of dropping anything without a `licenseurl` before it's even fetched. Files over
+`max_mb` are skipped to keep downloads reasonable.
 """
 from __future__ import annotations
 
@@ -42,7 +48,7 @@ class InternetArchiveSource(HttpSource):
     name = "archive"
     label = "Internet Archive"
 
-    def __init__(self, per_query: int = 3, videos_per_query: int | None = None, require_license: bool = True, max_mb: int = 60):
+    def __init__(self, per_query: int = 3, videos_per_query: int | None = None, require_license: bool = False, max_mb: int = 60):
         super().__init__(per_query, videos_per_query)
         self.require_license = require_license
         self.max_bytes = max_mb * 1024 * 1024
@@ -76,10 +82,13 @@ class InternetArchiveSource(HttpSource):
             lic = cc_name(lic_url) or ("" if not lic_url else lic_url)
             page = f"https://archive.org/details/{ident}"
             ext = f["name"].rsplit(".", 1)[-1].lower()
+            desc = strip_html(_first(m.get("description")))[:400]
+            if not lic_url:
+                desc = (desc + " " if desc else "") + "No license info in the Archive.org record -- check the item page before use."
             out.append(Candidate(
                 url=DOWNLOAD.format(id=ident, name=f["name"].replace(" ", "%20")),
                 kind="video" if mt == "movies" else "image", mime=EXT_MIME.get(ext, ""), title=title,
-                description=strip_html(_first(m.get("description")))[:400], page_url=page, author=who,
+                description=desc, page_url=page, author=who,
                 license=lic, license_url=lic_url,
                 attribution=f'"{title}" by {who}, {lic or "license unknown"} ({lic_url}), via Internet Archive: {page}'.replace("()", "").replace("  ", " "),
                 meta={"archive_id": ident, "mediatype": mt, "file": f["name"]}))
