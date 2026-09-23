@@ -134,3 +134,19 @@ class Retry(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             mk.call_llm("http://primary", "m", "k", "p", waits=(), fallback=fallback)
         self.assertIn("Still busy", str(ctx.exception))
+
+    def test_request_carries_a_real_user_agent(self):
+        # Groq/Cloudflare rejected a real request with a bare "Python-urllib/..." User-Agent as a bot
+        # signature (403, unrelated to the key or rate limit) -- guards against that regressing.
+        seen = {}
+        def script(url, n):
+            return self._ok("ok")
+        calls = self._fake_urlopen(script)
+        import urllib.request
+        real_fake = urllib.request.urlopen
+        def spy(req, timeout=0):
+            seen["ua"] = req.get_header("User-agent")
+            return real_fake(req, timeout)
+        urllib.request.urlopen = spy
+        mk.call_llm("http://primary", "m", "k", "p", waits=())
+        self.assertTrue(seen["ua"] and "python-urllib" not in seen["ua"].lower())

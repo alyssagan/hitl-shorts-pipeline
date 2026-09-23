@@ -129,6 +129,38 @@ class PostChatFallbackTests(unittest.IsolatedAsyncioTestCase):
                 await post_chat(client, "http://primary.example/chat/completions", {}, {"model": "primary-model", "messages": []},
                                 what="x", waits=(), fallback=None)
 
+    async def test_both_primary_and_backup_requests_carry_a_real_user_agent(self):
+        # Some providers behind bot-protection (e.g. Groq/Cloudflare) reject Python's bare default User-Agent
+        # ("python-httpx/...") outright with a 403 unrelated to the API key or rate limit -- caught for real when
+        # Groq's fallback was first exercised against api.groq.com. Guards against that regressing silently.
+        seen = {}
+
+        def h(req: httpx.Request):
+            seen[req.url.host] = req.headers.get("user-agent", "")
+            if req.url.host == "primary.example":
+                self.primary_calls["n"] += 1
+                return httpx.Response(503, json={"error": "down"})
+            self.backup_calls["n"] += 1
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok-backup"}}]})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(h)) as client:
+            await post_chat(client, "http://primary.example/chat/completions", {}, {"model": "primary-model", "messages": []},
+                            what="x", waits=(), fallback=self.FALLBACK)
+        for host, ua in seen.items():
+            self.assertTrue(ua and not ua.startswith("python-httpx"), f"{host} got a bot-looking User-Agent: {ua!r}")
+
+    async def test_caller_supplied_user_agent_is_not_overridden(self):
+        seen = {}
+
+        def h(req: httpx.Request):
+            seen["ua"] = req.headers.get("user-agent", "")
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(h)) as client:
+            await post_chat(client, "http://primary.example/chat/completions", {"User-Agent": "custom/1.0"},
+                            {"model": "primary-model", "messages": []}, what="x", waits=(), fallback=None)
+        self.assertEqual(seen["ua"], "custom/1.0")
+
 
 if __name__ == "__main__":
     unittest.main()

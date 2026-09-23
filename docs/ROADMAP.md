@@ -80,6 +80,29 @@ find the real cause of both rather than guessing:
   should trigger (every gap automatically, or a per-scene opt-in). Not started; see backlog.
 
 
+## Done: LLM calls send a real User-Agent, fixing a Groq fallback 403 (2026-09-23)
+Prompted by the Groq backup provider failing with `403 error code: 1010` the first time it actually got
+exercised (Gemini's free tier was 429-busy on `make_keywords.py`). Error 1010 is Cloudflare's "banned based on
+your client's signature" response -- and neither the pipeline's LLM calls (`pipeline/stages/llm_http.py`, via
+httpx) nor `scripts/make_keywords.py` (via `urllib`) ever set a `User-Agent` header, so both were sending
+Python's bare default (`python-httpx/...` / `Python-urllib/...`) -- a well-known bot signature some providers'
+bot-protection blocks outright, unrelated to the API key or rate limit. The pipeline already does this correctly
+for every source adapter (`pipeline/sources/base.py::DEFAULT_USER_AGENT`, e.g. Wikipedia asks for exactly this)
+-- it just never got applied to LLM calls. Fixed both call paths:
+- `llm_http.py::post_chat()` now sets a real User-Agent on every request it makes, primary and fallback alike,
+  reusing the same `DEFAULT_USER_AGENT` the source adapters already use -- covers every LLM call site in the
+  pipeline (keywords, relevance, script) with no per-call-site change needed. Never overrides a caller-supplied
+  User-Agent if one's already set.
+- `scripts/make_keywords.py` gets its own copy of the same value (it's deliberately standard-library-only, no
+  pipeline package import) applied the same way.
+- 2 new tests in `tests/test_llm_fallback.py` (both primary and backup requests carry a non-bot-looking
+  User-Agent; a caller-supplied one isn't clobbered) and 1 in `tests/test_make_keywords.py`. Full suite: 240
+  passing.
+- Doesn't guarantee Groq will always answer -- a 429 from Gemini can still happen, and this only fixes a request
+  that was being rejected before it even reached Groq's rate limiter. If Groq still 429s after this, that's a
+  real "backup is also busy" case, not this bug.
+
+
 ## Done: drag-and-drop scene reorder + private per-scene notes (2026-09-23)
 Follow-up to the clip-matching/looping fix above. That same feedback message also raised two more things --
 "we haven't added the UI to move things around option" and "Notes: what would be a good way to put it.." -- and

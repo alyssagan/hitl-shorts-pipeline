@@ -1,4 +1,5 @@
 .env
+.env.bak*
 config/mpt-config.toml
 projects/*
 !projects/.gitkeep

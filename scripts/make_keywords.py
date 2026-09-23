@@ -32,6 +32,11 @@ from pathlib import Path
 
 DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 DEFAULT_MODEL = "gemini-3.6-flash"
+# Same value as pipeline/sources/base.py::DEFAULT_USER_AGENT -- duplicated here rather than imported since this
+# script is deliberately standard-library only (no pipeline package dependency). Without a real User-Agent,
+# some providers behind bot-protection (e.g. Groq/Cloudflare) reject the request outright as a Python-urllib
+# bot signature -- a 403 unrelated to the API key or rate limit.
+USER_AGENT = "hitl-shorts-pipeline/0.1 (personal video research tool)"
 
 PROMPT = """You write search keywords for a stock-footage and archive search, for a short true-crime video (a "reel") about: {topic}
 {era_line}
@@ -139,7 +144,8 @@ def _post_chat(base: str, model: str, key: str, prompt: str) -> tuple[str, dict]
     what retries and falls back."""
     body = json.dumps({"model": model, "temperature": 0.7, "messages": [{"role": "user", "content": prompt}]}).encode()
     req = urllib.request.Request(base.rstrip("/") + "/chat/completions", data=body, method="POST",
-                                 headers={"content-type": "application/json", "authorization": f"Bearer {key}"})
+                                 headers={"content-type": "application/json", "authorization": f"Bearer {key}",
+                                          "user-agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=90) as r:
         reply = json.loads(r.read())
         return reply["choices"][0]["message"]["content"], (reply.get("usage") or {})

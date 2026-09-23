@@ -23,9 +23,20 @@ from typing import Any
 import httpx
 
 from ..core import joblog, usage
+from ..sources.base import DEFAULT_USER_AGENT
 
 RETRY_STATUS = (429, 500, 502, 503, 504)
 WAITS = (4.0, 10.0, 25.0, 45.0)
+
+
+def _with_user_agent(headers: dict[str, str] | None) -> dict[str, str]:
+    """Every LLM endpoint call gets a real User-Agent, same reasoning as the source adapters
+    (pipeline/sources/base.py::DEFAULT_USER_AGENT): some providers sit behind bot-protection (e.g.
+    Cloudflare) that blocks Python's bare default UA ("python-httpx/...", "Python-urllib/...") outright --
+    a 403 with no relation to the API key or rate limit. Doesn't override a caller-supplied User-Agent."""
+    out = dict(headers or {})
+    out.setdefault("User-Agent", DEFAULT_USER_AGENT)
+    return out
 
 
 def _tag(resp: httpx.Response, model: str, *, fell_back: bool, provider: str = "primary") -> None:
@@ -52,6 +63,7 @@ async def post_chat(client: httpx.AsyncClient, url: str, headers: dict[str, str]
     behavior this function had before a fallback provider existed: no second attempt, and a network error that
     survives every retry is still raised rather than returned."""
     waits = WAITS if waits is None else waits
+    headers = _with_user_agent(headers)
     resp: httpx.Response | None = None
     last_exc: Exception | None = None
     for attempt in range(len(waits) + 1):
@@ -84,7 +96,7 @@ async def post_chat(client: httpx.AsyncClient, url: str, headers: dict[str, str]
         why = f"({type(last_exc).__name__})" if last_exc else f"({resp.status_code})"                    # type: ignore[union-attr]
         joblog.warn("llm", f"{what}: {payload.get('model')} unavailable {why} after retries; trying backup "
                            f"provider {fallback.get('provider', 'backup')} ({fallback['model']})")
-        fb_headers = {"Authorization": f"Bearer {fallback['api_key']}"} if fallback.get("api_key") else {}
+        fb_headers = _with_user_agent({"Authorization": f"Bearer {fallback['api_key']}"} if fallback.get("api_key") else {})
         fb_payload = {**payload, "model": fallback["model"]}
         fb_url = fallback["base_url"].rstrip("/") + "/chat/completions"
         provider = fallback.get("provider", "backup")
