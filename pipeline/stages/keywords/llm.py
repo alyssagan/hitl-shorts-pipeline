@@ -19,7 +19,6 @@ see docs/RUNNING.md "Better keywords for photo/video search".
 from __future__ import annotations
 
 import json
-import re
 
 import httpx
 
@@ -167,11 +166,49 @@ class LLMKeywordStage:
 _VALID_GROUPS = {"research", "case", "historical", "stock"}
 
 
+def _extract_json_array(text: str) -> str | None:
+    """The first top-level `[...]` in `text`, found by actually walking brackets/string state rather than a
+    greedy regex. `re.search(r"\\[.*\\]", text, re.DOTALL)` (the old approach) grabs from the FIRST `[` to the
+    LAST `]` in the WHOLE response -- fine when the model returns nothing but the array, but a chattier model
+    (seen from a backup/fallback provider after the primary one was busy, real production failure) often adds
+    trailing commentary after it ("Let me know if you'd like more options [here]."), and any `[`/`]` in THAT
+    text -- including inside a bracketed reference/footnote, completely unrelated to the JSON -- got swept
+    into the "array" and broke json.loads with a confusing delimiter error nowhere near the real problem.
+    This instead starts at the first `[` and tracks bracket depth (correctly ignoring `[`/`]` that appear
+    inside a JSON string, e.g. inside a "why" field) until depth returns to zero, which is the array's own
+    true close -- everything after that, however malformed, is simply not part of what gets parsed."""
+    start = text.find("[")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            continue
+        if c == '"':
+            in_string = True
+        elif c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None   # never closed -- truncated response
+
+
 def parse_keywords(text: str, source: str) -> list[Keyword]:
-    match = re.search(r"\[.*\]", text, re.DOTALL)
-    if not match:
+    array_text = _extract_json_array(text)
+    if not array_text:
         raise ValueError("keyword model did not return a JSON array")
-    items = json.loads(match.group(0))
+    items = json.loads(array_text)
     out = []
     for rank, item in enumerate(items, start=1):
         if not isinstance(item, dict) or not item.get("term"):

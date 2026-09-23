@@ -136,11 +136,33 @@ class KeywordTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(kws[0].meta["estimated"])
         self.assertEqual(kws[0].group, "historical")   # no "group" in this (older-style) response -> default
 
+    def test_parse_keywords_tolerates_trailing_prose_after_json(self):
+        # Real production failure: a backup/fallback provider (reached only after the primary model was
+        # busy/rate-limited) answered with the array followed by chatty commentary containing its own
+        # brackets ("... [here]."). The old greedy `re.search(r"\[.*\]", ..., re.DOTALL)` grabbed from the
+        # first `[` to the LAST `]` in the WHOLE response -- including that trailing bracket -- and
+        # json.loads then failed with a delimiter error nowhere near the actual problem.
+        text = ('[{"term":"cat facts","group":"stock","why":"x"}]\n\n'
+                'Let me know if you\'d like more options [here], happy to help further [end].')
+        kws = parse_keywords(text, "llm:m")
+        self.assertEqual(len(kws), 1)
+        self.assertEqual(kws[0].term, "cat facts")
+
+    def test_parse_keywords_tolerates_brackets_inside_a_string_value(self):
+        # A "[1]"-style citation marker INSIDE a field's own text must not be mistaken for the array's
+        # structural brackets while walking bracket depth.
+        text = '[{"term": "cat facts", "why": "cited as [1] in the source"}]'
+        kws = parse_keywords(text, "llm:m")
+        self.assertEqual(len(kws), 1)
+        self.assertEqual(kws[0].meta["why"], "cited as [1] in the source")
+
     def test_parse_keywords_errors(self):
         with self.assertRaises(ValueError):
             parse_keywords("no json here", "x")
         with self.assertRaises(ValueError):
             parse_keywords("[]", "x")
+        with self.assertRaises(ValueError):   # never closed -- a truncated/cut-off response
+            parse_keywords('[{"term": "cat facts"', "x")
 
     def test_parse_keywords_reads_the_structured_search_plan_fields(self):
         text = ('[{"term": "corazon amurao interview", "group": "case", "entity": "Corazon Amurao", '
