@@ -75,7 +75,10 @@ class Vetting(BaseModel):
     summary: str = ""                       # how the risk level was derived
     usable: bool = True                     # False when the renderer cannot use the file
     relevance_why: str = ""                # plain-English reason for the score
-    relevance_method: str = ""              # "llm:<model>" or "keyword-match" (empty = not scored, no topic given)
+    relevance_method: str = ""              # which scorer produced `relevance`, VERSIONED (docs/SCORING_CHANGELOG.md):
+                                             # "tfidf-vN", "llm-semantic-vN", or "keyword-match-vN" -- optionally with
+                                             # a trailing " (...)" note when it's a fallback (e.g. the LLM was unavailable
+                                             # for this item). Empty = not scored (no topic/keywords given yet).
     relevance: float | None = None          # 0..1 share of a keyword's words found in the asset's text; None = no topic given
 
 

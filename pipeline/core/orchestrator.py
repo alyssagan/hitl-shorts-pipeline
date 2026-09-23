@@ -31,11 +31,23 @@ from .store import JobStore
 from ..stages.base import StageContext
 from ..stages.registry import Registry
 from ..stages.sourcing import write_credits, write_manifests
-from ..vetting.rules import RELEVANCE_MIN, RULES, SCORING_FORMULA, STOPWORDS, VERSION as VETTING_VERSION, clean_term, vet_all
-from ..vetting.tfidf_relevance import tfidf_scores
+from ..vetting.rules import (RELEVANCE_MIN, RULES, STOPWORDS, VERSION as VETTING_VERSION,
+                              KEYWORD_MATCH_FORMULA, KEYWORD_MATCH_VERSION, clean_term, vet_all)
+from ..vetting.tfidf_relevance import FORMULA as TFIDF_FORMULA, VERSION as TFIDF_VERSION, tfidf_scores
+from ..vetting.llm_relevance import FORMULA as LLM_SEMANTIC_FORMULA, VERSION as LLM_SEMANTIC_VERSION
 
 VETTER = machine("vetting-rules", VETTING_VERSION)
 MATCHER = machine("clip-matcher", "1")
+
+# Every relevance-scoring method's CURRENT version -> the formula it actually uses (docs/SCORING_CHANGELOG.md has
+# the full history). Used by _apply_vetting() to record, in each run's `relevance_scoring` decision-log entry,
+# the real formula for whichever tier(s) actually scored assets that round -- never a stale, one-size-fits-all
+# description (see docs/SCORING_CHANGELOG.md for why that used to be wrong).
+RELEVANCE_FORMULA_BY_METHOD = {
+    KEYWORD_MATCH_VERSION: KEYWORD_MATCH_FORMULA,
+    TFIDF_VERSION: TFIDF_FORMULA,
+    LLM_SEMANTIC_VERSION: LLM_SEMANTIC_FORMULA,
+}
 
 STAGE_CATEGORY = {
     JobState.KEYWORDS_RUNNING: "keywords", JobState.SOURCING_RUNNING: "sourcing",
@@ -487,7 +499,7 @@ class Orchestrator:
 
         need, reused, confident = [], 0, 0
         for a in pending:
-            if a.vetting is not None and a.vetting.relevance_method == "llm-semantic":
+            if a.vetting is not None and a.vetting.relevance_method.split(" (")[0].startswith("llm-semantic"):
                 reused += 1
                 continue
             score = tfidf.get(a.id, (None, ""))[0]
@@ -518,7 +530,8 @@ class Orchestrator:
         tfidf_scores_batch, llm_scores = scores if scores is not None else ({}, None)
         terms = [k.term for k in job.approved_keywords] + list(job.providers.options.get("extra_queries", []))
         min_rel = float(job.providers.options.get("min_relevance", RELEVANCE_MIN))
-        vet_all(job.assets, terms, min_rel, llm_scores, tfidf_scores_batch)
+        vet_all(job.assets, terms, min_rel, llm_scores, tfidf_scores_batch,
+                llm_version=LLM_SEMANTIC_VERSION, tfidf_version=TFIDF_VERSION)
         by_risk: dict[str, int] = {}
         for a in job.assets:
             r = a.vetting.risk if a.vetting else "unvetted"
@@ -531,11 +544,19 @@ class Orchestrator:
         joblog.write(self.store.job_dir(job.id), "INFO", "vetting", f"vetted {len(job.assets)} assets", risk=by_risk,
                      scored_against=terms, min_relevance=min_rel, relevance_method=methods or None)
         hidden = sum(1 for a in job.assets if a.status == "pending" and a.vetting and a.vetting.relevance is not None and a.vetting.relevance < min_rel)
+        # Only the method(s) that actually scored an asset THIS round get their formula listed here -- e.g. a run
+        # with no LLM configured only ever shows tfidf-vN's formula, never a stale, one-size-fits-all description
+        # (docs/SCORING_CHANGELOG.md explains why that used to be wrong: the formula text never moved when the
+        # TF-IDF math was rewritten). Cross-reference a version against docs/SCORING_CHANGELOG.md for its full history.
+        methods_used = sorted(methods)
+        formulas_used = {m: RELEVANCE_FORMULA_BY_METHOD.get(m, "(unknown method version -- formula not on record; check docs/SCORING_CHANGELOG.md)")
+                          for m in methods_used}
         self._rec(job.id, "vetting", "relevance_scoring", VETTER, decision=f"{hidden} hidden below {round(min_rel * 100)}%",
                   reason="Every asset got a 0-100% relevance score against the approved keywords. Assets under the threshold are hidden from "
                          "the default review list (still saved on disk and approvable by asking to show hidden).",
-                  logic={"formula": SCORING_FORMULA, "keywords_scored_against": terms, "threshold": min_rel,
-                         "filler_words_ignored": sorted(STOPWORDS), "doc": "docs/SCORING.md"},
+                  logic={"methods_used_this_round": methods_used, "formulas_by_method": formulas_used,
+                         "keywords_scored_against": terms, "threshold": min_rel,
+                         "filler_words_ignored": sorted(STOPWORDS), "changelog": "docs/SCORING_CHANGELOG.md", "doc": "docs/SCORING.md"},
                   outputs={"hidden_count": hidden, "shown_count": sum(1 for a in job.assets if a.status == "pending") - hidden})
         for a in job.assets:
             if a.status != "pending":
@@ -544,7 +565,8 @@ class Orchestrator:
             score = "n/a" if v.relevance is None else f"{round(v.relevance * 100)}%"
             self._rec(job.id, "vetting", "vetted_asset", VETTER, decision=f"risk {v.risk}, relevance {score}", reason=v.summary,
                       subject={"asset_id": a.id, "title": a.title, "source": a.source},
-                      logic={"method": v.method, "rules_checked": [r[0] for r in RULES] + ["RELEVANCE_LOW"],
+                      logic={"method": v.method, "relevance_method": v.relevance_method or None,
+                             "rules_checked": [r[0] for r in RULES] + ["RELEVANCE_LOW"],
                              "fired": [f.model_dump() for f in v.flags],
                              "how_risk_is_set": "highest severity among fired rules; info flags don't raise it",
                              "auto_approves_or_rejects": False},

@@ -174,5 +174,5 @@ class RelevanceScorerWiringTests(unittest.TestCase):
                     time.sleep(0.02)
                 j = client.get(f"/jobs/{jid}").json()
                 self.assertEqual(j["state"], "assets_review")
-                self.assertTrue(all(a["vetting"]["relevance_method"] == "llm-semantic" for a in j["assets"]))
+                self.assertTrue(all(a["vetting"]["relevance_method"] == "llm-semantic-v1" for a in j["assets"]))
                 self.assertTrue(all(a["vetting"]["relevance"] == 0.05 for a in j["assets"]))

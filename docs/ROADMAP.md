@@ -99,6 +99,30 @@ both, scoped to free-tier-only per standing project rules:
   entry, so "which API, which model, tokens, where these came from" is answered from the job's own permanent
   record, not a terminal scrollback from weeks earlier. See docs/LOGGING.md "Where a keywords file came from".
 
+## Done: relevance-scoring method + algorithm version tracking (2026-09-22)
+Prompted by "are we logging how we scored certain images? which sort of method, and each time we change method we
+should be keeping track... nothing should be deleted" -- checked first rather than assumed, and the answer was a
+real gap: which tier (tfidf/llm-semantic/keyword-match) scored an asset lived only on the live asset and an
+ephemeral activity-log count, never in the permanent `vetted_asset` decision-log entry; and no scoring algorithm
+had a version identifier at all, so this session's two real TF-IDF rewrites (fixing a pooled-query dilution bug,
+then a cosine-similarity length-penalty bug) left no trace of which formula produced a given score. Fixed, purely
+additively -- nothing already written was touched, per the constraint:
+- Each of the three scorers now has its own version identifier (`KEYWORD_MATCH_VERSION` in
+  `pipeline/vetting/rules.py`, `VERSION` in `tfidf_relevance.py` and in `llm_relevance.py`), recorded as
+  `Vetting.relevance_method` (e.g. `tfidf-v3`, not just `tfidf`) and now written into the permanent
+  `vetted_asset` decision-log entry (`logic.relevance_method`) and the per-round `relevance_scoring` entry
+  (`logic.methods_used_this_round` / `logic.formulas_by_method`, replacing a single static formula string that
+  had already gone stale).
+- **`docs/SCORING_CHANGELOG.md`** (new): an append-only ledger of every version any scorer has ever shipped --
+  what it did, what changed from the version before it, and why. Reconstructed `tfidf-v1` and `tfidf-v2`
+  (both superseded, predating version tracking) from git history/code review alongside the current `tfidf-v3`,
+  so today's two undocumented rewrites are no longer invisible.
+- `tests/test_relevance_versioning.py` guards the wiring itself: it fails immediately if a future version bump
+  updates a `VERSION` constant without updating the matching default elsewhere or its changelog-adjacent formula
+  lookup, rather than the two silently drifting apart the way `method`/`SCORING_FORMULA` did before this.
+- See docs/LOGGING.md "Relevance-scoring method and version" and docs/SCORING.md "Tracking changes to the scoring
+  algorithm" for the full read on where this is recorded and how to compare scoring versions across runs.
+
 ## Ideas backlog (added 2026-09-20, not started)
 
 ### A. Notifications (Slack, readable on a phone)

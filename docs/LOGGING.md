@@ -184,3 +184,40 @@ INFO  relevance  keeping 187 previously LLM-scored asset(s) from an earlier roun
 INFO  relevance  41 asset(s) are clearly scored by TF-IDF (not within 0.15 of the 50% threshold), skipping the LLM for them
 INFO  relevance  scoring 12 asset(s) with gemini-3.6-flash in 1 batch(es)
 ```
+
+## Relevance-scoring method and version
+That activity-log line only ever shows a per-round *count* by tier ("tfidf" / "llm-semantic" / "keyword-match"), and it rotates
+away with the rest of the activity log. The permanent, per-job record is in `decisions.jsonl` / `DECISIONS.md`, and it now
+includes not just *which tier* scored an asset but *which version* of that tier's algorithm (docs/SCORING_CHANGELOG.md has the
+full version history) -- this closes a real gap: earlier, the algorithm could change (and did -- twice, for TF-IDF) with
+nothing in any log saying so.
+
+Each `vetted_asset` entry (one per pending asset, every vetting round) carries the asset's exact scorer+version in
+`logic.relevance_method`:
+
+```json
+{"action": "vetted_asset", "subject": {"asset_id": "a17", "title": "Whitechapel murders map, 1888"},
+ "decision": "risk low, relevance 82%",
+ "logic": {"method": "rules-v1", "relevance_method": "tfidf-v3", "rules_checked": [...], "fired": []}}
+```
+
+`logic.method` is the *risk-rules* engine's version (duplicate detection, resolution checks, etc. -- docs/VETTING.md) --
+unrelated to relevance scoring, despite the similar name. `logic.relevance_method` is the one that answers "which sort of
+method scored this specific image, and which version of it": `tfidf-v3`, `llm-semantic-v1`, or `keyword-match-v1` (optionally
+with a trailing `(...)` note when it's a fallback, e.g. `keyword-match-v1 (LLM unavailable/failed for this item)`).
+
+The once-per-round `relevance_scoring` entry now also records the *real* formula for whichever method(s) actually ran that
+round, instead of a single static description that didn't move when the code did:
+
+```json
+{"action": "relevance_scoring", "decision": "34 hidden below 50%",
+ "logic": {"methods_used_this_round": ["llm-semantic-v1", "tfidf-v3"],
+           "formulas_by_method": {"llm-semantic-v1": "no formula: ... a 0-100 judgment ...",
+                                   "tfidf-v3": "score = the BEST, over each approved keyword, of the IDF-weighted recall ..."},
+           "keywords_scored_against": [...], "threshold": 0.5, "changelog": "docs/SCORING_CHANGELOG.md"}}
+```
+
+To compare how different scoring approaches performed across runs -- the original ask behind this whole section -- grep a
+job's `decisions.jsonl` for `"action": "vetted_asset"` and group by `logic.relevance_method`; `docs/SCORING_CHANGELOG.md` tells
+you what each version string actually did, and your own Use/Irrelevant review decisions (`RELEVANCE_LABELS.jsonl`,
+docs/REVIEW_UI.md) are the ground truth for judging whether a given version's scores were any good.

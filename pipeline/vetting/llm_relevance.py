@@ -20,6 +20,16 @@ from ..core import joblog
 from ..core.models import Asset, Job
 from ..stages.llm_http import post_chat
 
+# Version of THIS scoring approach (docs/SCORING_CHANGELOG.md) -- bump this and add a changelog entry any time the
+# PROMPT below or the scoring logic changes meaningfully (not for e.g. a typo fix). This versions the METHOD, not
+# the model answering it -- switching Gemini for the Groq fallback (docs/LOGGING.md "LLM fallback provider") is
+# a different model answering the SAME prompt/method, so it keeps this same version.
+VERSION = "llm-semantic-v1"
+FORMULA = ("no formula: a free-tier LLM is shown each asset's title/description/tags/source/kind plus the job's "
+           "subject and approved keywords, and returns a 0-100 judgment of whether the asset actually depicts/"
+           "relates to the topic IN MEANING (not just shared vocabulary), with a one-line reason. See PROMPT in "
+           "pipeline/vetting/llm_relevance.py and docs/SCORING.md.")
+
 PROMPT = """You are checking whether photos/video clips actually relate to a specific true-story video, not just whether
 they share vocabulary with it. Subject: {subject}
 Keywords the researcher approved (what the video will cover): {keywords}

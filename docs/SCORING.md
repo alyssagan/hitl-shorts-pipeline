@@ -18,9 +18,11 @@ consulted for the assets that baseline can't confidently call.
    confident call (see "Borderline: who gets the LLM" below). It still scores in batches (25 assets per call by default), and a
    hard per-round cap keeps a bad case (lots of borderline assets at once) from burning through the free tier.
 
-Each asset's `vetting.relevance_method` says which one produced its score: `llm-semantic`, `tfidf`, or (only if TF-IDF itself
-found no usable text and no LLM score exists either) `keyword-match`. The review page's "Why this score and risk" panel shows it
-next to the score.
+Each asset's `vetting.relevance_method` says which one produced its score, and **which version of that method**
+(`docs/SCORING_CHANGELOG.md` has the full history of every version ever shipped): `llm-semantic-v1`, `tfidf-v3`,
+or (only if TF-IDF itself found no usable text and no LLM score exists either) `keyword-match-v1`, optionally with
+a trailing `(...)` note when it's a fallback (e.g. `keyword-match-v1 (LLM unavailable/failed for this item)`).
+The review page's "Why this score and risk" panel shows it next to the score.
 
 ## Why hybrid, not "LLM for everything"
 Sending every asset to an LLM (the old default) meant a 240-asset review made ~10 batched calls -- fine on a good day, but it
@@ -52,8 +54,10 @@ scorer produced the number. Under the threshold:
   page), and `ok` / "Use all shown" never approve it,
 - it is still downloaded, still numbered/clickable, and can still be approved by hand.
 
-Every asset's score, method and reason are shown in the review, written to `DECISIONS.md` / `decisions.jsonl`, and the `vetting`
-line in the activity log (`docs/LOGGING.md`) records how many assets each scorer covered that round.
+Every asset's score, method+version, and reason are shown in the review and written to `DECISIONS.md` / `decisions.jsonl` (the
+`vetted_asset` entry's `logic.relevance_method`), and the `vetting` line in the activity log (`docs/LOGGING.md`) records how many
+assets each scorer version covered that round. See "Tracking changes to the scoring algorithm" below for how algorithm *changes*,
+not just per-asset results, are kept.
 
 ## Only scoring what's necessary
 "Search again" keeps every not-yet-decided asset from earlier rounds and adds new ones from the next search. TF-IDF is free, so
@@ -101,8 +105,8 @@ max_llm_per_round = 40           # hard cap on LLM calls per vetting round, even
 ## Turning the LLM off
 Set `enabled = false` under `[relevance]` in `config/pipeline.toml`, or unset `GEMINI_API_KEY`, to use only the TF-IDF baseline
 (no LLM calls, no cost, no network dependency at all for scoring). `_score_relevance()` still computes and returns the TF-IDF
-scores for every asset; it just never has an LLM scorer to hand borderline ones to, so `relevance_method` is `tfidf` for
-everything. Nothing else about the review changes.
+scores for every asset; it just never has an LLM scorer to hand borderline ones to, so `relevance_method` is `tfidf-v3` (the
+current TF-IDF version, see below) for everything. Nothing else about the review changes.
 
 ## Tuning
 
@@ -122,3 +126,27 @@ description, not looking at the photo -- a future option is a real vision check 
 TF-IDF and the LLM can disagree on a borderline asset (the LLM's score wins, by design); `relevance_method` on each asset tells
 you which one actually produced its number, and your Use/Irrelevant clicks (`docs/REVIEW_UI.md`, `RELEVANCE_LABELS.jsonl`) are
 the record for checking how well either one is doing.
+
+## Tracking changes to the scoring algorithm
+Each of the three scorers has its own version identifier -- `KEYWORD_MATCH_VERSION` in `pipeline/vetting/rules.py`,
+`VERSION` in `pipeline/vetting/tfidf_relevance.py`, and `VERSION` in `pipeline/vetting/llm_relevance.py` -- and it's
+this identifier, not just the tier name, that lands in `relevance_method` (e.g. `tfidf-v3`, not just `tfidf`).
+Nothing is ever deleted or relabeled: whenever the actual scoring math changes, the version constant is bumped and
+a new, dated entry is appended to **`docs/SCORING_CHANGELOG.md`** describing exactly what changed and why -- that
+file is where you look up what a given version identifier actually did. Two rewrites of the TF-IDF formula are
+recorded there as `tfidf-v1` and `tfidf-v2` (both superseded, predating version tracking) leading to the current
+`tfidf-v3`.
+
+This shows up in two places per run:
+- **Per asset**, in the `vetted_asset` decision-log entry's `logic.relevance_method` (added alongside this
+  changelog -- previously this field existed on the live asset but was never written to the permanent log).
+- **Per run**, in the `relevance_scoring` entry's `logic.methods_used_this_round` and `logic.formulas_by_method`
+  -- the real formula for whichever method(s) actually scored an asset that round, not a single static
+  description that doesn't track code changes (which is what happened before: the logged formula text described
+  the keyword-match formula and never moved even while TF-IDF's real math changed underneath it).
+
+`pipeline/vetting/rules.py`'s `vet_asset()`/`vet_all()` accept the live version identifiers as parameters (the
+orchestrator always passes the real, current ones; their defaults exist only for direct/unit-test callers and are
+guarded against drifting from the source-of-truth constants by `tests/test_relevance_versioning.py`), so
+forgetting to update one of the two after bumping a `VERSION` constant fails a test immediately rather than
+silently going stale the way the old, unversioned `method` field did.

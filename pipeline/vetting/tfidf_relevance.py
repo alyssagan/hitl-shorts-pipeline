@@ -33,6 +33,25 @@ import math
 from ..core.models import Asset
 from .rules import STOPWORDS, asset_text, clean_term, tokens
 
+# Version of THIS scoring algorithm (docs/SCORING_CHANGELOG.md) -- bump this and add a changelog entry any time the
+# math in tfidf_scores() below changes, so a run's decision log (Vetting.relevance_method, and the vetted_asset /
+# relevance_scoring entries in decisions.jsonl) says exactly which formula actually produced each asset's score.
+#
+# History (see the changelog for the full story): this file has had three real implementations. Only this one
+# (v3) was ever given a version identifier -- v1 and v2 predate this constant entirely, so no asset scored by
+# either of them is distinguishable from the other in old logs; they're only reconstructable from git history.
+#   v1 - pooled every approved keyword into one combined query before scoring (diluted real matches)
+#   v2 - scored each keyword separately, kept the best (fixed dilution) -- but used symmetric cosine similarity,
+#        which penalized an asset for its own extra words (Commons category lists) as much as a keyword mismatch
+#   v3 - same per-keyword scoring as v2, but IDF-weighted RECALL instead of cosine (module docstring above) --
+#        the version this file ships today
+VERSION = "tfidf-v3"
+FORMULA = ("score = the BEST, over each approved keyword, of the IDF-weighted recall of that keyword's own words in "
+           "the asset's text: (sum of idf(w) for w in the keyword's words that also appear in the asset) / (sum of "
+           "idf(w) for all of the keyword's words), where idf(w) = ln((1 + N) / (1 + df(w))) + 1 (smoothed, like "
+           "scikit-learn's default) over a corpus of this batch's assets plus the keywords' own words. Recall, not "
+           "cosine similarity -- the asset's own extra words never count against it. 0.0 to 1.0. See docs/SCORING.md.")
+
 
 def _keyword_tokens(term: str) -> list[str]:
     seen: list[str] = []

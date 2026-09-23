@@ -134,12 +134,17 @@ function card(a){
     : h("img",{src:`/jobs/${JOB}/assets/${a.id}/file`,loading:"lazy",alt:a.title||"",onclick:()=>lightbox(a)});
   const flags = (v.flags||[]).map(f => h("div",{class:"flag"}, h("b",{}, f.rule+" ("+f.severity+")"), ": ", f.message,
                    h("div",{class:"meta"},"evidence: "+f.evidence)));
-  const methodLabel = {
-    "llm-semantic": "scored by: LLM (judged meaning, not just shared words)",
-    "tfidf": "scored by: TF-IDF (local, deterministic match against the approved keywords)",
-  };
+  const methodLabel = [
+    ["llm-semantic", "scored by: LLM (judged meaning, not just shared words)"],
+    ["tfidf", "scored by: TF-IDF (local, deterministic match against the approved keywords)"],
+    ["keyword-match", "scored by: plain keyword match (fallback -- TF-IDF/LLM score wasn't available for this item)"],
+  ];
+  // relevance_method is versioned (e.g. "tfidf-v3", docs/SCORING_CHANGELOG.md) -- match by prefix so the friendly
+  // label still shows, and print the exact version alongside it so two assets scored by different algorithm
+  // versions are visibly distinguishable here, not just in decisions.jsonl.
   const m = (v.relevance_method||"").split(" (")[0];
-  const scoredBy = methodLabel[m] || (v.relevance_method ? `scored by: ${v.relevance_method}` : "scored by: (not scored)");
+  const label = methodLabel.find(([prefix]) => m.startsWith(prefix));
+  const scoredBy = label ? `${label[1]} [${m}]` : (v.relevance_method ? `scored by: ${v.relevance_method}` : "scored by: (not scored)");
   const why = h("details",{}, h("summary",{},"Why this score and risk"),
     h("div",{class:"why"},
       `Relevance score: ${pct(score(a))}  (threshold ${pct(minScore)})\n${scoredBy}\n${v.relevance_why||"(no keyword to score against)"}\n` +
