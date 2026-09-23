@@ -74,6 +74,15 @@ class UrlListSource:
         self.max_mb = max_mb
         self.max_height = max_height
 
+    async def fetch_one(self, url: str, note: str, n: int, ctx: SourceContext) -> Asset:
+        """Extract a single URL (direct file or yt-dlp) into an Asset, outside the normal batch `fetch()` loop.
+        Used by the Gate 3 "drag a link onto a scene" endpoint (pipeline/core/orchestrator.add_scene_asset via
+        pipeline/api/app.py's scene_from_url), which adds one asset to a job that's already past sourcing rather
+        than running a whole sourcing round. `n` numbers the downloaded file so it doesn't collide with files
+        this source has already written for this project."""
+        e = normalize({"url": url, "note": note}, 0)
+        return await (self._direct(url, n, e, ctx) if self._is_direct(url) else self._ytdlp(url, n, e, ctx))
+
     async def fetch(self, queries: list[str], ctx: SourceContext) -> SourceResult:
         entries = [normalize(e, i) for i, e in enumerate((ctx.settings.get("job_options") or {}).get("urls", []))]
         entries = [e for e in entries if e["url"]]

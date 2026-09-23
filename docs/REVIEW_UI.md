@@ -34,13 +34,17 @@ docs/SCORING_CHANGELOG.md), every risk rule that fired with its evidence, and wh
   moves on to scenes. You only need to click Use on the ones you want. Anything left undecided (or hidden below the threshold) is
   recorded as rejected with a note saying it had no decision -- and is NOT counted as a label, since you didn't judge it. The button
   is disabled only if nothing is approved or a HIGH-risk item is missing its note.
-- **Get more** (bottom): two ways to pull more assets without leaving the page, both send you back to sourcing then
+- **Get more** (bottom): three ways to pull more assets without leaving the page, all send you back to sourcing then
   straight back here when the round finishes. **Next batch** is the one-click option -- pick a batch size (defaults to 10,
   or the job's current `max_queries`) and it searches that many of your already-approved keywords that haven't been
   searched yet; no feedback needed. It also sets that batch size as the job's `max_queries` for every round after this
   one (see "Many keywords: batches" in docs/RUNNING.md), so once you've picked a comfortable size you don't have to
   reset it each round. **Search again** is for steering it: add specific new search terms and/or say what was wrong;
-  fetches the next page of results without repeats.
+  fetches the next page of results without repeats. **Add links** (below the other two) is for a specific video/photo
+  you already have a URL for -- paste one or more, one per line, same `url | note | position` format as `scripts/poc.py
+  --urls`. A YouTube/TikTok/X/Vimeo/Instagram/news link is pulled with yt-dlp; a direct `.mp4`/`.jpg`/... link is
+  downloaded as-is. Works even on a job that didn't start with any URLs -- the `urls` source is added automatically.
+  Platform videos are flagged high risk by vetting the same as everything else, so approving one still needs a note.
 
 In the terminal, after submitting in the browser, type `web` at the asset prompt so the script carries on.
 
@@ -49,6 +53,14 @@ In the terminal, after submitting in the browser, type `web` at the asset prompt
 When the job reaches scene review, the same page switches to the script/scene editor -- reopen `/review/JOB_ID` (it refreshes on
 its own within a few seconds of the job getting there, or reload).
 
+- **Drag a clip onto a scene**, above the scene cards: every approved photo/video as a small thumbnail strip you can
+  drag onto any scene card to use it there -- a visual, drag-and-drop version of the Clip dropdown described below
+  (both do the same thing; use whichever's easier). A scene card also accepts two other kinds of drop directly: a
+  file dragged straight from your computer (uploads it and offers it for that scene), or a video/photo URL dropped
+  onto the card (pulled with yt-dlp/direct-download, same as Gate 2's "Add links"). Either way the new clip goes
+  through the same vetting every sourced asset gets -- low/medium risk (or you're asked for a note first) and it's
+  assigned to that scene immediately; high risk with no note yet is still kept, just left unassigned, and shows up
+  in a **"Dragged in, needs a decision"** panel with a note box and an Approve & use button.
 - **Full script**, at the top: this is the CURRENT script -- today's scene order and narration, exactly what will be spoken --
   not the frozen first draft (`job.script`, which never updates as you edit and would otherwise go stale after your first
   change). It updates live as you type in a scene below, along with a word count and estimated seconds spoken (words ÷ 2.6,

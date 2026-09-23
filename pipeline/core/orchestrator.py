@@ -31,7 +31,8 @@ from .store import JobStore
 from ..stages.base import RenderResult, StageContext
 from ..stages.registry import Registry
 from ..stages.sourcing import write_credits, write_manifests
-from ..vetting.rules import RELEVANCE_MIN, RULES, STOPWORDS, VERSION as VETTING_VERSION, asset_text, clean_term, vet_all
+from ..sources.urls import UrlListSource, normalize as normalize_url_entry, parse_url_lines
+from ..vetting.rules import RELEVANCE_MIN, RULES, STOPWORDS, VERSION as VETTING_VERSION, asset_text, clean_term, vet_all, vet_asset
 from ..vetting.tfidf_relevance import VERSION as TFIDF_VERSION, tfidf_scores
 from ..vetting.llm_relevance import VERSION as LLM_SEMANTIC_VERSION
 from ..vetting.method_registry import METHOD_VERSIONS
@@ -295,13 +296,21 @@ class Orchestrator:
 
     async def reject_assets(self, job_id: str, feedback: str = "", extra_queries: list[str] | None = None, *,
                              reviewer: str = "", max_queries: int | None = None, per_query: int | None = None,
-                             videos_per_query: int | None = None) -> Job:
+                             videos_per_query: int | None = None, extra_urls_text: str = "") -> Job:
         """Send the batch back to sourcing, optionally with new search terms and/or new per-job overrides:
         `max_queries` (how many approved keywords the next round, and every round after it, searches) and
         `per_query`/`videos_per_query` (how many photos/videos each source keeps PER keyword) -- see
         queries_for()/SourcingStage.run in pipeline/stages/sourcing.py. This is what backs both the review
         page's "Search again" (feedback + extra_queries) and its "Next batch" (max_queries only, no feedback
-        needed -- it just pulls more of the keywords already approved)."""
+        needed -- it just pulls more of the keywords already approved).
+
+        `extra_urls_text` is the review page's "Add links" box: one URL per line, same `url | note | position`
+        format scripts/poc.py's --urls file uses (parsed by pipeline/sources/urls.py's parse_url_lines). New
+        links are merged into job.providers.options["urls"] (deduped by URL, existing entries kept), and the
+        "urls" source is added to job.providers.sources if this job wasn't already pulling from it -- so a
+        job that started with only keyword-based sources can still have a link pasted into it mid-review. The
+        next sourcing round re-runs every configured source as usual; UrlListSource's own dedup (known_urls)
+        means already-downloaded links are skipped, not re-fetched."""
         actor = self._who(reviewer, require=True)
 
         def fn(job: Job) -> None:
@@ -316,11 +325,22 @@ class Orchestrator:
                 job.providers.options["per_query"] = int(per_query)
             if videos_per_query is not None:
                 job.providers.options["videos_per_query"] = int(videos_per_query)
+            new_urls = [e for e in parse_url_lines(extra_urls_text) if e["url"]]
+            if new_urls:
+                existing = list(job.providers.options.get("urls", []))
+                seen = {normalize_url_entry(e, i)["url"] for i, e in enumerate(existing)}
+                for e in new_urls:
+                    if e["url"] not in seen:
+                        existing.append(e)
+                        seen.add(e["url"])
+                job.providers.options["urls"] = existing
+                if "urls" not in job.providers.sources:
+                    job.providers.sources = [*job.providers.sources, "urls"]
             sm.apply(job, "reject_assets", note=feedback)
             self._rec(job.id, "assets", "rejected_asset_pool", actor, decision="reject",
                       reason=feedback or "(no reason given)",
                       outputs={"extra_queries": extra, "max_queries": max_queries, "per_query": per_query,
-                               "videos_per_query": videos_per_query})
+                               "videos_per_query": videos_per_query, "extra_urls": [e["url"] for e in new_urls] or None})
         return await self._mutate(job_id, fn)
 
     # ------------------------------------------------------------------ gate 3: scenes
@@ -369,6 +389,83 @@ class Orchestrator:
                 self._rec(job.id, "scenes", "reordered_scenes", actor, decision="reorder",
                           outputs={"before": before, "after": after})
             job.log("note", "scenes edited", order=after)
+        return await self._mutate(job_id, fn)
+
+    async def add_scene_asset(self, job_id: str, scene_id: str, asset: Asset, *, reviewer: str = "", note: str = "") -> Job:
+        """Add one asset -- already downloaded/uploaded to disk by the caller (pipeline/api/app.py's
+        scene_upload/scene_from_url; see pipeline/sources/upload.py and UrlListSource.fetch_one) -- and, if it's
+        usable, assign it to `scene_id`. This is the backend for Gate 3's "drag a file or a link onto a scene":
+        it runs the SAME vet_asset() every sourced asset gets, so a dragged-in clip doesn't skip the risk check
+        a searched one would get, only the sourcing round.
+
+        A HIGH-risk asset (an uploaded file with no license info, or a platform video pulled by URL) is still
+        added to job.assets as-is when no `note` is given, just left `pending` and NOT assigned to the scene --
+        never silently dropped, so nothing already downloaded is lost. Call approve_pending_scene_asset() with a
+        note once you have one to finish approving and assigning it. Only allowed while the job is waiting in
+        SCENES_REVIEW, same as edit_scenes()."""
+        actor = self._who(reviewer, require=True)
+
+        def fn(job: Job) -> None:
+            if job.state is not JobState.SCENES_REVIEW:
+                raise sm.TransitionError("footage can only be added during scene review")
+            scene = next((s for s in job.scenes if s.id == scene_id), None)
+            if scene is None:
+                raise ValueError(f"unknown scene id {scene_id}")
+            terms = [k.term for k in job.approved_keywords]
+            min_rel = float(job.providers.options.get("min_relevance", RELEVANCE_MIN))
+            asset.vetting = vet_asset(asset, job.assets + [asset], terms, min_rel)
+            job.assets.append(asset)             # always kept, even if it ends up pending -- see docstring
+            if not asset.vetting.usable:
+                self._rec(job.id, "scenes", "added_scene_asset_unusable", actor, decision="add",
+                          reason="; ".join(f.message for f in asset.vetting.flags if f.rule == "LOW_RES") or "not usable",
+                          subject={"scene_id": scene_id, "asset_id": asset.id, "source": asset.source},
+                          outputs={"risk": asset.vetting.risk})
+                return
+            if asset.vetting.risk == "high" and not note.strip():
+                self._rec(job.id, "scenes", "added_scene_asset_pending", actor, decision="add",
+                          reason=asset.vetting.summary,
+                          subject={"scene_id": scene_id, "asset_id": asset.id, "source": asset.source},
+                          outputs={"risk": asset.vetting.risk, "assigned": False})
+                return
+            asset.status = "approved"
+            asset.decision_note = note.strip()
+            asset.reviewer, asset.reviewed_at = actor.name, _now()
+            scene.clip_path, scene.asset_id, scene.clip_reason = asset.path, asset.id, "dragged in by a human"
+            self._rec(job.id, "scenes", "added_scene_asset", actor, decision="add",
+                      reason=note.strip() or "(no note)",
+                      subject={"scene_id": scene_id, "asset_id": asset.id, "source": asset.source},
+                      outputs={"risk": asset.vetting.risk, "assigned": True})
+        return await self._mutate(job_id, fn)
+
+    async def approve_pending_scene_asset(self, job_id: str, asset_id: str, scene_id: str, *,
+                                           reviewer: str = "", note: str = "") -> Job:
+        """Finish approving an asset add_scene_asset() left pending (high risk, no note yet) and assign it to
+        `scene_id`. Mirrors review_assets()' high-risk-needs-a-note rule, just for one asset outside Gate 2."""
+        actor = self._who(reviewer, require=True)
+
+        def fn(job: Job) -> None:
+            if job.state is not JobState.SCENES_REVIEW:
+                raise sm.TransitionError("footage can only be approved during scene review")
+            asset = next((a for a in job.assets if a.id == asset_id), None)
+            if asset is None:
+                raise ValueError(f"unknown asset id {asset_id}")
+            scene = next((s for s in job.scenes if s.id == scene_id), None)
+            if scene is None:
+                raise ValueError(f"unknown scene id {scene_id}")
+            if asset.vetting and not asset.vetting.usable:
+                raise ValueError(f"asset {asset_id} can't be used: "
+                                  f"{'; '.join(f.message for f in asset.vetting.flags if f.rule == 'LOW_RES')}")
+            if asset.vetting and asset.vetting.risk == "high" and not note.strip():
+                raise ValueError(f"'{asset.title or asset.source}' is HIGH risk ({asset.vetting.summary}). "
+                                  "Add a note explaining why approving it is OK.")
+            asset.status = "approved"
+            asset.decision_note = note.strip()
+            asset.reviewer, asset.reviewed_at = actor.name, _now()
+            scene.clip_path, scene.asset_id, scene.clip_reason = asset.path, asset.id, "dragged in by a human"
+            self._rec(job.id, "scenes", "added_scene_asset", actor, decision="add",
+                      reason=note.strip() or "(no note)",
+                      subject={"scene_id": scene_id, "asset_id": asset.id, "source": asset.source},
+                      outputs={"risk": asset.vetting.risk if asset.vetting else "unvetted", "assigned": True, "was_pending": True})
         return await self._mutate(job_id, fn)
 
     async def approve_scenes(self, job_id: str, approve_all: bool = True, *, reviewer: str = "") -> Job:

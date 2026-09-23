@@ -92,6 +92,7 @@ async function loadLog(){
 }
 let job=null, decisions={}, notes={}, labels={}, labelSaved={}, labelForms={}, dupIds={}, minScore=0.5, showHidden=false, srcFilter="", kindFilter="", sortBy="risk", busy=false, error="", batchSize=10;
 let sceneNarration={}, sceneOrder=null, sceneClipOverride={}, sceneNotes={}, dragSceneId=null;
+let dragAssetPath=null, pendingIntent={};   // pendingIntent: assetId -> scene id it was dragged onto, while it's still high-risk/pending
 let methodDefs={}, labelReasons=[];
 
 async function loadStatic(){
@@ -321,6 +322,25 @@ async function searchAgain(){
     busy=false; await load();
   }catch(e){ busy=false; error=String(e.message||e); render(); }
 }
+async function addUrls(){
+  // Gate 2's "Add links" box: paste one or more URLs (like RankReel's link import), same "url | note | position"
+  // format scripts/poc.py's --urls file uses. Backed by the same /assets/reject endpoint as Search again/Next
+  // batch (extra_urls_text), so it saves your picks first and re-runs sourcing -- yt-dlp/direct-download for
+  // whatever's new, nothing already pulled gets re-fetched.
+  const ta = document.getElementById("urlsbox");
+  const text = ta.value;
+  if (!text.trim()){ error="Paste at least one URL first."; render(); return; }
+  const missing = missingHighRiskNotes();
+  if (missing){ error = `${missing} high-risk Use pick(s) need a note before adding links -- add the note, or un-pick them.`; render(); return; }
+  busy=true; error=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    await persistDecisions(reviewer);
+    await api("POST",`/jobs/${JOB}/assets/reject`,{extra_urls_text:text, reviewer});
+    ta.value = "";
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
 async function nextBatch(){
   // Just pulls the next `batchSize` keywords that haven't been searched yet -- no new terms, no reason needed.
   // Sets job.providers.options.max_queries for every round from here on (docs/RUNNING.md "Many keywords: batches").
@@ -383,6 +403,91 @@ function dropScene(targetId){
   sceneOrder = ids;
   render();
 }
+// -------- Gate 3 drag-and-drop onto a scene: an approved asset (assign), a file from your computer
+// (upload), or a video/photo URL (extract) -- see onSceneDrop() below for which one a drop turns into.
+function onSceneDragOver(e){ e.preventDefault(); e.dataTransfer.dropEffect = (dragSceneId && !dragAssetPath) ? "move" : "copy"; }
+async function onSceneDrop(e, sceneId){
+  e.preventDefault();
+  if (dragAssetPath){ sceneClipOverride[sceneId]=dragAssetPath; dragAssetPath=null; render(); return; }
+  if (dragSceneId){ dropScene(sceneId); return; }
+  if (e.dataTransfer.files && e.dataTransfer.files.length){ await uploadToScene(sceneId, e.dataTransfer.files[0]); return; }
+  const text = (e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain") || "").trim();
+  if (/^https?:\/\//i.test(text)){ await urlToScene(sceneId, text); return; }
+}
+function noteAfterAssetAdd(sceneId, prevIds, updatedJob){
+  for (const a of (updatedJob.assets||[])) if (!prevIds.has(a.id) && a.status==="pending") pendingIntent[a.id]=sceneId;
+}
+async function uploadToScene(sceneId, file){
+  busy=true; error=""; render();
+  try{
+    const prevIds = new Set(job.assets.map(a=>a.id));
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("reviewer", (store.get("reviewer")||"").trim());
+    const r = await fetch(`/jobs/${JOB}/scenes/${sceneId}/upload`, {method:"POST", body: fd});
+    const j = await r.json().catch(()=>({}));
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    noteAfterAssetAdd(sceneId, prevIds, j);
+    job = j; busy=false; render();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function urlToScene(sceneId, url){
+  busy=true; error=""; render();
+  try{
+    const prevIds = new Set(job.assets.map(a=>a.id));
+    const reviewer = (store.get("reviewer")||"").trim();
+    const j = await api("POST", `/jobs/${JOB}/scenes/${sceneId}/from-url`, {url, reviewer});
+    noteAfterAssetAdd(sceneId, prevIds, j);
+    job = j; busy=false; render();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function approvePendingAsset(assetId){
+  const sceneId = pendingIntent[assetId];
+  if (!sceneId) return;
+  const el = document.getElementById("pend-note-"+assetId);
+  const note = el ? el.value : "";
+  busy=true; error=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    await api("POST", `/jobs/${JOB}/scenes/${sceneId}/approve-pending`, {asset_id: assetId, note, reviewer});
+    delete pendingIntent[assetId];
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+function sceneNumberFor(sceneId){
+  const i = orderedScenes().findIndex(s=>s.id===sceneId);
+  return i<0 ? "?" : i+1;
+}
+function assetStrip(){
+  const approved = job.assets.filter(a=>a.status==="approved");
+  if (!approved.length) return null;
+  return h("div",{class:"panel"},
+    h("b",{},"Drag a clip onto a scene to use it"),
+    h("div",{class:"sub"},"Every approved photo/video (sourced or dragged in). A scene card also accepts a file "+
+      "dragged straight from your computer, or a video/photo link dropped onto it."),
+    h("div",{style:"display:flex;gap:8px;overflow-x:auto;padding:8px 0"},
+      approved.map(a => h("div",{draggable:"true", title:a.title||a.id,
+          style:"flex:none;width:84px;height:84px;border:2px solid var(--line);border-radius:8px;overflow:hidden;"+
+                "cursor:grab;background:#000;display:flex;align-items:center;justify-content:center",
+          ondragstart:e=>{dragAssetPath=a.path; e.dataTransfer.effectAllowed="copy"; e.dataTransfer.setData("text/plain",a.path);},
+          ondragend:()=>{dragAssetPath=null;}},
+        a.kind==="video"
+          ? h("video",{src:`/jobs/${JOB}/assets/${a.id}/file`,muted:true,style:"max-width:100%;max-height:100%"})
+          : h("img",{src:`/jobs/${JOB}/assets/${a.id}/file`,style:"max-width:100%;max-height:100%;object-fit:cover"})))));
+}
+function pendingAssetsPanel(){
+  const pend = job.assets.filter(a=>a.status==="pending");
+  if (!pend.length) return null;
+  return h("div",{class:"panel"},
+    h("b",{},"Dragged in, needs a decision"),
+    h("div",{class:"sub"},"High risk (unknown license, or a platform video someone else uploaded) -- add a note saying "+
+      "why it's OK to use, then approve. It isn't assigned to any scene until you do."),
+    pend.map(a => h("div",{style:"display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap"},
+      h("span",{class:"meta"}, (a.title||a.id) + (pendingIntent[a.id] ? ` -- for scene ${sceneNumberFor(pendingIntent[a.id])}` : " -- no scene picked")),
+      h("span",{class:"b hi"}, a.vetting ? a.vetting.risk : "?"),
+      h("input",{type:"text",id:"pend-note-"+a.id,placeholder:"why is this OK to use?",style:"flex:1;min-width:160px"}),
+      h("button",{disabled: busy || !pendingIntent[a.id], onclick:()=>approvePendingAsset(a.id)}, "Approve & use"))));
+}
 async function saveSceneEdits(reviewer){
   const edits = {};
   for (const s of job.scenes){
@@ -435,7 +540,7 @@ function sceneCard(s, i, n){
         .map(([v,t])=>h("option",{value:v,selected:v===curClip},t)))) : null;
   const dragging = dragSceneId===s.id;
   return h("div",{class:"panel", style: dragging ? "opacity:.4" : "",
-      ondragover:e=>{e.preventDefault(); e.dataTransfer.dropEffect="move";}, ondrop:e=>{e.preventDefault(); dropScene(s.id);}},
+      ondragover:onSceneDragOver, ondrop:e=>onSceneDrop(e,s.id)},
     h("div",{class:"bar"},
       h("span",{draggable:"true",title:"Drag to reorder",style:"cursor:grab;font-size:16px;color:var(--mute);user-select:none;padding:0 4px;",
           ondragstart:e=>{dragSceneId=s.id; e.dataTransfer.effectAllowed="move"; e.dataTransfer.setData("text/plain",s.id);},
@@ -443,7 +548,7 @@ function sceneCard(s, i, n){
       h("b",{}, `Scene ${i+1} of ${n}`),
       h("button",{disabled:i===0,onclick:()=>moveScene(s.id,-1),title:"Move earlier"},"↑"),
       h("button",{disabled:i===n-1,onclick:()=>moveScene(s.id,1),title:"Move later"},"↓"),
-      h("span",{class:"meta"}, s.clip_path ? "clip: "+s.clip_path.split("/").pop() : "NO CLIP -- approve more assets or add footage to library/clips"),
+      h("span",{class:"meta"}, s.clip_path ? "clip: "+s.clip_path.split("/").pop() : "NO CLIP -- drag one onto this card, or add footage to library/clips"),
       s.clip_reason?h("span",{class:"meta"},"("+s.clip_reason+")"):null,
       clipPicker),
     h("div",{class:"meta",style:"margin-top:6px"}, "Narration (spoken)"),
@@ -499,7 +604,15 @@ function render(){
       h("div",{class:"bar",style:"margin-top:8px"},
         h("input",{type:"text",id:"xq",placeholder:"e.g. whitechapel 1888, victorian london street",size:44}),
         h("input",{type:"text",id:"fb",placeholder:"what was wrong with these?",size:34}),
-        h("button",{disabled:busy,onclick:searchAgain},"Search again"))) : null);
+        h("button",{disabled:busy,onclick:searchAgain},"Search again")),
+      h("div",{style:"margin-top:12px;padding-top:12px;border-top:1px solid var(--line)"},
+        h("div",{class:"sub"},"Or add links -- a YouTube/TikTok/X/Vimeo/Instagram/news link (pulled with yt-dlp) or a direct "+
+          ".mp4/.jpg/... link, one per line. Optionally \"URL | note | position\" (position: a scene number or intro/end). "+
+          "Platform videos are flagged high-risk by vetting -- approving one needs a written reason, same as everywhere else."),
+        h("textarea",{id:"urlsbox",class:"note",style:"min-height:70px;font-family:monospace",
+            placeholder:"https://www.youtube.com/watch?v=... | crime-scene b-roll | 3\nhttps://example.com/clip.mp4"}),
+        h("div",{class:"bar",style:"margin-top:6px"},
+          h("button",{class:"primary",disabled:busy,onclick:addUrls},"Add links")))) : null);
   $app.replaceChildren(top, body);
   updateSubmit();
   document.querySelectorAll("video").forEach(v=>v.muted=true);
@@ -523,6 +636,8 @@ function sceneReviewBody(){
         "Edit the narration in each scene's box; reorder scenes with the ↑/↓ buttons."),
       h("div",{id:"scriptWords",class:"meta",style:"margin:4px 0"}, scriptWordsLine()),
       h("pre",{id:"scriptPreview",class:"why",style:"max-height:320px;overflow:auto"}, scriptText())),
+    assetStrip(),
+    pendingAssetsPanel(),
     h("div",{}, scenes.map((s,i)=>sceneCard(s,i,scenes.length))),
     h("div",{class:"panel"},
       h("div",{class:"bar"},

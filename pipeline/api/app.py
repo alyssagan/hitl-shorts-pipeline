@@ -8,13 +8,21 @@
                                         duplicate_of_asset_id?}}, reviewer}    GATE 2 per asset
   POST /jobs/{id}/assets/approve      {reviewer, note?}                        GATE 2 done -> scenes
   POST /jobs/{id}/assets/reject       {feedback, extra_queries?, max_queries?, per_query?, videos_per_query?,
-                                        reviewer}   GATE 2 search again / next batch (max_queries alone, no
-                                        feedback, just pulls more keywords) / more photos per keyword
+                                        extra_urls_text?, reviewer}   GATE 2 search again / next batch
+                                        (max_queries alone, no feedback, just pulls more keywords) / more
+                                        photos per keyword / add links (one per line, "url | note | position")
   POST /jobs/{id}/assets/label        {asset_id, label, reviewer, reason?, note?, duplicate_of_asset_id?}
                                         save a Use/Duplicate/Irrelevant label any time, any job state (docs/EVALUATION.md)
   GET  /methods                        what each relevance-scoring method+version does (docs/SCORING_CHANGELOG.md)
   GET  /label-reasons                  the three labels and the suggested (extensible) reason list
   PATCH /jobs/{id}/scenes             {order?, edits?, reviewer}               reorder / edit
+  POST /jobs/{id}/scenes/{scene_id}/upload         multipart: file, note?, reviewer?   GATE 3 drag a file
+                                        from your computer onto a scene (adds it as an asset, assigns it if
+                                        not high-risk / a note is given)
+  POST /jobs/{id}/scenes/{scene_id}/from-url       {url, note?, reviewer?}     GATE 3 drop a video/photo
+                                        link onto a scene (yt-dlp/direct download, same as the 'urls' source)
+  POST /jobs/{id}/scenes/{scene_id}/approve-pending {asset_id, note?, reviewer?}  finish approving+assigning
+                                        an asset the two routes above left pending (high risk, no note yet)
   POST /jobs/{id}/scenes/approve      {reviewer}                               GATE 3 approve -> rendering
   POST /jobs/{id}/scenes/reject       {feedback, reviewer}                     GATE 3 re-run
   POST /jobs/{id}/back-to-keywords    | /back-to-assets | /cancel | /retry
@@ -45,6 +53,9 @@ from ..core import state_machine as sm
 from ..core.models import Job, ProviderChoice
 from ..core.orchestrator import LABELS, Orchestrator, SUGGESTED_LABEL_REASONS
 from ..core.store import JobNotFound, JobStore
+from ..sources.base import LoggedHttp, SourceContext
+from ..sources.upload import asset_from_upload
+from ..sources.urls import UrlListSource
 from ..stages.registry import Registry, build_default_registry
 from ..vetting.method_registry import as_json as method_definitions_json
 from .review_page import PAGE
@@ -143,6 +154,49 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         d = await body(r)
         return await orch.edit_scenes(r.path_params["id"], d.get("order"), d.get("edits"), reviewer=d.get("reviewer", ""))
 
+    async def scene_upload(r: Request):
+        """Drag a file from your computer onto a scene card. multipart/form-data: file, note?, reviewer?."""
+        job_id, scene_id = r.path_params["id"], r.path_params["scene_id"]
+        form = await r.form()
+        upload = form.get("file")
+        if upload is None or not getattr(upload, "filename", ""):
+            raise HTTPException(400, "no file in the upload")
+        data = await upload.read()
+        if not data:
+            raise HTTPException(400, "uploaded file was empty")
+        project_dir = orch.store.job_dir(job_id)
+        try:
+            asset = asset_from_upload(data, upload.filename, project_dir / "sources" / "upload" / "files", project_dir,
+                                       note=str(form.get("note", "")))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return await orch.add_scene_asset(job_id, scene_id, asset, reviewer=str(form.get("reviewer", "")), note=str(form.get("note", "")))
+
+    async def scene_from_url(r: Request):
+        """Drop a video/photo link onto a scene card. JSON: {url, note?, reviewer?}."""
+        job_id, scene_id = r.path_params["id"], r.path_params["scene_id"]
+        d = await body(r)
+        url = (d.get("url") or "").strip()
+        if not url:
+            raise HTTPException(400, "url is required")
+        job = orch.get(job_id)                       # 404 if unknown, before spending time on a download
+        project_dir = orch.store.job_dir(job_id)
+        src_dir = project_dir / "sources" / "urls"
+        (src_dir / "files").mkdir(parents=True, exist_ok=True)
+        ctx = SourceContext(project_dir=project_dir, dir=src_dir, http=LoggedHttp(src_dir, "urls"), subject=job.subject,
+                            known_urls={a.source_url for a in job.assets if a.source == "urls"},
+                            known_hashes={a.sha256 for a in job.assets if a.sha256})
+        try:
+            asset = await UrlListSource().fetch_one(url, d.get("note", ""), len(job.assets) + 1, ctx)
+        except Exception as exc:
+            raise HTTPException(422, f"couldn't get that link: {type(exc).__name__}: {exc}") from None
+        return await orch.add_scene_asset(job_id, scene_id, asset, reviewer=d.get("reviewer", ""), note=d.get("note", ""))
+
+    async def scene_approve_pending(r: Request):
+        d = await body(r)
+        return await orch.approve_pending_scene_asset(r.path_params["id"], d.get("asset_id", ""), r.path_params["scene_id"],
+                                                       reviewer=d.get("reviewer", ""), note=d.get("note", ""))
+
     async def scenes_approve(r: Request):
         d = await body(r)
         return await orch.approve_scenes(r.path_params["id"], reviewer=d.get("reviewer", ""))
@@ -175,7 +229,8 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         d = await body(r)
         return await orch.reject_assets(r.path_params["id"], d.get("feedback", ""), d.get("extra_queries"),
                                          reviewer=d.get("reviewer", ""), max_queries=d.get("max_queries"),
-                                         per_query=d.get("per_query"), videos_per_query=d.get("videos_per_query"))
+                                         per_query=d.get("per_query"), videos_per_query=d.get("videos_per_query"),
+                                         extra_urls_text=d.get("extra_urls_text", ""))
 
     async def back(r: Request):
         d = await body(r)
@@ -266,6 +321,9 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/usage", wrap(usage_view), methods=["GET"]),
         Route(f"{P}/back-to-assets", wrap(back_assets), methods=["POST"]),
         Route(f"{P}/scenes", wrap(scenes_edit), methods=["PATCH"]),
+        Route(f"{P}/scenes/{{scene_id}}/upload", wrap(scene_upload), methods=["POST"]),
+        Route(f"{P}/scenes/{{scene_id}}/from-url", wrap(scene_from_url), methods=["POST"]),
+        Route(f"{P}/scenes/{{scene_id}}/approve-pending", wrap(scene_approve_pending), methods=["POST"]),
         Route(f"{P}/scenes/approve", wrap(scenes_approve), methods=["POST"]),
         Route(f"{P}/scenes/reject", wrap(scenes_reject), methods=["POST"]),
         Route(f"{P}/back-to-keywords", wrap(back), methods=["POST"]),

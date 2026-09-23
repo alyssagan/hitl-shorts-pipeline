@@ -40,6 +40,49 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
 
+## Done: drag-and-drop footage + link extraction, the two RankReel features Aly asked for by name (2026-09-23)
+Prompted directly: comparing this pipeline against three different "RankReel" products turned up two real gaps
+worth closing -- RankReel's drag-and-drop editing, and pulling video straight off a URL the way RankReels.ai
+and the existing `pipeline/sources/urls.py` (yt-dlp) already do. Two follow-up `AskUserQuestion` calls scoped
+exactly what to build (both a job-creation-time and a mid-job path for links; all three drag targets: an
+approved asset, a local file, and a URL).
+
+- **URL input, job creation**: `scripts/poc.py --urls -` reads pasted/piped multiline URL text (same
+  `url | note | position` format the `--urls FILE` flag always used) instead of requiring a saved file first.
+- **URL input, mid-job (Gate 2)**: a new "Add links" box in the review page's "Get more" panel, backed by
+  `Orchestrator.reject_assets(extra_urls_text=...)` -- merges newly pasted links into
+  `job.providers.options["urls"]` (deduped by URL, existing notes kept) and adds the `"urls"` source to
+  `job.providers.sources` if the job wasn't already pulling from it, then re-runs sourcing exactly like
+  "Search again"/"Next batch" already do. A job that started with only keyword-based sources can now have a
+  link pasted into it later without being recreated.
+- **Drag-and-drop, Gate 3 (`pipeline/api/review_page.py`)**: the existing scene-reorder drag handle is now one of
+  three things a drop on a scene card can mean -- (1) drag a thumbnail from a new strip of approved assets onto
+  a scene (visual version of the existing Clip dropdown, which is still there too), (2) drag a file straight
+  from your computer onto a scene card (uploads it), or (3) drop a video/photo URL onto a scene card (runs it
+  through yt-dlp/direct-download, same as the `urls` source). `onSceneDrop()` disambiguates by what's actually
+  in the drop event.
+- **New backend for (2)/(3)**: `pipeline/sources/upload.py` (`asset_from_upload` -- no sidecar is possible for a
+  one-off drop, so like `folder.py`'s un-sidecared files it's imported with no license, which vetting flags high
+  risk until a note says it's fine), `UrlListSource.fetch_one()` (a single-URL version of the batch `fetch()`),
+  and two new orchestrator methods: `add_scene_asset()` (vets the new asset with the same `vet_asset()` every
+  sourced asset gets; low/medium risk or a note given up front -> approved and assigned to the scene immediately;
+  high risk with no note -> still added to `job.assets` as `pending` and left unassigned, **never silently
+  discarded**, since the file is already downloaded/uploaded by that point) and `approve_pending_scene_asset()`
+  (finishes approving + assigns once a note is given). New routes: `POST /jobs/{id}/scenes/{scene_id}/upload`
+  (multipart), `/from-url`, `/approve-pending`.
+- A pending-but-pending Gate 3 asset shows in a new "Dragged in, needs a decision" panel with a note field and
+  an Approve & use button; the frontend remembers which scene it was dropped on (`pendingIntent`, client-side --
+  nothing to add server-side, since Gate 2's existing guard already guarantees no asset can be `pending` once a
+  job reaches scene review through the normal flow, so any `pending` asset visible at Gate 3 can only be one of
+  these drag-and-drop adds).
+- 10 new orchestrator tests (`tests/test_scene_assets.py`): url-merge + dedup, low/high risk add, unknown scene
+  id, wrong state, and the pending -> approve handoff. Embedded JS syntax-checked with `node --check` (same
+  constraint as the drag-reorder work above: no npm registry access in this environment to run a real JS test
+  framework). Full suite: 266 passing.
+- **Not done**: the third RankReel-family gap found during the comparison (RankReels.ai's talking-head "digital
+  twin" avatar narration) and the RankMyReel-style post-render viral-potential scoring -- the latter is the
+  same "performance feedback loop" already marked PROPOSED elsewhere in this roadmap; neither was asked for here.
+
 ## Done: clip matching quality + "photos keep looping" fix (2026-09-23)
 Prompted by "I feel like the photos don't fit with the script" and "I don't like that the photos just keep
 running in a circle" -- investigated `pipeline/stages/scenes/clips.py` (how a scene's narration gets matched

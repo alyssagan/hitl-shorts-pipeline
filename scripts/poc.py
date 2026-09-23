@@ -293,7 +293,9 @@ def main() -> None:
     ap.add_argument("--sources", default="wikipedia,commons",
                     help='where to pull text/images from, comma separated: wikipedia,commons,pexels,folder ("" = your own clips only)')
     ap.add_argument("--reviewer", default="", help="your name, written to the decision log next to every choice you make")
-    ap.add_argument("--urls", metavar="FILE", help="text file of URLs to pull videos from, one per line: URL | note | position (adds the 'urls' source)")
+    ap.add_argument("--urls", metavar="FILE", help="text file of URLs to pull videos from, one per line: URL | note | position "
+                    "(adds the 'urls' source). Pass '-' instead of a file to paste them straight into the terminal "
+                    "(one per line, blank line or Ctrl-D to finish) -- no file to save first")
     ap.add_argument("--resume", metavar="JOB_ID", help="continue an existing job (retries it first if it failed)")
     ap.add_argument("--keywords-file", metavar="FILE", help="text file of keywords, one per line (# for comments). Added as approved keywords; searched in batches of max_queries")
     ap.add_argument("--min-relevance", type=float, default=0.5, help="hide assets scoring below this (0 to 1) at the asset review; default 0.5")
@@ -363,12 +365,30 @@ def main() -> None:
             if keywords_provenance:
                 options["keywords_provenance"] = keywords_provenance
         if args.urls:
-            text = Path(args.urls).expanduser().read_text(encoding="utf-8")
+            if args.urls == "-":
+                if sys.stdin.isatty():
+                    print("Paste URLs, one per line (optionally 'URL | note | position'). Blank line or Ctrl-D to finish:")
+                    lines = []
+                    while True:
+                        try:
+                            ln = input()
+                        except EOFError:
+                            break
+                        if not ln.strip():
+                            break
+                        lines.append(ln)
+                    text = "\n".join(lines)
+                else:
+                    text = sys.stdin.read()          # piped, e.g. `pbpaste | python3 scripts/poc.py --urls - ...`
+                origin = "pasted input"
+            else:
+                text = Path(args.urls).expanduser().read_text(encoding="utf-8")
+                origin = args.urls
             options["urls"] = [dict(zip(("url", "note", "position"), [p.strip() for p in ln.split("|")]))
                                for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
             if "urls" not in sources:
                 sources.append("urls")
-            print(f"Read {len(options['urls'])} URL(s) from {args.urls}")
+            print(f"Read {len(options['urls'])} URL(s) from {origin}")
         job = api.call("POST", "/jobs", {"subject": subject, "reviewer": reviewer,
                                          "providers": {"keywords": args.keywords, "sources": sources, "options": options}})
         print(f"Created job {job['id']}  ->  folder: projects/{job['slug']}-{job['id']}/")
