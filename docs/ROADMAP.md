@@ -851,4 +851,22 @@ Stage 2 (Gate 2 UI, manual-URL-import parity, local-clip inclusion, pre-render c
   run up so far for the job (reusing the existing `usage_summary` rollup, not a second cost calculation) --
   collapsed and lazily loaded so it costs nothing when not opened. Backend: 17 new tests across
   `tests/test_asset_identity_rights.py` and `tests/test_api_sources.py`, full suite at 417, all passing.
-- **Not done yet**: the pre-render visual coverage check (#12).
+- **Pre-render visual coverage check (#12)** (`Orchestrator._visual_coverage`/`check_visual_coverage`,
+  `GET /jobs/{id}/visual-coverage`, `POST /jobs/{id}/scenes/approve` `override_note`, Gate 3's "Visual
+  coverage" panel in `pipeline/api/review_page.py`): `approve_scenes` now refuses to move a job to
+  `RENDERING` while any `visual_checklist` item is still sitting at `needed`/`candidates_found` -- the two
+  statuses that mean nobody's actually decided what happens there yet -- unless the caller also gives a
+  written `override_note`, which gets logged alongside exactly which items were left unresolved. Getting
+  an item to one of the three resolved statuses (`fulfilled`/`not_available`/`skipped`) was already possible
+  through `update_checklist_item`, but nothing required a reason for `not_available`/`skipped` or an asset
+  for `fulfilled` until now -- that gap is closed too, so none of the three can happen silently either.
+  `check_visual_coverage` is read-only and callable at any job state (has_checklist=false for a job that
+  never used the checklist at all means nothing here gates it -- opt-in, not a new requirement forced onto
+  every job), and cross-references each unresolved item against scenes that share its linked keyword term
+  via `Scene.search_terms`, so the report says which scene a gap actually affects. The report also carries
+  a fixed 5-option remediation menu (fulfill with a specific asset / search or add more material at Gate 2
+  or 3 / mark not available with a reason / mark skipped with a reason / approve anyway with a written
+  override), surfaced in Gate 3's new "Visual coverage" panel with inline mark-fulfilled/not-available/
+  skipped actions and an override-note box feeding "Approve and render". 19 new tests across
+  `tests/test_visual_coverage.py`, `tests/test_case_reference.py` and `tests/test_api_sources.py`, full
+  suite at 436, all passing.

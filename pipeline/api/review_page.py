@@ -97,6 +97,7 @@ let methodDefs={}, labelReasons=[];
 let folderFiles=null, folderFilesOpen=false, folderSelection={};   // path -> note draft, own-footage panel (#10)
 let catForms={}, idForms={}, rightsForms={};   // per-asset draft values for the "Case connection & rights" editor (#13)
 let assetReport=null, assetReportOpen=false;   // per-job/per-source summary panel (#13)
+let coverage=null, coverageLoadedFor=null, coverageOverrideNote="", checklistForms={};   // pre-render visual coverage check (#12)
 const CATEGORY_LABELS = {verified_case:"verified case", unverified_case_candidate:"unverified case candidate",
   historical_context:"historical context", illustrative_stock:"illustrative stock", reconstruction:"reconstruction"};
 const IDENTITY_LABELS = {unverified:"unverified", verified:"verified", disputed:"disputed"};
@@ -120,6 +121,14 @@ async function load(){
     if (a.status!=="pending" && decisions[a.id]==null){ decisions[a.id]=a.status==="approved"?"approve":"reject"; notes[a.id]=a.decision_note||""; }
   }
   syncScenes();
+  if (job.state==="scenes_review" && coverageLoadedFor!==job.id){ coverageLoadedFor=job.id; loadCoverage(); }
+  render();
+}
+async function loadCoverage(){
+  // #12: fetched once per job as soon as it reaches scenes_review, so the coverage check is visible before
+  // the reviewer even reaches "Approve and render" -- not just when the render is actually attempted.
+  try{ coverage = await api("GET", `/jobs/${JOB}/visual-coverage`); }
+  catch(e){ coverage = null; }
   render();
 }
 function syncScenes(){
@@ -129,7 +138,7 @@ function syncScenes(){
   const ids = new Set((job.scenes||[]).map(s=>s.id));
   const known = new Set(Object.keys(sceneNarration));
   const sameSet = ids.size===known.size && [...ids].every(id=>known.has(id));
-  if (!sameSet){ sceneNarration={}; sceneOrder=null; sceneClipOverride={}; sceneNotes={}; }
+  if (!sameSet){ sceneNarration={}; sceneOrder=null; sceneClipOverride={}; sceneNotes={}; coverageLoadedFor=null; }
   for (const s of (job.scenes||[])){
     if (sceneNarration[s.id]==null) sceneNarration[s.id] = s.narration;
     if (sceneNotes[s.id]==null) sceneNotes[s.id] = s.note||"";
@@ -687,13 +696,70 @@ async function saveScenesClick(){
   catch(e){ busy=false; error=String(e.message||e); render(); }
 }
 async function approveScenes(){
+  // #12: never silently substitute -- if the coverage check found unresolved visual_checklist items, this
+  // needs an explicit override note before it will even try (the server enforces the same thing regardless;
+  // this just avoids a round trip for the obvious case and makes clear the note is what's missing).
+  if (coverage && !coverage.ready && !coverageOverrideNote.trim()){
+    error = `${coverage.unresolved.length} visual checklist item(s) aren't resolved yet -- resolve them below, or explain in the override note why it's OK to render without them.`;
+    render();
+    return;
+  }
   busy=true; error=""; render();
   try{
     const reviewer=(store.get("reviewer")||"").trim();
     await saveSceneEdits(reviewer);                  // whatever you typed gets saved before it renders, not lost
-    await api("POST",`/jobs/${JOB}/scenes/approve`,{reviewer});
+    const payload = {reviewer};
+    if (coverage && !coverage.ready) payload.override_note = coverageOverrideNote.trim();
+    await api("POST",`/jobs/${JOB}/scenes/approve`,payload);
+    coverageOverrideNote = "";
     busy=false; await load();
   }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function resolveChecklistItem(itemId, status, extra){
+  busy=true; error=""; render();
+  try{
+    const reviewer=(store.get("reviewer")||"").trim();
+    await api("PATCH", `/jobs/${JOB}/visual-checklist/${itemId}`, Object.assign({status, reviewer}, extra||{}));
+    delete checklistForms[itemId];
+    busy=false;
+    await loadCoverage();     // re-checks coverage right away, not just on the next poll
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+function visualCoveragePanel(){
+  // #12: the pre-render check itself -- what's still unresolved on the visual checklist, and the concrete
+  // things a reviewer can do about each one (VISUAL_COVERAGE_REMEDIATION_OPTIONS in the orchestrator). Only
+  // shown once a report has actually loaded; has_checklist=false (the job never used this feature) or
+  // ready=true (everything's resolved) both mean there's nothing to show here.
+  if (!coverage || !coverage.has_checklist || coverage.ready) return null;
+  const approved = job.assets.filter(a=>a.status==="approved");
+  const sceneNumberOf = id => { const i = job.scenes.findIndex(s=>s.id===id); return i<0 ? "?" : i+1; };
+  return h("div",{class:"panel", style:"border-color:var(--med)"},
+    h("b",{},`Visual coverage: ${coverage.unresolved.length} need(s) not resolved yet`),
+    h("div",{class:"sub"},"These came from the visual checklist (Gate 1's approved keywords, or added by hand). "+
+      "Nothing renders past them silently -- either resolve each one below, or approve with an explicit override "+
+      "note explaining why it's OK to go ahead without them."),
+    coverage.unresolved.map(item => {
+      const form = checklistForms[item.id]||{};
+      return h("div",{style:"margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"},
+        h("div",{}, h("b",{},item.label), " ", h("span",{class:"b med"}, item.status),
+          item.linked_scene_ids.length ? h("span",{class:"meta"}, " -- referenced by scene(s) "+
+            item.linked_scene_ids.map(sceneNumberOf).join(", ")) : null),
+        h("div",{class:"labelform"},
+          h("select",{onchange:e=>{checklistForms[item.id]=Object.assign({},form,{assetId:e.target.value});}},
+            [["","(pick an approved asset)"], ...approved.map(a=>[a.id,(a.title||a.id).slice(0,50)])]
+              .map(([val,t])=>h("option",{value:val,selected:val===(form.assetId||item.asset_id||"")},t))),
+          h("button",{disabled:busy || !(form.assetId||item.asset_id), onclick:()=>resolveChecklistItem(item.id,"fulfilled",{asset_id: form.assetId||item.asset_id})}, "Mark fulfilled")),
+        h("div",{class:"labelform"},
+          h("input",{type:"text",placeholder:"why isn't there one? (required)",value:form.note||"",
+            oninput:e=>{checklistForms[item.id]=Object.assign({},form,{note:e.target.value});}}),
+          h("button",{disabled:busy || !(form.note||"").trim(), onclick:()=>resolveChecklistItem(item.id,"not_available",{note:(form.note||"").trim()})}, "Mark not available"),
+          h("button",{disabled:busy || !(form.note||"").trim(), onclick:()=>resolveChecklistItem(item.id,"skipped",{note:(form.note||"").trim()})}, "Mark skipped")),
+        h("div",{class:"meta"},"Need more first? Drag a clip from the strip below onto a scene, or drop a link/file "+
+          "straight onto one -- no need to leave this page.")); }),
+    h("div",{style:"margin-top:12px;padding-top:12px;border-top:1px solid var(--line)"},
+      h("div",{class:"meta"},"Or approve anyway, with a reason (recorded in the decision log alongside exactly which items were left unresolved):"),
+      h("textarea",{class:"note",placeholder:"why is it OK to render without these? (required to proceed)",
+        oninput:e=>{coverageOverrideNote=e.target.value;}}, coverageOverrideNote)));
 }
 async function rejectScenes(){
   const fb = document.getElementById("sfb").value;
@@ -847,6 +913,7 @@ function sceneReviewBody(){
         "Edit the narration in each scene's box; reorder scenes with the ↑/↓ buttons."),
       h("div",{id:"scriptWords",class:"meta",style:"margin:4px 0"}, scriptWordsLine()),
       h("pre",{id:"scriptPreview",class:"why",style:"max-height:320px;overflow:auto"}, scriptText())),
+    visualCoveragePanel(),
     assetStrip(),
     pendingAssetsPanel(),
     h("div",{}, scenes.map((s,i)=>sceneCard(s,i,scenes.length))),

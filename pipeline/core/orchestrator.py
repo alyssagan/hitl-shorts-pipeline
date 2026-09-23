@@ -55,6 +55,31 @@ SUGGESTED_LABEL_REASONS = [
     "poor visual quality", "unreliable source", "exact duplicate", "near duplicate",
 ]
 
+# The five things a reviewer can do about a visual checklist item still sitting at "needed"/"candidates_found"
+# when Gate 3's pre-render coverage check (#12) flags it -- UI guidance for check_visual_coverage()'s report,
+# not itself enforced here (the actual enforcement is: update_checklist_item requires a note for not_available/
+# skipped and an asset_id for fulfilled, and approve_scenes refuses to render past an unresolved item without
+# an explicit override_note). Never silently substituted -- every path forward is a recorded human decision.
+VISUAL_COVERAGE_REMEDIATION_OPTIONS = [
+    {"action": "fulfill", "label": "Use a candidate already found",
+     "how": "PATCH /jobs/{id}/visual-checklist/{item_id} {status: \"fulfilled\", asset_id, reviewer}",
+     "description": "Pick one of the assets already sourced for this and mark it as fulfilling this need."},
+    {"action": "search_more", "label": "Search again / add a link / add your own footage",
+     "how": "Gate 2: Next batch, Search again, Add links, or Add your own footage",
+     "description": "Go back to sourcing for this specific need before deciding anything."},
+    {"action": "not_available", "label": "Mark not available",
+     "how": "PATCH /jobs/{id}/visual-checklist/{item_id} {status: \"not_available\", note, reviewer}",
+     "description": "Explicitly record that no authentic visual could be found for this -- requires a note "
+                     "saying why. Never promised that every case will have accessible footage (#12)."},
+    {"action": "skip", "label": "Mark skipped",
+     "how": "PATCH /jobs/{id}/visual-checklist/{item_id} {status: \"skipped\", note, reviewer}",
+     "description": "Explicitly decide this isn't actually needed for the final video after all -- requires a note."},
+    {"action": "render_with_override", "label": "Approve and render anyway",
+     "how": "POST /jobs/{id}/scenes/approve {override_note, reviewer}",
+     "description": "Proceed without resolving every item right now -- requires a written reason, which is "
+                     "recorded in the decision log alongside exactly which items were left unresolved."},
+]
+
 # Every relevance-scoring method's CURRENT version -> the formula/prompt it actually uses (pipeline/vetting/
 # method_registry.py is the single source of truth; docs/SCORING_CHANGELOG.md has the fuller history). Used by
 # _apply_vetting() to record, in each run's `relevance_scoring` decision-log entry, the real formula for whichever
@@ -676,7 +701,8 @@ class Orchestrator:
                       outputs={"risk": asset.vetting.risk if asset.vetting else "unvetted", "assigned": True, "was_pending": True})
         return await self._mutate(job_id, fn)
 
-    async def approve_scenes(self, job_id: str, approve_all: bool = True, *, reviewer: str = "") -> Job:
+    async def approve_scenes(self, job_id: str, approve_all: bool = True, *, reviewer: str = "",
+                              override_note: str = "") -> Job:
         actor = self._who(reviewer)
 
         def fn(job: Job) -> None:
@@ -685,13 +711,31 @@ class Orchestrator:
                 bad = [s.index for s in job.scenes if s.clip_path and s.clip_path not in ok]
                 if bad:
                     raise ValueError(f"scenes {bad} use a file that is not an approved asset")
+            # #12: never silently substitute -- if visual_checklist items are still sitting at needed/
+            # candidates_found, rendering can't proceed on its own; it either needs every item resolved
+            # (fulfilled/not_available/skipped, each already forced through an explicit note/asset_id by
+            # update_checklist_item) or an explicit, recorded reason for rendering past them anyway. A job
+            # that never used the checklist (has_checklist False) is never gated -- opt-in, not a new
+            # requirement forced onto jobs that don't use this feature.
+            coverage = self._visual_coverage(job)
+            if not coverage["ready"] and not override_note.strip():
+                labels = "; ".join(f'"{i["label"]}" ({i["status"]})' for i in coverage["unresolved"])
+                raise ValueError(
+                    f"{len(coverage['unresolved'])} visual checklist item(s) aren't resolved yet: {labels}. "
+                    "Fulfill each with a specific asset, mark it not available or skipped (with a note), or "
+                    "approve with an explicit override_note explaining why it's OK to render without them.")
             if approve_all:
                 for s in job.scenes:
                     s.approved = True
             sm.apply(job, "approve_scenes")
+            reason = "Script, order and clips accepted for rendering."
+            outputs = {"scenes": len(job.scenes), "order": [s.id for s in job.scenes]}
+            if not coverage["ready"]:
+                reason += f" Rendered with unresolved visual needs -- override: {override_note.strip()}"
+                outputs["rendered_with_unresolved_visual_needs"] = [i["label"] for i in coverage["unresolved"]]
+                outputs["override_note"] = override_note.strip()
             self._rec(job.id, "scenes", "approved_scenes", actor, decision="approve",
-                      reason="Script, order and clips accepted for rendering.",
-                      outputs={"scenes": len(job.scenes), "order": [s.id for s in job.scenes]})
+                      reason=reason, outputs=outputs)
         return await self._mutate(job_id, fn)
 
     async def reject_scenes(self, job_id: str, feedback: str = "", *, reviewer: str = "") -> Job:
@@ -860,6 +904,15 @@ class Orchestrator:
                 raise ValueError(f"unknown visual checklist item id {item_id}")
             if asset_id and not any(a.id == asset_id for a in job.assets):
                 raise ValueError(f"asset_id '{asset_id}' is not a known asset in this job")
+            # #12: not_available/skipped are only ever an explicit human call, never a silent default -- a note
+            # saying why has to travel with the status change, not get added later (or never). Same for
+            # fulfilled: it has to name which specific asset actually satisfies the need.
+            effective_note = note.strip() if note is not None else item.note
+            effective_asset_id = asset_id if asset_id is not None else item.asset_id
+            if status in ("not_available", "skipped") and not effective_note:
+                raise ValueError(f"status={status} needs a note explaining why -- see docs/CASE_REFERENCE.md#12.")
+            if status == "fulfilled" and not effective_asset_id:
+                raise ValueError("status=fulfilled needs an asset_id -- which approved asset actually fulfills this.")
             if status is not None:
                 item.status = status
             if note is not None:
@@ -883,6 +936,35 @@ class Orchestrator:
             self._rec(job.id, "case_reference", "visual_checklist_item_removed", actor, decision="remove",
                       subject={"item_id": item.id, "label": item.label})
         return await self._mutate(job_id, fn)
+
+    # ------------------------------------------------------------------ pre-render visual coverage check (#12)
+    @staticmethod
+    def _visual_coverage(job: Job) -> dict[str, Any]:
+        """Never silently substitute generic footage for case material (#12): a read-only report of where
+        job.visual_checklist stands, cross-referenced with which scenes reference each item's keyword (best
+        effort, via Scene.search_terms). An item is "unresolved" while it's still at needed/candidates_found --
+        the two statuses that mean "nobody has actually decided what happens here yet". fulfilled/not_available/
+        skipped are all explicit human calls (enforced by update_checklist_item), so once every item lands on
+        one of those three, coverage is ready. A job that never used the visual checklist at all (has_checklist
+        False) is never gated on this -- it's an opt-in feature, not a new requirement forced onto every job."""
+        counts = {s: 0 for s in ChecklistStatus.__args__}
+        for item in job.visual_checklist:
+            counts[item.status] = counts.get(item.status, 0) + 1
+        unresolved = []
+        for item in job.visual_checklist:
+            if item.status not in ("needed", "candidates_found"):
+                continue
+            linked_scene_ids = [s.id for s in job.scenes
+                                 if item.linked_keyword_term and item.linked_keyword_term in (s.search_terms or [])]
+            unresolved.append({"id": item.id, "label": item.label, "status": item.status, "group": item.group,
+                                "linked_keyword_term": item.linked_keyword_term, "linked_scene_ids": linked_scene_ids})
+        return {"has_checklist": bool(job.visual_checklist), "ready": not unresolved, "counts": counts,
+                "unresolved": unresolved, "remediation_options": VISUAL_COVERAGE_REMEDIATION_OPTIONS}
+
+    def check_visual_coverage(self, job_id: str) -> dict[str, Any]:
+        """Read-only -- callable at any job state, not just scenes_review, so Gate 3's review page can show
+        this before the reviewer even reaches "Approve and render" (see _visual_coverage's docstring)."""
+        return self._visual_coverage(self.get(job_id))
 
     # ------------------------------------------------------------------ machine work
     async def run_pending(self, job_id: str) -> Job:

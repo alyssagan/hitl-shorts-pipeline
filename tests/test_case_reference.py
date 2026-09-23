@@ -206,6 +206,43 @@ class VisualChecklistEditTests(Base):
         with self.assertRaises(ValueError):
             await self.orch.remove_checklist_item(j.id, "nope", reviewer="Aly")
 
+    # #12: not_available/skipped/fulfilled are always an explicit, recorded human call -- never silent.
+    async def test_not_available_requires_a_note(self):
+        j = await self.job()
+        j = await self.orch.add_checklist_item(j.id, "x", reviewer="Aly")
+        iid = j.visual_checklist[0].id
+        with self.assertRaises(ValueError):
+            await self.orch.update_checklist_item(j.id, iid, status="not_available", reviewer="Aly")
+        j = await self.orch.update_checklist_item(j.id, iid, status="not_available",
+                                                    note="checked every archive we have access to, nothing", reviewer="Aly")
+        self.assertEqual(j.visual_checklist[0].status, "not_available")
+
+    async def test_skipped_requires_a_note(self):
+        j = await self.job()
+        j = await self.orch.add_checklist_item(j.id, "x", reviewer="Aly")
+        iid = j.visual_checklist[0].id
+        with self.assertRaises(ValueError):
+            await self.orch.update_checklist_item(j.id, iid, status="skipped", reviewer="Aly")
+        j = await self.orch.update_checklist_item(j.id, iid, status="skipped",
+                                                    note="cut this beat from the script", reviewer="Aly")
+        self.assertEqual(j.visual_checklist[0].status, "skipped")
+
+    async def test_an_existing_note_satisfies_a_later_status_change_without_repeating_it(self):
+        j = await self.job()
+        j = await self.orch.add_checklist_item(j.id, "x", reviewer="Aly")
+        iid = j.visual_checklist[0].id
+        j = await self.orch.update_checklist_item(j.id, iid, note="already explained earlier", reviewer="Aly")
+        j = await self.orch.update_checklist_item(j.id, iid, status="skipped", reviewer="Aly")   # no note this call
+        self.assertEqual(j.visual_checklist[0].status, "skipped")
+        self.assertEqual(j.visual_checklist[0].note, "already explained earlier")
+
+    async def test_fulfilled_requires_an_asset_id(self):
+        j = await self.job()
+        j = await self.orch.add_checklist_item(j.id, "x", reviewer="Aly")
+        iid = j.visual_checklist[0].id
+        with self.assertRaises(ValueError):
+            await self.orch.update_checklist_item(j.id, iid, status="fulfilled", reviewer="Aly")
+
 
 class HttpApiTests(unittest.TestCase):
     """The routes themselves -- request/response wiring, not the orchestrator logic already covered above."""

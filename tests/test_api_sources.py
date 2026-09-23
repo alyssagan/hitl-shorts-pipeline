@@ -254,6 +254,50 @@ class AssetIdentityRightsCategoryReportEndpointTests(ApiSourcesTests):
         self.assertEqual(self.client.post("/jobs/nope/assets/x/identity", json={"status": "verified", "reviewer": "Aly"}).status_code, 404)
 
 
+class VisualCoverageEndpointTests(ApiSourcesTests):
+    """Pre-render visual coverage check (#12) over HTTP: GET /visual-coverage and the gate on
+    POST /scenes/approve. See tests/test_visual_coverage.py for the orchestrator-level coverage."""
+    def setup_job_in_scenes_review(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        jid = r.json()["id"]
+        self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        j = self.wait(jid, "keywords_review")
+        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        j = self.wait(jid, "assets_review")
+        decisions = {a["id"]: {"decision": "approve"} for a in j["assets"] if a["vetting"]["risk"] != "high"}
+        decisions.update({a["id"]: {"decision": "reject", "note": "not needed"} for a in j["assets"] if a["id"] not in decisions})
+        self.client.post(f"/jobs/{jid}/assets/review", json={"decisions": decisions, "reviewer": "Aly"})
+        self.client.post(f"/jobs/{jid}/assets/approve", json={"reviewer": "Aly"})
+        j = self.wait(jid, "scenes_review")
+        return jid, j
+
+    def test_ready_when_no_checklist_was_ever_used(self):
+        jid, j = self.setup_job_in_scenes_review()
+        out = self.client.get(f"/jobs/{jid}/visual-coverage").json()
+        self.assertFalse(out["has_checklist"])
+        self.assertTrue(out["ready"])
+
+    def test_unresolved_item_blocks_approve_until_an_override_note_is_given(self):
+        jid, j = self.setup_job_in_scenes_review()
+        self.client.post(f"/jobs/{jid}/visual-checklist", json={"label": "a photo of the scene", "reviewer": "Aly"})
+        out = self.client.get(f"/jobs/{jid}/visual-coverage").json()
+        self.assertFalse(out["ready"])
+        self.assertEqual(len(out["remediation_options"]), 5)
+
+        blocked = self.client.post(f"/jobs/{jid}/scenes/approve", json={"reviewer": "Aly"})
+        self.assertEqual(blocked.status_code, 422, blocked.text)
+        self.assertIn("a photo of the scene", blocked.json()["error"])
+
+        ok = self.client.post(f"/jobs/{jid}/scenes/approve",
+                               json={"reviewer": "Aly", "override_note": "using the b-roll we already have"})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        self.wait(jid, "completed")
+
+    def test_unknown_job_is_404(self):
+        self.assertEqual(self.client.get("/jobs/nope/visual-coverage").status_code, 404)
+
+
 class LogEndpointTests(ApiSourcesTests):
     def test_activity_log_covers_the_run(self):
         r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",

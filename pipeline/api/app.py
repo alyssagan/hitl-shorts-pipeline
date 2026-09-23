@@ -48,6 +48,12 @@
   POST /jobs/{id}/visual-checklist     {label, linked_keyword_term?, group?, reviewer}   add an item by hand
   PATCH /jobs/{id}/visual-checklist/{item_id}   {status?, note?, asset_id?, reviewer}   edit an item
   POST /jobs/{id}/visual-checklist/{item_id}/remove   {reviewer}   remove an item
+  GET  /jobs/{id}/visual-coverage     #12: pre-render report -- which visual_checklist items are still
+                                        unresolved (needed/candidates_found), cross-referenced with scenes via
+                                        search_terms, plus the 5 remediation options for each. Read-only, any
+                                        job state -- Gate 3 calls this before "Approve and render", not just
+                                        when actually approving. has_checklist=false means the job never used
+                                        the checklist feature, so nothing here is gating it.
   PATCH /jobs/{id}/scenes             {order?, edits?, reviewer}               reorder / edit
   POST /jobs/{id}/scenes/{scene_id}/upload         multipart: file, note?, reviewer?   GATE 3 drag a file
                                         from your computer onto a scene (adds it as an asset, assigns it if
@@ -56,7 +62,10 @@
                                         link onto a scene (yt-dlp/direct download, same as the 'urls' source)
   POST /jobs/{id}/scenes/{scene_id}/approve-pending {asset_id, note?, reviewer?}  finish approving+assigning
                                         an asset the two routes above left pending (high risk, no note yet)
-  POST /jobs/{id}/scenes/approve      {reviewer}                               GATE 3 approve -> rendering
+  POST /jobs/{id}/scenes/approve      {reviewer, override_note?}               GATE 3 approve -> rendering.
+                                        #12: refused if any visual_checklist item is still unresolved, unless
+                                        override_note explains why it's OK to render past it anyway (both the
+                                        override and exactly which items were left unresolved are logged).
   POST /jobs/{id}/scenes/reject       {feedback, reviewer}                     GATE 3 re-run
   POST /jobs/{id}/back-to-keywords    | /back-to-assets | /cancel | /retry
   GET  /jobs, /jobs/{id}, /jobs/{id}/output, /providers, /health
@@ -263,7 +272,8 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
 
     async def scenes_approve(r: Request):
         d = await body(r)
-        return await orch.approve_scenes(r.path_params["id"], reviewer=d.get("reviewer", ""))
+        return await orch.approve_scenes(r.path_params["id"], reviewer=d.get("reviewer", ""),
+                                          override_note=d.get("override_note", ""))
 
     async def scenes_reject(r: Request):
         d = await body(r)
@@ -342,6 +352,10 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
     async def visual_checklist_remove(r: Request):
         d = await body(r)
         return await orch.remove_checklist_item(r.path_params["id"], r.path_params["item_id"], reviewer=d.get("reviewer", ""))
+
+    async def visual_coverage_view(r: Request):
+        orch.get(r.path_params["id"])                       # 404 if unknown
+        return JSONResponse(orch.check_visual_coverage(r.path_params["id"]))
 
     async def methods_view(_: Request) -> JSONResponse:
         return JSONResponse(method_definitions_json())
@@ -476,6 +490,7 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/visual-checklist", wrap(visual_checklist_add), methods=["POST"]),
         Route(f"{P}/visual-checklist/{{item_id}}", wrap(visual_checklist_update), methods=["PATCH"]),
         Route(f"{P}/visual-checklist/{{item_id}}/remove", wrap(visual_checklist_remove), methods=["POST"]),
+        Route(f"{P}/visual-coverage", wrap(visual_coverage_view), methods=["GET"]),
         Route("/methods", methods_view, methods=["GET"]),
         Route("/label-reasons", label_reasons_view, methods=["GET"]),
         Route(f"{P}/decisions", wrap(decisions), methods=["GET"]),

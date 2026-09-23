@@ -86,9 +86,60 @@ PATCH /jobs/{id}/visual-checklist/{item_id}            {status?, note?, asset_id
 POST  /jobs/{id}/visual-checklist/{item_id}/remove     {reviewer}
 ```
 
+`not_available` and `skipped` both require a note explaining why -- `update_checklist_item` refuses the
+status change otherwise, so an item never quietly drops off the list without a reason attached. `fulfilled`
+likewise requires an `asset_id` (already set on the item, or given in the same call): it has to name which
+specific approved asset actually satisfies the need.
+
+## Pre-render visual coverage check (#12)
+
+The whole point of the checklist is that rendering can't quietly go ahead while it still says something is
+`needed` or `candidates_found` -- those two statuses mean "nobody has actually decided what happens here
+yet". `Orchestrator.check_visual_coverage(job_id)` is a read-only report, callable at any job state:
+
+```python
+{
+  "has_checklist": bool,   # False if this job never used the checklist -- then nothing here gates anything
+  "ready": bool,           # True once every item is fulfilled/not_available/skipped (or there are none)
+  "counts": {"needed": 0, "candidates_found": 0, "fulfilled": 0, "not_available": 0, "skipped": 0},
+  "unresolved": [{"id", "label", "status", "group", "linked_keyword_term", "linked_scene_ids"}, ...],
+  "remediation_options": [...],   # the same 5-item menu every time, see below
+}
+```
+
+`linked_scene_ids` is a best-effort cross-reference: which of the job's scenes share the item's
+`linked_keyword_term` in their own `search_terms`, so the report can say *which scene* a gap actually
+affects, not just that one exists somewhere.
+
+`Orchestrator.approve_scenes()` calls this internally before it lets a job move to `RENDERING`. If any item
+is unresolved, it refuses (`ValueError`, a 422 over HTTP) unless the caller also passes a non-blank
+`override_note` -- in which case it proceeds, but records the override note and exactly which items were
+left unresolved in that `approved_scenes` decision log entry, so rendering past a gap is always a recorded,
+explicit call, never a silent default. `GET /jobs/{id}/visual-coverage` exposes the same report so a UI can
+show it before the reviewer even reaches "Approve and render" (docs/REVIEW_UI.md's Gate 3 section).
+
+The five remediation options a reviewer actually has for an unresolved item (`VISUAL_COVERAGE_REMEDIATION_OPTIONS`
+in `pipeline/core/orchestrator.py`):
+
+1. **Use a candidate already found** -- `PATCH .../visual-checklist/{item_id} {status: "fulfilled", asset_id}`.
+2. **Search again / add a link / add your own footage** -- Gate 2's existing sourcing tools, or Gate 3's
+   drag-and-drop/upload/link-drop straight onto a scene; no new endpoint, just point back at what's already built.
+3. **Mark not available** -- `{status: "not_available", note}`, explaining why nothing could be found. Never
+   promised that every case will have accessible footage -- this is the explicit, on-the-record way to say so.
+4. **Mark skipped** -- `{status: "skipped", note}`, deciding the need isn't actually essential to the final video.
+5. **Approve and render anyway** -- `POST /jobs/{id}/scenes/approve {override_note}`, proceeding without
+   resolving everything right now, with a written reason kept alongside exactly what was left unresolved.
+
+### HTTP API
+
+```
+GET   /jobs/{id}/visual-coverage                      the report above
+POST  /jobs/{id}/scenes/approve   {reviewer, override_note?}   refused (422) if unresolved items exist and
+                                        override_note is blank; otherwise proceeds and logs the override
+```
+
 ## What this doesn't do yet
 
-There's no UI for any of this yet (Stage 2, alongside the rest of the Gate 2 field-surfacing work) and
-nothing cross-checks a `case`-group search term's `entity`/`aliases`/`dates`/`locations` against the
+Nothing cross-checks a `case`-group search term's `entity`/`aliases`/`dates`/`locations` against the
 reference sheet's facts -- that comparison, and any resulting "this search term doesn't match anything on
 the reference sheet" warning, is a natural next step but isn't built.

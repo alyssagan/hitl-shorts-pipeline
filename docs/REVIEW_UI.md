@@ -88,6 +88,22 @@ In the terminal, after submitting in the browser, type `web` at the asset prompt
 When the job reaches scene review, the same page switches to the script/scene editor -- reopen `/review/JOB_ID` (it refreshes on
 its own within a few seconds of the job getting there, or reload).
 
+- **Full script**, at the top: this is the CURRENT script -- today's scene order and narration, exactly what will be spoken --
+  not the frozen first draft (`job.script`, which never updates as you edit and would otherwise go stale after your first
+  change). It updates live as you type in a scene below, along with a word count and estimated seconds spoken (words ÷ 2.6,
+  same estimate `scripts/poc.py` prints).
+- **Visual coverage** (#12, right under the script -- only shown once it's loaded and there's actually something unresolved):
+  the pre-render check against the visual checklist (docs/CASE_REFERENCE.md). Lists every item still sitting at `needed` or
+  `candidates_found` -- i.e. nobody's actually decided what happens here yet -- which scene(s) it's tied to (matched by
+  shared search term, so you know exactly where the gap shows up), and lets you resolve each one right there: pick an
+  already-approved asset and **Mark fulfilled**, or type a reason and **Mark not available** / **Mark skipped**. Both of
+  those require the note; there's no way to silently drop an item off the list. If you'd rather get more material first,
+  the asset strip and the drop-a-file/link-onto-a-scene affordances right below this panel are the fastest way, without
+  leaving the page. **Approve and render** refuses to proceed while anything's unresolved unless you also fill in the
+  override note at the bottom of this panel, explaining why it's fine to render without it -- that note, and exactly which
+  items were left unresolved, get written to the decision log alongside the approval, so nothing renders on a silent
+  substitution of generic footage for case material. A job that's never used the checklist at all doesn't show this panel
+  and isn't gated by any of it -- it's an opt-in feature, not a new requirement forced onto every job.
 - **Drag a clip onto a scene**, above the scene cards: every approved photo/video as a small thumbnail strip you can
   drag onto any scene card to use it there -- a visual, drag-and-drop version of the Clip dropdown described below
   (both do the same thing; use whichever's easier). A scene card also accepts two other kinds of drop directly: a
@@ -96,10 +112,6 @@ its own within a few seconds of the job getting there, or reload).
   through the same vetting every sourced asset gets -- low/medium risk (or you're asked for a note first) and it's
   assigned to that scene immediately; high risk with no note yet is still kept, just left unassigned, and shows up
   in a **"Dragged in, needs a decision"** panel with a note box and an Approve & use button.
-- **Full script**, at the top: this is the CURRENT script -- today's scene order and narration, exactly what will be spoken --
-  not the frozen first draft (`job.script`, which never updates as you edit and would otherwise go stale after your first
-  change). It updates live as you type in a scene below, along with a word count and estimated seconds spoken (words ÷ 2.6,
-  same estimate `scripts/poc.py` prints).
 - **One card per scene**, in order: which clip it uses (filename, or "NO CLIP" if none is assigned -- approve more assets or
   add footage to `library/clips/` and come back; a clip picked from your approved photos that got reused because there
   weren't enough distinct ones says so right here, e.g. "REUSED: every approved asset was already used once elsewhere" --
@@ -111,7 +123,8 @@ its own within a few seconds of the job getting there, or reload).
   asset for that scene.
 - **Save changes** persists your edits (and any reordering) without leaving the page or advancing the job -- keep editing
   afterward if you want. **Approve and render** saves whatever's still unsaved too, then starts the render: your last chance to
-  change anything, since a render takes a few minutes and re-renders from scratch rather than patching in place.
+  change anything, since a render takes a few minutes and re-renders from scratch rather than patching in place. See "Visual
+  coverage" above -- this button won't go through while anything's unresolved there, unless you've also given an override note.
 - **Ask for a rewrite instead** sends the whole thing back to be rewritten from your feedback (what should change -- e.g.
   "shorter", "different tone", "get the date right"), the same as typing a reason at Gate 3 in the terminal. This throws away
   the current script and scenes and writes new ones; anything you'd typed but not saved is not carried over.
