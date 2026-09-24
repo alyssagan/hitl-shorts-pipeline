@@ -108,6 +108,41 @@ class ManualLinksVisibilityTests(unittest.TestCase):
         self.assertEqual(out["manual"], ["pending-manual"])
         self.assertEqual(set(out["visible"]), {"decided-manual", "searched"})
 
+    # ---- "search_pick" (Gate 2's "Find more" -> add one result, pipeline/api/app.py's assets_add_candidate) --
+    # same guarantee as manual_url above, added after a real report ("no it just jerks" -- an add that silently
+    # succeeded, then the item vanished below the score threshold with no sign it had worked at all).
+
+    def test_a_pending_search_pick_asset_is_kept_out_of_the_main_grid_and_shown_in_the_manual_panel(self):
+        out = self._run([self._asset("p1", source="commons", import_method="search_pick", kind="image")])
+        self.assertEqual(out["visible"], [])
+        self.assertEqual(out["manual"], ["p1"])
+
+    def test_a_pending_search_pick_asset_shows_even_though_its_score_is_below_threshold(self):
+        # The exact bug this stamp fixes: a hand-picked archive/commons result whose title doesn't match
+        # the approved keywords well commonly scores under minScore -- below() alone would hide it, exactly
+        # like the manual_url case above.
+        out = self._run([self._asset("p1", source="archive", import_method="search_pick", kind="video",
+                                      vetting={"risk": "low", "relevance": 0.05})], showHidden=False, minScore=0.5)
+        self.assertNotIn("p1", out["visible"])
+        self.assertIn("p1", out["manual"])
+
+    def test_once_decided_a_search_pick_leaves_the_manual_panel_and_rejoins_the_main_grid(self):
+        out = self._run([self._asset("p1", source="commons", import_method="search_pick", status="approved",
+                                      vetting={"risk": "low", "relevance": 0.9})])
+        self.assertEqual(out["manual"], [])
+        self.assertIn("p1", out["visible"])
+
+    def test_search_pick_and_manual_url_can_both_be_pending_at_once(self):
+        assets = [
+            self._asset("pasted", import_method="manual_url"),
+            self._asset("picked", source="commons", import_method="search_pick", kind="image"),
+            self._asset("searched", source="commons", import_method="search", status="approved",
+                        vetting={"risk": "low", "relevance": 0.9}),
+        ]
+        out = self._run(assets)
+        self.assertEqual(set(out["manual"]), {"pasted", "picked"})
+        self.assertEqual(out["visible"], ["searched"])
+
 
 if __name__ == "__main__":
     unittest.main()

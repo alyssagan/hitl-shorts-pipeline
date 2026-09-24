@@ -193,6 +193,20 @@ class SourceSearchEndpointTests(unittest.TestCase):
         self.assertEqual(added["author"], "Chicago Park District")
         self.assertEqual(added["source"], "commons")
 
+    def test_add_is_stamped_search_pick_so_it_stays_visible_while_pending_even_if_low_scoring(self):
+        # The bug this guards against: without this stamp, a hand-picked result whose title/description
+        # doesn't text-match the approved keywords can score under the review page's relevance threshold
+        # and silently vanish from the main grid the moment it's added -- the add still succeeds, but there
+        # is nothing on screen to show it worked (pipeline/api/review_page.py's manualUrlAssets() is what
+        # keeps a "search_pick"/"manual_url" asset visible regardless of score while it's pending).
+        jid, _ = self.to_assets_review()
+        found = self.client.post(f"/jobs/{jid}/source-search", json={"source": "commons", "query": "courthouse", "reviewer": "Aly"}).json()
+        self.client.post(f"/jobs/{jid}/assets/add-candidate",
+                         json={"source": "commons", "candidate": found[0], "reviewer": "Aly"})
+        after = self.client.get(f"/jobs/{jid}").json()
+        added = next(a for a in after["assets"] if a["source_url"] == found[0]["url"])
+        self.assertEqual(added["import_method"], "search_pick")
+
     def test_add_same_url_twice_is_a_422(self):
         jid, _ = self.to_assets_review()
         found = self.client.post(f"/jobs/{jid}/source-search", json={"source": "commons", "query": "courthouse", "reviewer": "Aly"}).json()

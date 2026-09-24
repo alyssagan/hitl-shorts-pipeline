@@ -417,6 +417,13 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
             asset = await adapter.keep_one(candidate, ctx, query=d.get("query", ""))
         except Exception as exc:
             raise HTTPException(422, f"couldn't add that item: {exc}") from None
+        # A hand-picked search result needs the same "always visible while pending" treatment a pasted
+        # link gets (pipeline/api/review_page.py's manualUrlAssets()) -- its title/description often won't
+        # text-match the approved keywords well, so it can easily score under the relevance threshold and
+        # otherwise vanish from the main grid the moment it's added, with no error and no visible sign it
+        # worked at all. keep_one() leaves the model default ("search") since it doesn't know this asset
+        # was a specific human pick rather than a normal batch-search result -- that's decided here.
+        asset.import_method = "search_pick"
         query = d.get("query", "")
         note = d.get("note") or (f"Found via Gate 2's {INLINE_SEARCH_SOURCES[source]} search" +
                                  (f' for "{query}"' if query else "") + ".")

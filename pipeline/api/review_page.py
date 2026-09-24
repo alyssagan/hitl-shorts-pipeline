@@ -120,6 +120,9 @@ const IDENTITY_LABELS = {unverified:"unverified", verified:"verified", disputed:
 const RIGHTS_LABELS = {public_domain:"public domain", cc0:"CC0", open_license:"open license",
   paid_license:"paid license", unresolved:"unresolved"};
 const GROUP_LABELS = {research:"research", case:"case", historical:"historical", stock:"stock"};
+const IMPORT_METHOD_LABELS = {search:"an automated search", manual_url:"a pasted link (\"Add links\")",
+  search_pick:"a specific pick from a \"Find more\" search", local_folder:"your own footage folder",
+  scene_upload:"a Gate 3 upload/drop"};
 
 async function loadStatic(){
   // Job-independent, small and unchanging within a session -- fetched once (docs/EVALUATION.md, docs/REVIEW_UI.md).
@@ -172,14 +175,19 @@ const below = a => score(a)!=null && score(a) < minScore - 1e-9;
 const risk = a => (a.vetting&&a.vetting.risk)||"low";
 
 function manualUrlAssets(){
-  // Pasted in through Gate 2's "Add links" (import_method="manual_url", pipeline/sources/urls.py) --
-  // always pending on arrival (add_reviewable_asset() never auto-approves), and easy to lose in the main
-  // grid: a platform link is auto-flagged high risk (sorts last by default) and its caption/title often
-  // doesn't text-match the approved keywords, so it also often scores under the relevance threshold and
-  // is hidden by default. Kept out of visible()'s main grid and shown in their own always-visible panel
-  // instead (manualLinksPanel()) for exactly as long as they're pending; once decided, they rejoin the
-  // main grid like everything else.
-  return job.assets.filter(a => a.import_method==="manual_url" && a.status==="pending");
+  // Two ways an asset gets added by a person choosing ONE specific item, rather than an automated batch
+  // round keeping whatever it found: pasted into Gate 2's "Add links" (import_method="manual_url",
+  // pipeline/sources/urls.py), or picked from a "Find more" search result (import_method="search_pick",
+  // pipeline/api/app.py's assets_add_candidate -- covers the archive/chronicling_america/commons "Search
+  // ... here" blocks; a YouTube search pick already comes back as "manual_url" since adding one reuses
+  // /assets/add-url itself). Both are always pending on arrival (add_reviewable_asset() never
+  // auto-approves), and both are easy to lose in the main grid: a platform link is auto-flagged high risk
+  // (sorts last by default), and any hand-picked item's title/description often won't text-match the
+  // approved keywords well, so it commonly scores under the relevance threshold too -- hidden by default,
+  // with nothing on screen to say the add even worked. Kept out of visible()'s main grid and shown in
+  // their own always-visible panel instead (manualLinksPanel()) for exactly as long as they're pending;
+  // once decided, they rejoin the main grid like everything else.
+  return job.assets.filter(a => (a.import_method==="manual_url" || a.import_method==="search_pick") && a.status==="pending");
 }
 function visible(){
   const manualPendingIds = new Set(manualUrlAssets().map(a=>a.id));
@@ -288,7 +296,7 @@ function caseRightsPanel(a){
       `Rights: ${RIGHTS_LABELS[a.rights_status]||a.rights_status}` +
         (a.rights_reviewer?` -- set by ${a.rights_reviewer} (${a.rights_reviewed_at})`:" -- not yet reviewed") + "\n" +
       (a.rights_evidence?`  evidence: ${a.rights_evidence}\n`:"") + (a.rights_notes?`  notes: ${a.rights_notes}\n`:"") +
-      `Entered this job via: ${a.import_method||"search"}` +
+      `Entered this job via: ${IMPORT_METHOD_LABELS[a.import_method]||a.import_method||"search"}` +
         (a.owner_submitted?` (your own material${a.owner_note?": "+a.owner_note:""})`:"")),
     h("div",{class:"labelform"}, h("div",{class:"meta"},"Set category"),
       h("select",{onchange:e=>{catForms[a.id]=Object.assign({},catForm,{value:e.target.value});}},
@@ -560,7 +568,8 @@ function inlineSearchBlock(ready, loading, error, results, lastQuery, count, onS
     results ? (results.length
       ? h("div",{},
           h("div",{class:"sub",style:"margin-top:6px"},`${results.length} result(s) for "${lastQuery}" -- nothing downloaded yet; `+
-            `"Add this one" downloads just that ${unit} and adds it pending${label==="YouTube"?" (still high-risk, still needs a note)":""}.`),
+            `"Add this one" downloads just that ${unit} and adds it pending${label==="YouTube"?" (still high-risk, still needs a note)":""}. `+
+            `It'll show up in the "Added by hand" panel below (scroll down), not necessarily here in this list.`),
           h("div",{class:"grid"}, results.map(resultCard)))
       : h("div",{class:"sub",style:"margin-top:6px"},`No ${label} results for "${lastQuery}".`)) : null);
 }
@@ -1301,13 +1310,15 @@ function manualLinksPanel(){
   const xs = manualUrlAssets();
   if (!xs.length) return null;
   return h("div",{class:"panel", style:"border-color:var(--acc)"},
-    h("b",{}, `Added by link -- ${xs.length} awaiting a decision`),
-    h("div",{class:"sub"},"Pasted in through \"Add links\" below. Downloaded into their own sources/urls/ folder on "+
-      "disk, separate from anything search turned up -- and always shown here regardless of the score/hidden filters "+
-      "or sort order below, since a platform link is auto-flagged high risk (would otherwise sort last) and often "+
-      "scores under the relevance threshold too (its caption rarely matches your keywords), so it could otherwise "+
-      "disappear from view entirely. Use / Duplicate / Irrelevant here work exactly like any other card; once "+
-      "you've decided, it moves down into the main grid like everything else."),
+    h("b",{}, `Added by hand -- ${xs.length} awaiting a decision`),
+    h("div",{class:"sub"},"Pasted in through \"Add links\", or picked one at a time from a \"Find more\" search -- "+
+      "either way, one specific item YOU chose, not something an automated round kept on its own. Always shown "+
+      "here regardless of the score/hidden filters or sort order below: a platform link is auto-flagged high risk "+
+      "(would otherwise sort last), and any hand-picked item's title/description often doesn't text-match your "+
+      "keywords well, so it commonly scores under the relevance threshold too -- either way, it could otherwise "+
+      "disappear from view the moment it's added, with nothing on screen to show it worked. Use / Duplicate / "+
+      "Irrelevant here work exactly like any other card; once you've decided, it moves down into the main grid "+
+      "like everything else."),
     h("div",{class:"grid"}, xs.map(card)));
 }
 function assetReviewBody(xs){

@@ -39,6 +39,32 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: fix "Find more" search-adds vanishing silently below the relevance threshold (2026-09-24)
+Real bug, caught immediately: Aly tried "Add this one" on an Internet Archive/Commons search result and
+reported "no it just jerks" -- the add was actually succeeding (that's the page reloading), but the new
+asset immediately disappeared, because `assets_add_candidate` left it with the model's default
+`import_method="search"`, and the review page's relevance-threshold filter (`visible()`,
+`pipeline/api/review_page.py`) hides anything scoring under it by default with no exception for that value.
+A hand-picked search result's title/description often won't text-match the approved keywords well, so it
+commonly scores low -- exactly the same failure mode the existing "Added by link" panel was built to solve
+for pasted URLs, just not extended to this new path when it shipped a day earlier.
+
+Fix: a new `ImportMethod` value, `"search_pick"` (`pipeline/core/models.py`), stamped onto the asset in
+`assets_add_candidate` (`pipeline/api/app.py`) right after `keep_one()` returns it (which leaves the
+default, since it has no way to know the caller is a human pick rather than a normal batch search).
+`manualUrlAssets()`'s filter (`pipeline/api/review_page.py`) now keeps `search_pick` visible alongside
+`manual_url`, and the panel it feeds was renamed **"Added by hand"** and its copy broadened to cover both.
+A YouTube pick already got this for free -- adding one reuses `/assets/add-url`, which already stamps
+`manual_url` -- so only the three new sources needed the fix. Also added a line to the search-results
+message pointing at where an add actually shows up ("Added by hand" panel, not necessarily the results list
+itself), and a small `IMPORT_METHOD_LABELS` map so a card's own "Entered this job via" line reads in plain
+English instead of a raw enum value.
+
+- 5 new tests: 1 backend (`tests/test_source_search.py`, asserts the stamp), 4 frontend
+  (`tests/test_review_page_manual_links.py`, mirroring every existing `manual_url` visibility test for
+  `search_pick`, plus one proving the two can coexist). Full suite: 540 passing (up from 535), zero
+  regressions.
+
 ## Done: inline search for Internet Archive/Chronicling America/Commons, and a "Find more" quick paste-back box (2026-09-23)
 Requested directly, after Aly noticed most of "Find more" was "just links" and asked "why can't it search
 call at the same time?" and "i need a way to streamline this." Internet Archive, Chronicling America and

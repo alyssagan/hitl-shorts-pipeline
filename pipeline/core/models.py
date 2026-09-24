@@ -141,7 +141,7 @@ IdentityStatus = Literal["unverified", "verified", "disputed"]
 # (LOC "no known restrictions", NASA, a US government work) is a different kind of claim with different
 # evidence behind it, and #8 explicitly asks these stay distinguishable rather than being merged.
 RightsStatus = Literal["public_domain", "cc0", "open_license", "paid_license", "unresolved"]
-ImportMethod = Literal["search", "manual_url", "local_folder", "scene_upload"]
+ImportMethod = Literal["search", "manual_url", "local_folder", "scene_upload", "search_pick"]
 
 
 class Asset(BaseModel):
@@ -177,8 +177,12 @@ class Asset(BaseModel):
 
     # --- provenance (#9, #10) ------------------------------------------------------------------------
     import_method: ImportMethod = "search"  # how this asset entered the job: a keyword search, a pasted
-                                             # URL at Gate 2, an already-downloaded file from library/scraped
-                                             # (the `folder` source), or a Gate-3 scene upload/drop.
+                                             # URL at Gate 2, one specific result a person picked out of
+                                             # Gate 2's on-demand "Find more" search (source_search_view /
+                                             # assets_add_candidate -- unlike a normal batch-searched asset,
+                                             # this one was chosen by a human before it was even downloaded),
+                                             # an already-downloaded file from library/scraped (the `folder`
+                                             # source), or a Gate-3 scene upload/drop.
     owner_submitted: bool = False           # you explicitly marked this as your own footage/photo (#10) --
                                              # never inferred, always an explicit action.
     owner_note: str = ""                    # your note on why/how this is your own material, if owner_submitted.
