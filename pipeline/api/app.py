@@ -336,7 +336,11 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         except Exception as exc:
             log._log(method="yt-dlp-search", url=f"ytsearch{count}:{query}", status=None,
                      purpose=f"search YouTube for '{query}'", error=str(exc))
-            raise HTTPException(422, f"YouTube search failed: {exc}") from None
+            # search_youtube's own RuntimeError message is already complete and user-facing (it already
+            # says "YouTube search failed: ..." itself) -- don't re-wrap it a second time, which used to
+            # produce a literal doubled "YouTube search failed: YouTube search failed: ..." message.
+            msg = str(exc)
+            raise HTTPException(422, msg if msg.lower().startswith("youtube search failed") else f"YouTube search failed: {msg}") from None
         results = [r for r in results if r.get("url") not in known_urls][:count]
         log._log(method="yt-dlp-search", url=f"ytsearch{count}:{query}", status=200,
                  purpose=f"search YouTube for '{query}'", found=len(results))

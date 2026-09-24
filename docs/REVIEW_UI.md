@@ -143,7 +143,13 @@ pictured and where the usage rights stand, beyond what the automated flags alone
   one** on a specific result. YouTube's search runs through yt-dlp (no paid API key) and adding a result calls the
   exact same path as pasting that video's link into **Add links** below -- synchronous download, lands `pending`,
   still auto-flagged high risk (`PLATFORM_SOURCE`) and still needs a written note before you can approve it. Every
-  YouTube search (successful or not) is logged to `sources/youtube_search/requests.jsonl`. Internet Archive,
+  YouTube search (successful or not) is logged to `sources/youtube_search/requests.jsonl`. YouTube itself
+  sometimes blocks a specific video behind its own "Sign in to confirm you're not a bot" check -- this app
+  can't work around that (it would mean wiring in a real YouTube login's cookies, which it deliberately
+  doesn't do on its own); a search now skips just the blocked video(s) and still returns whatever else it
+  found rather than failing the whole search, and only shows an error when every result in the batch hit
+  the wall -- try a different/more specific query, or paste the video's link into **Add links** instead if
+  you already know which one you want. Internet Archive,
   Chronicling America and Wikimedia Commons are different: they're already automated sources in the pipeline's
   normal per-round search (docs/SEARCH_PLANNING.md) with a free no-key API each, so their "search here" block just
   calls that same source's `search()` on demand (`POST /jobs/{id}/source-search`) instead of duplicating it with a

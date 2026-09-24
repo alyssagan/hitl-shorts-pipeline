@@ -39,6 +39,34 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: YouTube search no longer fails outright when one result hits YouTube's sign-in/bot wall (2026-09-24)
+Real bug, reported verbatim: `YouTube search failed: YouTube search failed: [youtube] yAM3U7OrEaY: Sign in
+to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication.` Two separate
+problems in that one message.
+
+First, yt-dlp's `ytsearchN:` was run without `--ignore-errors`, so the moment ONE video in the batch hit
+YouTube's anti-bot sign-in wall (increasingly common, and per-video, not per-account or per-search), yt-dlp
+aborted the *entire* run and the search returned nothing, even though other results in the same batch had
+already been read successfully. `search_youtube` (`pipeline/sources/youtube_search.py`) now passes
+`--ignore-errors` and parses whatever made it to stdout regardless of yt-dlp's overall exit code -- a
+nonzero exit only becomes an error when nothing at all could be parsed out of it. When every result in a
+batch does hit the wall, the error message now says so plainly and points at what to do instead (a
+different/more specific query, or pasting the video's own link into "Add links") rather than yt-dlp's raw
+`--cookies-from-browser` text, which isn't something this app does anything with. There's no fix here for
+the block itself -- it would mean wiring in a real YouTube account's cookies, which is exactly the kind of
+new credentialed integration the standing rule says not to add without asking first, and the check is
+adversarial on YouTube's side regardless.
+
+Second, the doubled "YouTube search failed: YouTube search failed: ..." in the report was its own separate
+bug: `search_youtube`'s `RuntimeError` already carries a complete, user-facing "YouTube search failed: ..."
+message, and `youtube_search_view` (`pipeline/api/app.py`) was wrapping it in a second one of its own.
+Fixed to not re-wrap a message that already says so.
+
+- 7 new tests: 5 in `tests/test_youtube_search.py` (the `--ignore-errors` flag is passed, partial results
+  survive a nonzero exit, an all-blocked batch gets the clearer message), 2 in `tests/test_api_sources.py`
+  (the double-wrap regression, plus the existing single-wrap case still passes). Full suite: 551 passing (up
+  from 547), zero regressions.
+
 ## Done: "Set aside" panel for Irrelevant/Duplicate, and "no repeats" on re-running a search (2026-09-24)
 Two more pieces of the same feedback thread as the "Find more" work above, both requested directly in one
 message: "the ones that are irrelevant should get out of the view but should be saved in a tab where it

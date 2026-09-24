@@ -25,17 +25,29 @@ from .base import SourceUnavailable
 from .urls import Runner, run_subprocess
 
 
+# Substrings yt-dlp's own error text uses for YouTube's anti-bot sign-in wall (increasingly common on
+# ytsearch results since it can trip per-video, not just per-account) -- used only to add a friendlier
+# hint alongside yt-dlp's own message, never to replace it. There's no fix on our end for this one: it
+# would need real account cookies (--cookies-from-browser), which this app deliberately doesn't set up
+# on its own (see the standing rule against introducing new paid/credentialed integrations without
+# approval -- and cookies here means using someone's real YouTube login, not a service fee, but the same
+# "don't wire this up silently" logic applies).
+YOUTUBE_SIGNIN_HINTS = ("sign in to confirm", "confirm you're not a bot", "confirm you are not a bot")
+
+
 async def search_youtube(query: str, count: int, runner: Runner = run_subprocess) -> list[dict[str, Any]]:
     """Up to `count` candidates for `query`, newest-search-result-first (yt-dlp's own ranking, not ours).
-    Raises SourceUnavailable if yt-dlp isn't installed, RuntimeError for any other yt-dlp failure."""
-    args = [sys.executable, "-m", "yt_dlp", "--no-warnings", "--skip-download", "--dump-json",
+    Raises SourceUnavailable if yt-dlp isn't installed, RuntimeError for any other yt-dlp failure.
+
+    `--ignore-errors` is on: YouTube's anti-bot sign-in wall (see YOUTUBE_SIGNIN_HINTS) can trip on one
+    specific video in the result list without affecting the others, and without it yt-dlp aborts the
+    *entire* search the moment the first entry in the ytsearch pseudo-playlist fails, turning one blocked
+    video into zero results. So a nonzero exit code here doesn't necessarily mean the search failed --
+    it's only treated as an error when nothing at all could be parsed out of stdout.
+    """
+    args = [sys.executable, "-m", "yt_dlp", "--no-warnings", "--ignore-errors", "--skip-download", "--dump-json",
             "--playlist-end", str(count), f"ytsearch{count}:{query}"]
     code, out, err = await runner(args)
-    if code != 0:
-        if "No module named yt_dlp" in err:
-            raise SourceUnavailable("yt-dlp is not installed (pip install yt-dlp)")
-        tail = err.strip().splitlines()[-1][:200] if err.strip() else "no output"
-        raise RuntimeError(f"YouTube search failed: {tail}")
     out_list: list[dict[str, Any]] = []
     for line in out.splitlines():
         line = line.strip()
@@ -56,4 +68,14 @@ async def search_youtube(query: str, count: int, runner: Runner = run_subprocess
             "upload_date": info.get("upload_date", ""),
             "description": (info.get("description") or "")[:300],
         })
+    if code != 0 and not out_list:
+        if "No module named yt_dlp" in err:
+            raise SourceUnavailable("yt-dlp is not installed (pip install yt-dlp)")
+        tail = err.strip().splitlines()[-1][:200] if err.strip() else "no output"
+        if any(h in tail.lower() for h in YOUTUBE_SIGNIN_HINTS):
+            raise RuntimeError(f"YouTube search failed: every result it tried to read hit YouTube's own "
+                                f"sign-in/bot check ({tail}) -- this isn't something the app can fix by "
+                                f"retrying the same search; try a different or more specific query, or "
+                                f"add the video by pasting its link into \"Add links\" instead")
+        raise RuntimeError(f"YouTube search failed: {tail}")
     return out_list

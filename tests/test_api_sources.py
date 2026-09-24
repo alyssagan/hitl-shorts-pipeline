@@ -254,6 +254,19 @@ class YoutubeSearchEndpointTests(ApiSourcesTests):
         self.assertEqual(r.status_code, 422)
         self.assertIn("network is unreachable", r.json()["error"])
 
+    def test_a_failure_message_that_already_says_youtube_search_failed_is_not_wrapped_twice(self):
+        # Real bug, reported verbatim by Aly: search_youtube() already raises RuntimeError("YouTube search
+        # failed: ..."), and this endpoint used to wrap it AGAIN in its own "YouTube search failed: {exc}",
+        # producing a literal doubled "YouTube search failed: YouTube search failed: ...ERROR..." message.
+        jid, _ = self.to_assets_review()
+        inner = "YouTube search failed: every result it tried to read hit YouTube's own sign-in/bot check"
+        with patch("pipeline.api.app.search_youtube", AsyncMock(side_effect=RuntimeError(inner))):
+            r = self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "x", "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 422)
+        error = r.json()["error"]
+        self.assertEqual(error, inner)
+        self.assertEqual(error.lower().count("youtube search failed"), 1)
+
     def test_every_call_is_logged_to_its_own_requests_jsonl_success_or_failure(self):
         jid, _ = self.to_assets_review()
         with patch("pipeline.api.app.search_youtube", AsyncMock(return_value=[self.candidate()])):

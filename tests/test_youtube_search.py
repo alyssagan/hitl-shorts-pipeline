@@ -89,6 +89,43 @@ class SearchYoutubeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("7", args[args.index("--playlist-end") + 1:args.index("--playlist-end") + 2])
         self.assertEqual(args[-1], "ytsearch7:cook county nurses 1966")
 
+    async def test_ignore_errors_flag_is_passed_so_one_blocked_video_does_not_abort_the_whole_search(self):
+        seen = {}
+
+        async def runner(args):
+            seen["args"] = args
+            return 0, "", ""
+
+        await search_youtube("x", 5, runner)
+        self.assertIn("--ignore-errors", seen["args"])
+
+    # ---- YouTube's anti-bot sign-in wall (real report: a search returned nothing because ONE result in
+    # the batch needed "Sign in to confirm you're not a bot", which -- before --ignore-errors was added --
+    # aborted yt-dlp's whole ytsearch run instead of just skipping that one entry) --------------------
+
+    async def test_partial_results_are_kept_even_when_yt_dlp_exits_nonzero_overall(self):
+        # One entry in the batch hit the sign-in wall and yt-dlp exited 1 for the run as a whole, but two
+        # other entries were already successfully dumped to stdout before that -- those must still come
+        # back rather than the whole search failing because of the one blocked video.
+        async def runner(args):
+            out = _line(id="ok1") + "\n" + _line(id="ok2", title="Second clip")
+            err = "ERROR: [youtube] blocked1: Sign in to confirm you’re not a bot. Use --cookies-from-browser..."
+            return 1, out, err
+        got = await search_youtube("x", 3, runner)
+        self.assertEqual({r["id"] for r in got}, {"ok1", "ok2"})
+
+    async def test_sign_in_wall_on_every_result_raises_a_clear_actionable_error(self):
+        # Nothing at all could be parsed (every candidate hit the wall) -- this really is an error, but the
+        # message should say this is YouTube's own check, not something retrying the same search will fix.
+        async def runner(args):
+            err = "ERROR: [youtube] yAM3U7OrEaY: Sign in to confirm you’re not a bot. Use --cookies-from-browser or --cookies for the authentication."
+            return 1, "", err
+        with self.assertRaises(RuntimeError) as ctx:
+            await search_youtube("x", 1, runner)
+        msg = str(ctx.exception)
+        self.assertIn("sign-in/bot check", msg)
+        self.assertIn("Add links", msg)
+
 
 if __name__ == "__main__":
     unittest.main()
