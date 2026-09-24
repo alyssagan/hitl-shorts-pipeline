@@ -76,6 +76,15 @@ class Registry:
     def render_stage(self, name: str) -> RenderStage:
         return self._get(self._render, name, "render")()
 
+    def source(self, name: str) -> SourceAdapter:
+        """One registered source adapter by name, fresh (same per-call-factory pattern as the other
+        `*_stage` getters above) -- used by Gate 2's on-demand "Find more" search (pipeline/api/app.py's
+        source_search_view/assets_add_candidate) to call a single source's search()/keep_one() directly,
+        outside a normal sourcing round and regardless of which sources this particular job was configured
+        with (every source registers unconditionally in build_default_registry -- none of the three this
+        is used for today need an API key)."""
+        return self._get(self._sources, name, "source")()
+
     @staticmethod
     def _get(table: dict, name: str, kind: str):
         if name not in table:

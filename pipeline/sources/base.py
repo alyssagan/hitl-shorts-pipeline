@@ -286,6 +286,34 @@ class HttpSource:
     async def search(self, query: str, ctx: SourceContext) -> list[Candidate]:
         raise NotImplementedError
 
+    async def keep_one(self, c: Candidate, ctx: SourceContext, query: str = "") -> Asset:
+        """Download ONE already-found Candidate into an Asset, outside the normal batch fetch() loop below.
+        This is search()'s on-demand counterpart: Gate 2's "Find more" panel calls search() to list candidates
+        without downloading anything, a person picks one, and this downloads just that one (pipeline/api/app.py's
+        source_search_view / assets_add_candidate). Applies the same unusable-format check and duplicate-file
+        (sha256) guard fetch() applies per query, but not fetch()'s per_query/videos_per_query caps -- a person
+        who picked one specific item out of a results list has already made the count decision those caps exist
+        to make automatically for an unattended batch run."""
+        ext = MIME_TO_EXT.get((c.mime or "").lower())
+        if not ext:
+            raise ValueError(f"format '{c.mime or 'unknown'}' can't be used by the renderer")
+        if c.url in ctx.known_urls:
+            raise ValueError("that item is already in this project")
+        fname = f"{len(ctx.known_urls) + 1:03d}-{safe_name(c.title or 'asset')}.{ext}"
+        dest = ctx.dir / "files" / fname
+        _size, sha = await ctx.http.download(c.url, dest, purpose=f"download {c.kind} '{c.title or c.url}' (picked from search results)")
+        if sha in ctx.known_hashes:
+            dest.unlink(missing_ok=True)
+            raise ValueError("identical file already in this project")
+        return Asset(
+            source=self.name, kind=c.kind if c.kind in ("image", "video") else "image",
+            path=str(dest), rel_path=os.path.relpath(dest, ctx.project_dir),
+            source_url=c.url, page_url=c.page_url, title=c.title, description=c.description,
+            query=query, author=c.author, license=c.license, license_url=c.license_url,
+            attribution=c.attribution, width=c.width, height=c.height, duration=c.duration,
+            mime=c.mime, sha256=sha, meta=c.meta,
+        )
+
     async def fetch(self, queries: list[str], ctx: SourceContext) -> SourceResult:
         result = SourceResult()
         seen_urls = set(ctx.known_urls)

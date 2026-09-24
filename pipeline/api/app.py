@@ -24,6 +24,14 @@
                                         max 10) YouTube candidates via yt-dlp's own search, metadata only --
                                         nothing downloaded or added. Pick one by posting its `url` to
                                         /assets/add-url above, same as any pasted link.
+  POST /jobs/{id}/source-search        {source, query, count?}   Gate 2 "Find more": same idea as
+                                        /youtube-search above, for the sources that already have a free
+                                        no-key API AND already run as automated sources elsewhere in the
+                                        pipeline (INLINE_SEARCH_SOURCES below: archive/chronicling_america/
+                                        commons) -- calls that source's own search(), metadata only.
+  POST /jobs/{id}/assets/add-candidate {source, query?, note?, reviewer, candidate:{url,...}}   pick one
+                                        result from /source-search above: downloads it and adds it pending,
+                                        keeping the license/author/attribution search() already found.
   GET  /jobs/{id}/folder-files        what's currently in the server's configured own-footage folder (#10),
                                         each with whether it's already selected for this job -- read-only,
                                         pick from this list for assets/reject's folder_files.
@@ -98,6 +106,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -113,7 +122,7 @@ from ..core import state_machine as sm
 from ..core.models import Job, JobState, ProviderChoice
 from ..core.orchestrator import LABELS, Orchestrator, SUGGESTED_LABEL_REASONS
 from ..core.store import JobNotFound, JobStore
-from ..sources.base import LoggedHttp, SourceContext, SourceUnavailable
+from ..sources.base import Candidate, LoggedHttp, SourceContext, SourceUnavailable
 from ..sources.folder import list_available as list_folder_files, normalize_selection as normalize_folder_entry
 from ..sources.upload import asset_from_upload
 from ..sources.urls import UrlListSource
@@ -121,6 +130,16 @@ from ..sources.youtube_search import search_youtube
 from ..stages.registry import Registry, build_default_registry
 from ..vetting.method_registry import as_json as method_definitions_json
 from .review_page import PAGE
+
+# Sources with a free, no-key API that Gate 2's "Find more" panel can search on demand -- the archive-side
+# counterpart to youtube_search_view's yt-dlp search below. Google Images/FindAGrave have no API to call at
+# all; TikTok/Facebook have neither a free API nor a way to avoid the platform-download risk that already
+# gets anything from them auto-flagged high risk (see docs/REVIEW_UI.md) -- all four stay plain link-outs.
+INLINE_SEARCH_SOURCES = {
+    "archive": "Internet Archive",
+    "chronicling_america": "Chronicling America",
+    "commons": "Wikimedia Commons",
+}
 
 
 def load_settings(path: str | Path = "config/pipeline.toml") -> dict[str, Any]:
@@ -316,6 +335,92 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         log._log(method="yt-dlp-search", url=f"ytsearch{count}:{query}", status=200,
                  purpose=f"search YouTube for '{query}'", found=len(results))
         return JSONResponse(results)
+
+    def _search_ctx(job: Job, source: str) -> SourceContext:
+        project_dir = orch.store.job_dir(job.id)
+        src_dir = project_dir / "sources" / source
+        # Same transport/user_agent the normal sourcing round uses (registry.sourcing_stage()) -- lets
+        # tests inject a mock transport via reg.source_transport, and means this hits the real network
+        # exactly when a normal sourcing round would.
+        http = LoggedHttp(src_dir, source, user_agent=orch.registry.user_agent, transport=orch.registry.source_transport)
+        return SourceContext(
+            project_dir=project_dir, dir=src_dir, http=http, subject=job.subject,
+            known_urls={a.source_url for a in job.assets if a.source_url},
+            known_hashes={a.sha256 for a in job.assets if a.sha256})
+
+    async def source_search_view(r: Request):
+        """Gate 2's "Find more" panel, for the sources that (unlike YouTube) already have a free, no-key
+        API AND already run as automated sources elsewhere in the pipeline (pipeline/sources/groups.py's
+        ARCHIVE_SOURCES): Internet Archive, Chronicling America, Wikimedia Commons. Calls that source's own
+        search() directly (pipeline/sources/base.py's HttpSource.search) -- metadata only, nothing
+        downloaded until a specific result is picked via assets_add_candidate below. Runs regardless of
+        which sources this job was actually configured with, same as youtube_search_view above. JSON:
+        {source, query, count?} -> [{id, url, kind, mime, title, description, page_url, author, license,
+        license_url, attribution, width, height, duration}, ...]."""
+        job_id = r.path_params["id"]
+        d = await body(r)
+        source = (d.get("source") or "").strip()
+        if source not in INLINE_SEARCH_SOURCES:
+            raise HTTPException(400, f"source must be one of: {', '.join(sorted(INLINE_SEARCH_SOURCES))}")
+        query = (d.get("query") or "").strip()
+        if not query:
+            raise HTTPException(400, "query is required")
+        raw_count = d.get("count")
+        count = max(1, min(int(raw_count) if raw_count not in (None, "") else 5, 10))
+        job = orch.get(job_id)                       # 404 if unknown
+        if job.state is not JobState.ASSETS_REVIEW:
+            raise HTTPException(409, f"search is only available during asset review (job is '{job.state.value}')")
+        ctx = _search_ctx(job, source)
+        adapter = orch.registry.source(source)
+        try:
+            cands = await adapter.search(query, ctx)
+        except SourceUnavailable as exc:
+            raise HTTPException(503, str(exc)) from None
+        except Exception as exc:
+            raise HTTPException(422, f"{INLINE_SEARCH_SOURCES[source]} search failed: {exc}") from None
+        out = [{"id": f"{source}-{i}-{hashlib.sha1(c.url.encode()).hexdigest()[:8]}", "url": c.url, "kind": c.kind,
+                "mime": c.mime, "title": c.title, "description": c.description, "page_url": c.page_url,
+                "author": c.author, "license": c.license, "license_url": c.license_url, "attribution": c.attribution,
+                "width": c.width, "height": c.height, "duration": c.duration, "meta": c.meta}
+               for i, c in enumerate(cands[:count])]
+        return JSONResponse(out)
+
+    async def assets_add_candidate(r: Request):
+        """Add ONE result from source_search_view above: downloads it and adds it as a normal pending asset
+        (like assets_add_url), but keeps the license/author/attribution the search already found instead of
+        re-deriving them from a bare URL -- these sources' Candidates carry real rights metadata that a
+        generic yt-dlp/direct download of the same URL would lose. JSON: {source, query?, reviewer, note?,
+        candidate: {url, kind, mime, title, description, page_url, author, license, license_url, attribution,
+        width, height, duration, meta}}."""
+        job_id = r.path_params["id"]
+        d = await body(r)
+        source = (d.get("source") or "").strip()
+        if source not in INLINE_SEARCH_SOURCES:
+            raise HTTPException(400, f"source must be one of: {', '.join(sorted(INLINE_SEARCH_SOURCES))}")
+        cd = d.get("candidate") or {}
+        url = (cd.get("url") or "").strip()
+        if not url:
+            raise HTTPException(400, "candidate.url is required")
+        job = orch.get(job_id)                       # 404 if unknown
+        if job.state is not JobState.ASSETS_REVIEW:
+            raise HTTPException(409, f"can only add during asset review (job is '{job.state.value}')")
+        if url in {a.source_url for a in job.assets if a.source_url}:
+            raise HTTPException(422, "that item is already in this project")
+        candidate = Candidate(
+            url=url, kind=cd.get("kind") or "image", mime=cd.get("mime") or "", title=cd.get("title") or "",
+            description=cd.get("description") or "", page_url=cd.get("page_url") or "", author=cd.get("author") or "",
+            license=cd.get("license") or "", license_url=cd.get("license_url") or "", attribution=cd.get("attribution") or "",
+            width=cd.get("width"), height=cd.get("height"), duration=cd.get("duration"), meta=cd.get("meta") or {})
+        ctx = _search_ctx(job, source)
+        adapter = orch.registry.source(source)
+        try:
+            asset = await adapter.keep_one(candidate, ctx, query=d.get("query", ""))
+        except Exception as exc:
+            raise HTTPException(422, f"couldn't add that item: {exc}") from None
+        query = d.get("query", "")
+        note = d.get("note") or (f"Found via Gate 2's {INLINE_SEARCH_SOURCES[source]} search" +
+                                 (f' for "{query}"' if query else "") + ".")
+        return await orch.add_reviewable_asset(job_id, asset, reviewer=d.get("reviewer", ""), note=note)
 
     async def scene_approve_pending(r: Request):
         d = await body(r)
@@ -544,6 +649,8 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/assets/reject", wrap(assets_reject), methods=["POST"]),
         Route(f"{P}/assets/add-url", wrap(assets_add_url), methods=["POST"]),
         Route(f"{P}/youtube-search", wrap(youtube_search_view), methods=["POST"]),
+        Route(f"{P}/source-search", wrap(source_search_view), methods=["POST"]),
+        Route(f"{P}/assets/add-candidate", wrap(assets_add_candidate), methods=["POST"]),
         Route(f"{P}/folder-files", wrap(folder_files_list), methods=["GET"]),
         Route(f"{P}/assets/label", wrap(assets_label), methods=["POST"]),
         Route(f"{P}/assets/{{asset_id}}/identity", wrap(asset_identity), methods=["POST"]),

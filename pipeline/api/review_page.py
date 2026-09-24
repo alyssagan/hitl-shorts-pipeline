@@ -105,6 +105,15 @@ let whyOpen = {};        // asset id -> bool. Open by default (requested directl
                           // are visible without a click; explicit false once a reviewer collapses one, so a
                           // later re-render doesn't silently pop it back open under them.
 let ytCount = 5, ytResults = null, ytLoading = false, ytError = "", ytLastQuery = "";   // "Find more" YouTube search
+let srcSearch = {};      // "Find more": per-source on-demand search state for archive/chronicling_america/commons,
+                          // lazily created by srcState() below -- same idea as the yt* variables above, just keyed
+                          // by source since there are three of these instead of one.
+let findPasteUrl = "", findPasteBusy = false, findPasteError = "", findPasteOk = "";
+                          // "Find more"'s own quick paste-back box (requested directly: "i need a way to
+                          // streamline this") -- same /assets/add-url "Add links" below already calls, just
+                          // reachable right where the plain link-out buttons (Google Images/FindAGrave/TikTok/
+                          // Facebook) are, so finding something on one of those sites doesn't mean scrolling
+                          // away to paste its link in.
 const CATEGORY_LABELS = {verified_case:"verified case", unverified_case_candidate:"unverified case candidate",
   historical_context:"historical context", illustrative_stock:"illustrative stock", reconstruction:"reconstruction"};
 const IDENTITY_LABELS = {unverified:"unverified", verified:"verified", disputed:"disputed"};
@@ -387,13 +396,13 @@ function checklistPanel(){
 // different search boxes by hand. Whatever you find still comes back in through "Add links" or a scene
 // drop, same as always, and still goes through the normal vetting/decision flow.
 const FIND_SITES = [
-  {label:"Internet Archive", note:"old newsreels, TV news archive footage, public-domain film -- this is the same site one of this job's own sources already searches, just its full public search rather than the narrower automated query",
+  {label:"Internet Archive", note:"this site's own full public search, with facets this job's automated search doesn't expose -- for a quicker look without leaving this page, use \"Search Internet Archive here\" below instead",
    url:q=>`https://archive.org/search?query=${encodeURIComponent(q)}`},
-  {label:"Chronicling America", note:"historic newspaper pages -- the Library of Congress's own search page for this collection, broader than the automated source's query",
+  {label:"Chronicling America", note:"the Library of Congress's own search page for this collection, broader than the automated source's query -- or use \"Search Chronicling America here\" below to stay on this page",
    url:q=>`https://chroniclingamerica.loc.gov/search/pages/results/?andtext=${encodeURIComponent(q)}`},
-  {label:"Wikimedia Commons", note:"openly-licensed photos -- rare for a specific recent case, but worth checking, and always confirm the license tag on whatever you find",
+  {label:"Wikimedia Commons", note:"this site's own search UI, with filters this job's automated search doesn't expose -- or use \"Search Wikimedia Commons here\" below to stay on this page",
    url:q=>`https://commons.wikimedia.org/w/index.php?search=${encodeURIComponent(q)}&title=Special:MediaSearch&type=image`},
-  {label:"YouTube", note:"documentaries and news retrospectives -- if you find one worth using, paste its URL into \"Add links\" below rather than screen-recording; it's auto-flagged high risk either way so you decide before it's used",
+  {label:"YouTube", note:"documentaries and news retrospectives -- or use \"Search YouTube here\" below to stay on this page; either way, paste its URL into \"Add links\" or the box below rather than screen-recording, and it's auto-flagged high risk either way so you decide before it's used",
    url:q=>`https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`},
   {label:"Google Images", note:"a discovery tool, not a rights source -- use it to find where a photo actually lives, then check that source's own license before adding it",
    url:q=>`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(q)}`},
@@ -416,6 +425,64 @@ function findMoreSuggestions(){
   return out;
 }
 function findMoreQuery(){ return findQuery===null ? (job.subject||"") : findQuery; }
+// Sources with a free, no-key API that are ALREADY automated sources elsewhere in the pipeline
+// (pipeline/sources/groups.py's ARCHIVE_SOURCES) -- unlike YouTube (below), searching these on demand here
+// just exposes search() that already exists, rather than adding a new capability. Matches the backend's
+// INLINE_SEARCH_SOURCES (pipeline/api/app.py) name-for-name; Google Images/FindAGrave/TikTok/Facebook have
+// no free API (the latter two also carry the platform-download risk PLATFORM_SOURCE flags) and stay plain
+// link-outs in FIND_SITES above, with the quick paste-back box below for whatever you find there.
+const SEARCHABLE_SOURCES = [
+  {name:"archive", label:"Internet Archive"},
+  {name:"chronicling_america", label:"Chronicling America"},
+  {name:"commons", label:"Wikimedia Commons"},
+];
+function srcState(name){
+  return srcSearch[name] || (srcSearch[name] = {results:null, loading:false, error:"", lastQuery:"", count:5});
+}
+async function searchSource(name){
+  const st = srcState(name);
+  if (job.state !== "assets_review"){
+    st.error = `Search becomes available once this job reaches asset review (it's currently "${job.state}").`;
+    render(); return;
+  }
+  const q = findMoreQuery().trim();
+  if (!q){ st.error="Type or pick a search term above first."; render(); return; }
+  st.loading=true; st.error=""; st.results=null; st.lastQuery=q; render();
+  try{
+    st.results = await api("POST", `/jobs/${JOB}/source-search`, {source:name, query:q, count:st.count});
+  }catch(e){ st.error=String(e.message||e); }
+  st.loading=false; render();
+}
+async function addSourceCandidate(name, label, c){
+  // Downloads just this one item and adds it pending (pipeline/api/app.py's assets_add_candidate) --
+  // unlike a YouTube pick, these keep the license/author/attribution the search already found rather than
+  // re-deriving them from a bare URL, and aren't auto-flagged PLATFORM_SOURCE, but still go through the
+  // normal vetting/relevance scoring and review below like anything else.
+  const missing = missingHighRiskNotes();
+  if (missing){ error = `${missing} high-risk Use pick(s) need a note before adding an item -- add the note, or un-pick them.`; render(); return; }
+  busy=true; error=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    await persistDecisions(reviewer);
+    const st = srcState(name);
+    await api("POST", `/jobs/${JOB}/assets/add-candidate`, {source:name, query: st.lastQuery, candidate:c, reviewer});
+    if (st.results) st.results = st.results.filter(x=>x.id!==c.id);
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+function sourceResultCard(name, label, c){
+  const thumb = c.kind==="image" ? c.url : "";
+  return h("div",{class:"card", style:"max-width:240px"},
+    thumb ? h("div",{class:"media"}, h("img",{src:thumb,loading:"lazy",alt:c.title||""})) : null,
+    h("div",{class:"body"},
+      h("div",{class:"title"}, c.title||"(untitled)"),
+      h("div",{class:"meta"}, c.author||"unknown author"),
+      h("div",{class:"meta"}, c.license || "no license info in the record -- check the item page before use"),
+      c.description ? h("div",{class:"meta"}, c.description.slice(0,160)) : null,
+      c.page_url ? h("div",{class:"meta"}, h("a",{href:c.page_url,target:"_blank",rel:"noopener"},"open item page")) : null),
+    h("div",{class:"acts"},
+      h("button",{disabled:busy, onclick:()=>addSourceCandidate(name,label,c)}, "Add this one")));
+}
 async function searchYoutube(){
   // The one site in FIND_SITES that's actually automatable (requested directly): yt-dlp's own search
   // syntax, no paid API key. Metadata only -- nothing downloads until a specific result is added below.
@@ -460,15 +527,53 @@ function ytResultCard(c){
     h("div",{class:"acts"},
       h("button",{disabled:busy, onclick:()=>addYoutubeCandidate(c)}, "Add this one")));
 }
+async function findQuickAdd(){
+  // One-click paste-back for whatever you found on one of the plain link-out buttons above (Google
+  // Images/FindAGrave/TikTok/Facebook, or any of the others) -- the exact same /assets/add-url "Add
+  // links" below already calls, just reachable right here instead of scrolling down to paste it there.
+  const url = findPasteUrl.trim();
+  if (!url){ findPasteError="Paste a URL first."; render(); return; }
+  const missing = missingHighRiskNotes();
+  if (missing){ error = `${missing} high-risk Use pick(s) need a note before adding a link -- add the note, or un-pick them.`; render(); return; }
+  findPasteBusy=true; findPasteError=""; findPasteOk=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    await persistDecisions(reviewer);
+    await api("POST", `/jobs/${JOB}/assets/add-url`, {url, note:"Found via Gate 2's \"Find more\" panel.", reviewer});
+    findPasteUrl=""; findPasteOk="Added -- pending review below."; findPasteBusy=false; await load();
+  }catch(e){ findPasteBusy=false; findPasteError=String(e.message||e); render(); }
+}
+function inlineSearchBlock(ready, loading, error, results, lastQuery, count, onSearch, onCount, label, resultCard, unit){
+  // Shared render shape for YouTube's search block and each of SEARCHABLE_SOURCES' below -- same
+  // button/select/status/grid layout, just parameterized so the YouTube block (already shipped, already
+  // tested) didn't need touching to add the other three.
+  return h("div",{},
+    h("div",{class:"bar",style:"margin-top:10px"},
+      h("button",{class:"primary",disabled:busy||loading||!ready,
+        title: ready?"":`Only available during asset review -- this job is currently "${job.state}"`,
+        onclick:onSearch}, loading?`Searching ${label}...`:`Search ${label} here (metadata only, nothing downloads yet)`),
+      h("select",{onchange:e=>onCount(Number(e.target.value))},
+        [3,5,10].map(n=>h("option",{value:n,selected:n===count},`${n} results`)))),
+    !ready ? h("div",{class:"sub",style:"margin-top:2px"},
+      `Becomes available once this job reaches asset review -- it's currently "${job.state}".`) : null,
+    error?h("div",{class:"err"}, error):null,
+    results ? (results.length
+      ? h("div",{},
+          h("div",{class:"sub",style:"margin-top:6px"},`${results.length} result(s) for "${lastQuery}" -- nothing downloaded yet; `+
+            `"Add this one" downloads just that ${unit} and adds it pending${label==="YouTube"?" (still high-risk, still needs a note)":""}.`),
+          h("div",{class:"grid"}, results.map(resultCard)))
+      : h("div",{class:"sub",style:"margin-top:6px"},`No ${label} results for "${lastQuery}".`)) : null);
+}
 function findMorePanel(){
   const suggestions = findMoreSuggestions();
   const ytReady = job.state === "assets_review";
   return h("div",{class:"panel"},
     h("b",{},"Find more -- search outside the automated sources"),
     h("div",{class:"sub"},"The pipeline's own search only reaches free, openly-licensed archives -- it can't see platform "+
-      "videos, press photo archives, or public records, which is often exactly what a specific case needs. These open a "+
-      "real search on other free sites so you can look yourself. Nothing here is fetched or added automatically -- bring "+
-      "back what's worth using through \"Add links\" below or a scene drop."),
+      "videos, press photo archives, or public records, which is often exactly what a specific case needs. Internet "+
+      "Archive, Chronicling America, Wikimedia Commons and YouTube can be searched right here, metadata only, nothing "+
+      "downloaded until you pick a result; the rest open a real search on their own site instead. Whatever you bring "+
+      "back still goes through the normal vetting/decision flow below, same as always."),
     h("div",{class:"bar"},
       h("input",{type:"text",value:findMoreQuery(),size:44,placeholder:"what to search for",
         oninput:e=>{findQuery=e.target.value;}})),
@@ -478,21 +583,21 @@ function findMorePanel(){
       FIND_SITES.map(site=>h("button",{title:site.note,
         onclick:()=>{window.open(site.url(findMoreQuery()), "_blank", "noopener");}},
         site.label))),
-    h("div",{class:"bar",style:"margin-top:10px"},
-      h("button",{class:"primary",disabled:busy||ytLoading||!ytReady,
-        title: ytReady?"":`Only available during asset review -- this job is currently "${job.state}"`,
-        onclick:searchYoutube}, ytLoading?"Searching YouTube...":"Search YouTube here (metadata only, nothing downloads yet)"),
-      h("select",{onchange:e=>{ytCount=Number(e.target.value);}},
-        [3,5,10].map(n=>h("option",{value:n,selected:n===ytCount},`${n} results`)))),
-    !ytReady ? h("div",{class:"sub",style:"margin-top:2px"},
-      `Becomes available once this job reaches asset review -- it's currently "${job.state}".`) : null,
-    ytError?h("div",{class:"err"}, ytError):null,
-    ytResults ? (ytResults.length
-      ? h("div",{},
-          h("div",{class:"sub",style:"margin-top:6px"},`${ytResults.length} result(s) for "${ytLastQuery}" -- nothing downloaded yet; `+
-            `"Add this one" downloads that video and adds it pending, same as pasting its link into "Add links" (still high-risk, still needs a note).`),
-          h("div",{class:"grid"}, ytResults.map(ytResultCard)))
-      : h("div",{class:"sub",style:"margin-top:6px"},`No YouTube results for "${ytLastQuery}".`)) : null);
+    h("div",{class:"bar",style:"margin-top:6px"},
+      h("input",{type:"text",value:findPasteUrl,size:44,placeholder:"found something on one of those? paste its link here",
+        oninput:e=>{findPasteUrl=e.target.value;}}),
+      h("button",{disabled:busy||findPasteBusy||job.state!=="assets_review",
+        title: job.state==="assets_review"?"":`Only available during asset review -- this job is currently "${job.state}"`,
+        onclick:findQuickAdd}, findPasteBusy?"Adding...":"Add this link")),
+    findPasteError?h("div",{class:"err"}, findPasteError):null,
+    findPasteOk?h("div",{class:"sub"}, findPasteOk):null,
+    inlineSearchBlock(ytReady, ytLoading, ytError, ytResults, ytLastQuery, ytCount,
+      searchYoutube, n=>{ytCount=n;}, "YouTube", ytResultCard, "video"),
+    SEARCHABLE_SOURCES.map(({name,label})=>{
+      const st = srcState(name);
+      return inlineSearchBlock(job.state==="assets_review", st.loading, st.error, st.results, st.lastQuery, st.count,
+        ()=>searchSource(name), n=>{st.count=n;}, label, c=>sourceResultCard(name,label,c), "item");
+    }));
 }
 function card(a){
   const v = a.vetting||{}, d = decisions[a.id], r = risk(a), lbl = labels[a.id];

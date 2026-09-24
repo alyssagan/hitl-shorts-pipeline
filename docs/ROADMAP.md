@@ -39,6 +39,37 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: inline search for Internet Archive/Chronicling America/Commons, and a "Find more" quick paste-back box (2026-09-23)
+Requested directly, after Aly noticed most of "Find more" was "just links" and asked "why can't it search
+call at the same time?" and "i need a way to streamline this." Internet Archive, Chronicling America and
+Wikimedia Commons get the same "search right here, nothing downloads until you pick a result" treatment
+YouTube already had -- unlike YouTube, these three already have a free no-key API AND already run as
+automated sources elsewhere in the pipeline (`pipeline/sources/groups.py`'s `ARCHIVE_SOURCES`), so this
+just exposes each source's own `search()` (`pipeline/sources/base.py`'s `HttpSource.search`) on demand
+instead of building anything new. Two new backend endpoints (`pipeline/api/app.py`): `POST
+/jobs/{id}/source-search` (list candidates, metadata only) and `POST /jobs/{id}/assets/add-candidate`
+(download one and add it pending) -- the latter reconstructs the exact `Candidate` the search already
+returned rather than re-deriving license/author/attribution from a bare URL the way `/assets/add-url`'s
+generic yt-dlp/direct download has to. A new `HttpSource.keep_one()` (`pipeline/sources/base.py`) factors
+the single-candidate-download step out of `fetch()`'s batch loop without changing `fetch()` itself; a new
+`Registry.source(name)` (`pipeline/stages/registry.py`) gets one adapter by name outside a normal sourcing
+round. Google Images and FindAGrave stay plain link-outs (no free API at all); TikTok and Facebook stay
+plain link-outs too (no free API, and the platform-download risk that already gets anything from them
+auto-flagged high risk). For those four, a one-line paste-back box now sits right in the "Find more" panel
+(`findQuickAdd()`), calling the same `/assets/add-url` "Add links" already uses, so finding something on
+one of those sites doesn't mean scrolling away to paste its link in.
+
+- Backend: 2 new endpoints, `INLINE_SEARCH_SOURCES` (matches the frontend's `SEARCHABLE_SOURCES` name for
+  name), `HttpSource.keep_one()`, `Registry.source()`. 13 new tests (`tests/test_source_search.py`),
+  offline via `httpx.MockTransport`, calling the real `search()`/`keep_one()` through the endpoints rather
+  than mocking the adapter away.
+- Frontend: `SEARCHABLE_SOURCES`, `srcState()`/`searchSource()`/`addSourceCandidate()`/`sourceResultCard()`
+  (generalized per-source state, parallel to the existing YouTube-only `yt*` variables/functions, which
+  were left untouched), `inlineSearchBlock()` (shared render shape for all four "search here" blocks,
+  YouTube included), and `findQuickAdd()`. 6 new tests (`tests/test_review_page_source_search.py`),
+  extracting the real JS and asserting the frontend/backend source lists actually match. Full suite: 535
+  passing (up from 516), zero regressions.
+
 ## Done: TikTok and Facebook link-outs in "Find more"; Instagram explicitly excluded (2026-09-23)
 Immediate follow-up: "what about facebook, instagram, tiktok?" -- same honest split as the rest of the
 panel rather than adding all three for symmetry. TikTok and Facebook got a genuine free query-string

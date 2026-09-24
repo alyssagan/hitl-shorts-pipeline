@@ -124,6 +124,11 @@ Still to judge by watching and comparing runs (record in OPTIONS_TO_TRY.md):
   extremely well-documented and stable, so it's treated as low-risk despite the same lack of a live test.
 - **Effect:** the first live search on each may reveal a difference. `sources/<name>/requests.jsonl` shows
   exactly what was asked and what status came back; a source that fails is skipped without stopping the others.
+- **As of the "Find more" panel's on-demand search** for Internet Archive, Chronicling America and Wikimedia
+  Commons (Gate 2, `POST /jobs/{id}/source-search`), this same risk applies there too, not just to the normal
+  per-round search -- it's the identical `search()` method either way (`pipeline/sources/base.py`'s
+  `HttpSource.search`), just called directly instead of from `pipeline/stages/sourcing.py`'s batch loop. A
+  parse failure surfaces as a 422 in the review page rather than a silently-empty result.
 - **Also:** Library of Congress and, as of 2026-09-23, Internet Archive both leave items without a clear rights
   statement unlicensed rather than dropping them, so vetting can flag them high risk instead of you never seeing
   them (see ROADMAP.md); set `archive_require_license = true` in `config/pipeline.toml` to go back to Archive

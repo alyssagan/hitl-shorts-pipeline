@@ -108,27 +108,33 @@ pictured and where the usage rights stand, beyond what the automated flags alone
   without retyping. The eight buttons below each open a real search on a free site in a new tab, prefilled with
   whatever's in the box -- Internet Archive, Chronicling America (Library of Congress's own newspaper search, wider
   than the automated source's query), Wikimedia Commons, YouTube, Google Images, FindAGrave, TikTok, and Facebook.
-  These eight never fetch, download, or add anything -- they only open a search page for you to look at and judge
-  yourself. Google Images in particular is a discovery tool, not a rights source: it's there to help you find where
-  a photo actually lives, and whatever you find still needs its own license checked before use. Facebook's search
-  almost always needs you to already be logged into Facebook in that same browser to show anything at all --
-  otherwise it's just a login page. Instagram is deliberately not in this list: unlike the others, it has no plain
-  query-string search URL to link to (its search is a logged-in, JS-driven experience), so a button for it would
-  only ever land on its login screen, not a shortcut to anything.
-  **Search YouTube here** (below the eight buttons, requested directly) is the one of those that's actually
-  automatable: it runs the same search through yt-dlp (no paid API key) and lists candidates right on the page --
-  thumbnail, title, uploader, duration, a description snippet -- for you to judge before anything downloads.
-  Nothing downloads or gets added until you click **Add this one** on a specific result, which calls the exact same
-  path as pasting that video's link into **Add links** below: synchronous download, lands `pending`, still
-  auto-flagged high risk (`PLATFORM_SOURCE`) and still needs a written note before you can approve it. Every search
-  (successful or not) is logged to `sources/youtube_search/requests.jsonl`, same spirit as every other source's
-  request log. Internet Archive, Chronicling America and Wikimedia Commons are deliberately NOT offered this way --
-  they're already automated sources in the pipeline's normal per-round search (docs/SEARCH_PLANNING.md), so a
-  second on-page search button would just duplicate what a `case`/`historical`-group keyword already searches;
-  their "Find more" buttons exist for their sites' own full public search UI, broader than what one round's
-  keyword query covers, not because they're otherwise unreachable. Anything worth using -- from a link-out button
-  or the YouTube search -- comes back in the normal way and still goes through the same vetting/decision flow as
-  everything else.
+  These eight never fetch, download, or add anything themselves -- they only open a search page for you to look at
+  and judge yourself. Google Images in particular is a discovery tool, not a rights source: it's there to help you
+  find where a photo actually lives, and whatever you find still needs its own license checked before use.
+  Facebook's search almost always needs you to already be logged into Facebook in that same browser to show
+  anything at all -- otherwise it's just a login page. Instagram is deliberately not in this list: unlike the
+  others, it has no plain query-string search URL to link to (its search is a logged-in, JS-driven experience), so
+  a button for it would only ever land on its login screen, not a shortcut to anything. Right below those buttons,
+  a one-line paste-back box (requested directly: "i need a way to streamline this") adds whatever you found on any
+  of those eight sites without scrolling down to **Add links** -- it calls that exact same endpoint.
+
+  Four of the eight can also be searched without leaving this page at all -- **Search YouTube/Internet
+  Archive/Chronicling America/Wikimedia Commons here**, one block per source, each with its own result count
+  (3/5/10) and results grid. All four are metadata-only: nothing downloads or gets added until you click **Add this
+  one** on a specific result. YouTube's search runs through yt-dlp (no paid API key) and adding a result calls the
+  exact same path as pasting that video's link into **Add links** below -- synchronous download, lands `pending`,
+  still auto-flagged high risk (`PLATFORM_SOURCE`) and still needs a written note before you can approve it. Every
+  YouTube search (successful or not) is logged to `sources/youtube_search/requests.jsonl`. Internet Archive,
+  Chronicling America and Wikimedia Commons are different: they're already automated sources in the pipeline's
+  normal per-round search (docs/SEARCH_PLANNING.md) with a free no-key API each, so their "search here" block just
+  calls that same source's `search()` on demand (`POST /jobs/{id}/source-search`) instead of duplicating it with a
+  second implementation -- and adding a result (`POST /jobs/{id}/assets/add-candidate`) keeps the license, author
+  and attribution that search already found, rather than re-deriving them from a bare URL the way `add-url` has to.
+  These three aren't auto-flagged high risk the way a platform video is, but still go through the same
+  vetting/relevance scoring and review as everything else. Google Images and FindAGrave don't get a "search here"
+  block: neither has a free API to call, only a search page to open. Anything worth using -- from a link-out
+  button, the paste-back box, or one of the four "search here" blocks -- comes back in the normal way and still
+  goes through the same vetting/decision flow as everything else.
 
 In the terminal, after submitting in the browser, type `web` at the asset prompt so the script carries on.
 
