@@ -205,22 +205,39 @@ class YoutubeSearchEndpointTests(ApiSourcesTests):
 
     def test_successful_search_returns_candidates_and_nothing_is_added_to_the_job(self):
         jid, before = self.to_assets_review()
+        # search_youtube is asked for 2x the requested count (count*2), because results already in the job
+        # are filtered out AFTER the fact ("no repeats") -- see test_already_known_urls_are_filtered_out
+        # below for that behavior specifically; this test is just the plain happy path.
         with patch("pipeline.api.app.search_youtube", AsyncMock(return_value=[self.candidate()])) as fn:
             r = self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "richard speck 1966", "reviewer": "Aly"})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json(), [self.candidate()])
-        fn.assert_awaited_once_with("richard speck 1966", 5)     # default count
+        fn.assert_awaited_once_with("richard speck 1966", 10)     # default count 5, doubled
         after = self.client.get(f"/jobs/{jid}").json()
         self.assertEqual(len(after["assets"]), len(before["assets"]))   # search alone adds nothing
 
-    def test_count_is_clamped_between_one_and_ten(self):
+    def test_count_is_clamped_between_one_and_ten_then_doubled_for_the_dedup_overfetch(self):
         jid, _ = self.to_assets_review()
         with patch("pipeline.api.app.search_youtube", AsyncMock(return_value=[])) as fn:
             self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "x", "count": 999, "reviewer": "Aly"})
-            fn.assert_awaited_with("x", 10)
+            fn.assert_awaited_with("x", 20)     # clamped to 10, then doubled
         with patch("pipeline.api.app.search_youtube", AsyncMock(return_value=[])) as fn:
             self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "x", "count": 0, "reviewer": "Aly"})
-            fn.assert_awaited_with("x", 1)
+            fn.assert_awaited_with("x", 2)     # clamped to 1, then doubled
+
+    def test_already_known_urls_are_filtered_out_so_a_later_search_shows_no_repeats(self):
+        # The actual bug this guards against: searching the same term again on a later batch/iteration
+        # used to show the exact same results, including ones already added to the job -- clicking "Add
+        # this one" on one of those either silently duplicated it or 422'd with a confusing error.
+        jid, before = self.to_assets_review()
+        already_in_job = before["assets"][0]["source_url"]
+        results = [self.candidate(id="already-added", url=already_in_job), self.candidate(id="new-one", url="https://www.youtube.com/watch?v=newone")]
+        with patch("pipeline.api.app.search_youtube", AsyncMock(return_value=results)):
+            r = self.client.post(f"/jobs/{jid}/youtube-search", json={"query": "x", "reviewer": "Aly"})
+        self.assertEqual(r.status_code, 200, r.text)
+        ids = [c["id"] for c in r.json()]
+        self.assertNotIn("already-added", ids)
+        self.assertIn("new-one", ids)
 
     def test_yt_dlp_missing_is_a_503(self):
         from pipeline.sources.base import SourceUnavailable

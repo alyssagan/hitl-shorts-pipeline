@@ -99,6 +99,8 @@ let catForms={}, idForms={}, rightsForms={};   // per-asset draft values for the
 let assetReport=null, assetReportOpen=false;   // per-job/per-source summary panel (#13)
 let coverage=null, coverageLoadedFor=null, coverageOverrideNote="", checklistForms={};   // pre-render visual coverage check (#12)
 let checklistOpen=false, newChecklistItem={label:"",group:"case",linked_keyword_term:""};   // adding items (#6/#12)
+let setAsideOpen=false;   // "Set aside" panel (Irrelevant/Duplicate) -- collapsed by default, since the whole
+                          // point is keeping them out of the way; one click reopens it to reconsider any of them.
 let renderSettings={aspect:"9:16"}, cropOpen={}, cropDraft={};   // Gate 3 manual crop tool
 let findQuery = null;   // "Find more" panel -- null means "not touched yet, show job.subject"
 let whyOpen = {};        // asset id -> bool. Open by default (requested directly) so the score/risk reasons
@@ -173,7 +175,16 @@ function orderedScenes(){
 const score = a => (a.vetting && a.vetting.relevance!=null) ? a.vetting.relevance : null;
 const below = a => score(a)!=null && score(a) < minScore - 1e-9;
 const risk = a => (a.vetting&&a.vetting.risk)||"low";
-
+const notUsed = a => {
+  // "Set aside" -- Irrelevant/Duplicate both set decisions[a.id]="reject" (see the comment on setLabel()
+  // below); once that's true, the item should leave the main grid right away, not wait for a round-trip to
+  // the server (requested directly: they were cluttering the grid with nothing to actually decide anymore).
+  // An unsaved LOCAL decision always wins over the last-saved server status -- clicking Use on something
+  // that's saved as "rejected" from an earlier session must bring it back immediately, not leave it stuck
+  // in "Set aside" until the click is saved.
+  const d = decisions[a.id];
+  return d ? d==="reject" : a.status==="rejected";
+};
 function manualUrlAssets(){
   // Two ways an asset gets added by a person choosing ONE specific item, rather than an automated batch
   // round keeping whatever it found: pasted into Gate 2's "Add links" (import_method="manual_url",
@@ -185,13 +196,22 @@ function manualUrlAssets(){
   // (sorts last by default), and any hand-picked item's title/description often won't text-match the
   // approved keywords well, so it commonly scores under the relevance threshold too -- hidden by default,
   // with nothing on screen to say the add even worked. Kept out of visible()'s main grid and shown in
-  // their own always-visible panel instead (manualLinksPanel()) for exactly as long as they're pending;
-  // once decided, they rejoin the main grid like everything else.
-  return job.assets.filter(a => (a.import_method==="manual_url" || a.import_method==="search_pick") && a.status==="pending");
+  // their own always-visible panel instead (manualLinksPanel()) for exactly as long as they're pending AND
+  // undecided; once decided (including Irrelevant/Duplicate -- see notUsed() above), it leaves this panel
+  // immediately for either the main grid (Use) or the "Set aside" panel (Irrelevant/Duplicate) below.
+  return job.assets.filter(a => (a.import_method==="manual_url" || a.import_method==="search_pick") && a.status==="pending" && !notUsed(a));
+}
+function setAsideAssets(){
+  // Everything marked Irrelevant or Duplicate (requested directly: they were staying in the main grid
+  // forever with nothing left to do about them, just clutter). Kept out of visible()'s main grid and shown
+  // in their own collapsed-by-default panel instead (setAsidePanel()) so a second look is always one click
+  // away without the main grid having to carry them permanently.
+  return job.assets.filter(notUsed);
 }
 function visible(){
   const manualPendingIds = new Set(manualUrlAssets().map(a=>a.id));
-  let xs = job.assets.filter(a => !manualPendingIds.has(a.id) &&
+  const setAsideIds = new Set(setAsideAssets().map(a=>a.id));
+  let xs = job.assets.filter(a => !manualPendingIds.has(a.id) && !setAsideIds.has(a.id) &&
       (showHidden || !below(a)) && (!srcFilter||a.source===srcFilter) && (!kindFilter||a.kind===kindFilter));
   // "risk" is the default: safest first (low, then medium, then high risk), and within each risk group,
   // best-scoring (most relevant) items first -- so the top of the page is always what you'd want to approve
@@ -1317,9 +1337,26 @@ function manualLinksPanel(){
       "(would otherwise sort last), and any hand-picked item's title/description often doesn't text-match your "+
       "keywords well, so it commonly scores under the relevance threshold too -- either way, it could otherwise "+
       "disappear from view the moment it's added, with nothing on screen to show it worked. Use / Duplicate / "+
-      "Irrelevant here work exactly like any other card; once you've decided, it moves down into the main grid "+
-      "like everything else."),
+      "Irrelevant here work exactly like any other card; once you've decided, it moves to the main grid (Use) "+
+      "or the \"Set aside\" panel below (Duplicate/Irrelevant)."),
     h("div",{class:"grid"}, xs.map(card)));
+}
+function setAsidePanel(){
+  // Everything marked Irrelevant or Duplicate (requested directly, after they piled up staying visible in
+  // the main grid forever with nothing left to decide about them). Collapsed by default -- unlike the
+  // always-open "Added by hand" panel above, these are meant to stay out of the way, not demand attention
+  // -- but never gone: one click reopens the list, and Use/Duplicate/Irrelevant here work exactly like any
+  // other card, so changing your mind on one just needs a different button, not digging through the log.
+  const xs = setAsideAssets();
+  if (!xs.length) return null;
+  return h("div",{class:"panel"},
+    h("details",{open:setAsideOpen,ontoggle:e=>{setAsideOpen=e.target.open;}},
+      h("summary",{}, `Set aside -- ${xs.length} marked Irrelevant/Duplicate`),
+      !setAsideOpen ? null : h("div",{style:"margin-top:8px"},
+        h("div",{class:"sub"},"Kept out of the main grid and its score/hidden filters and sort order, same idea as "+
+          "\"Added by hand\" above -- just collapsed, since there's nothing left to decide here unless you want to "+
+          "look again. Click Use on any card to bring it back into the main grid."),
+        h("div",{class:"grid",style:"margin-top:8px"}, xs.map(card)))));
 }
 function assetReviewBody(xs){
   return h("div",{},
@@ -1330,6 +1367,7 @@ function assetReviewBody(xs){
     checklistPanel(),
     findMorePanel(),
     manualLinksPanel(),
+    setAsidePanel(),
     h("div",{class:"grid"}, xs.map(card)));
 }
 function sceneReviewBody(){

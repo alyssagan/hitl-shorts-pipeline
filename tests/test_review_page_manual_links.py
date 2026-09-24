@@ -1,11 +1,12 @@
-"""Gate 2's "Added by link" panel (requested directly, after a real link got lost in the main grid --
-it was hidden by the relevance-score filter and sorted last as high risk, at the same time). A
-manually pasted-in link (import_method="manual_url", pipeline/sources/urls.py) is always pending the
-moment it's added (add_reviewable_asset() never auto-approves), so manualUrlAssets()/visible() in
-pipeline/api/review_page.py keep it out of the main filtered/sorted grid and show it in its own
-always-visible panel instead, for exactly as long as it's pending. Same approach test_review_page_sort.py
-uses: pull the *actual* JS out of review_page.PAGE and run it for real in Node, rather than a
-reimplementation that could silently drift from what ships."""
+"""Gate 2's "Added by hand" and "Set aside" panels (both requested directly). "Added by hand": a real
+pasted link got lost in the main grid -- hidden by the relevance-score filter and sorted last as high risk,
+at once -- so a manually added asset (import_method="manual_url" or "search_pick") is kept out of the main
+filtered/sorted grid and shown in its own always-visible panel instead, for exactly as long as it's pending
+AND undecided. "Set aside": Irrelevant/Duplicate picks were staying in the main grid forever with nothing
+left to decide about them, so notUsed()/setAsideAssets() in pipeline/api/review_page.py pull them out into
+their own collapsed-by-default panel instead, one click away to reconsider. Same approach
+test_review_page_sort.py uses: pull the *actual* JS out of review_page.PAGE and run it for real in Node,
+rather than a reimplementation that could silently drift from what ships."""
 from __future__ import annotations
 
 import json
@@ -32,11 +33,14 @@ class ManualLinksVisibilityTests(unittest.TestCase):
         score_js = _extract(r"const score = a =>.*?;")
         below_js = _extract(r"const below = a =>.*?;")
         risk_js = _extract(r"const risk = a =>.*?;")
+        not_used_js = _extract(r"const notUsed = a => \{.*?\n\};")
         manual_js = _extract(r"function manualUrlAssets\(\)\{.*?\n\}")
+        set_aside_js = _extract(r"function setAsideAssets\(\)\{.*?\n\}")
         visible_js = _extract(r"function visible\(\)\{.*?\n\}")
-        self.harness = "\n".join([score_js, below_js, risk_js, manual_js, visible_js])
+        self.harness = "\n".join([score_js, below_js, risk_js, not_used_js, manual_js, set_aside_js, visible_js])
 
-    def _run(self, assets: list[dict], *, showHidden=False, srcFilter="", kindFilter="", minScore=0.5, sortBy="risk") -> list[str]:
+    def _run(self, assets: list[dict], *, showHidden=False, srcFilter="", kindFilter="", minScore=0.5, sortBy="risk",
+             decisions=None) -> list[str]:
         script = (
             f"let job = {{assets: {json.dumps(assets)}}};\n"
             f"let showHidden = {json.dumps(showHidden)};\n"
@@ -44,8 +48,10 @@ class ManualLinksVisibilityTests(unittest.TestCase):
             f"let kindFilter = {json.dumps(kindFilter)};\n"
             f"let minScore = {json.dumps(minScore)};\n"
             f"let sortBy = {json.dumps(sortBy)};\n"
+            f"let decisions = {json.dumps(decisions or {})};\n"
             + self.harness +
-            "\nconsole.log(JSON.stringify({visible: visible().map(a=>a.id), manual: manualUrlAssets().map(a=>a.id)}));\n"
+            "\nconsole.log(JSON.stringify({visible: visible().map(a=>a.id), manual: manualUrlAssets().map(a=>a.id), "
+            "setAside: setAsideAssets().map(a=>a.id)}));\n"
         )
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "manual_links_test.js"
@@ -142,6 +148,66 @@ class ManualLinksVisibilityTests(unittest.TestCase):
         out = self._run(assets)
         self.assertEqual(set(out["manual"]), {"pasted", "picked"})
         self.assertEqual(out["visible"], ["searched"])
+
+    # ---- "Set aside" (notUsed()/setAsideAssets()) -- Irrelevant/Duplicate picks were staying in the main
+    # grid forever with nothing left to decide about them (requested directly) --------------------------
+
+    def test_a_local_reject_decision_pulls_the_asset_into_set_aside_immediately(self):
+        # Clicking Duplicate/Irrelevant sets decisions[a.id]="reject" locally, before any save round-trip --
+        # the item must leave the main grid at once, not wait for the server to confirm.
+        out = self._run([self._asset("s1", source="commons", import_method="search", status="approved",
+                                      vetting={"risk": "low", "relevance": 0.9})],
+                        decisions={"s1": "reject"})
+        self.assertNotIn("s1", out["visible"])
+        self.assertIn("s1", out["setAside"])
+
+    def test_a_saved_rejected_asset_with_no_local_decision_is_in_set_aside(self):
+        # A prior session already rejected it and that was saved -- no local decisions[] entry exists this
+        # time, so notUsed() must fall back to the saved a.status.
+        out = self._run([self._asset("s1", source="commons", import_method="search", status="rejected",
+                                      vetting={"risk": "low", "relevance": 0.9})])
+        self.assertNotIn("s1", out["visible"])
+        self.assertIn("s1", out["setAside"])
+
+    def test_a_local_approve_decision_overrides_a_saved_rejected_status_and_leaves_set_aside(self):
+        # The precedence bug caught before shipping: re-approving (clicking Use) on something already saved
+        # as rejected from an earlier session must bring it back immediately, not leave it stuck in
+        # "Set aside" until that click is itself saved.
+        out = self._run([self._asset("s1", source="commons", import_method="search", status="rejected",
+                                      vetting={"risk": "low", "relevance": 0.9})],
+                        decisions={"s1": "approve"})
+        self.assertNotIn("s1", out["setAside"])
+        self.assertIn("s1", out["visible"])
+
+    def test_a_pending_manual_or_search_pick_item_marked_reject_leaves_the_manual_panel_for_set_aside(self):
+        # notUsed() takes precedence over the manual/search_pick pending exemption too -- once marked
+        # Irrelevant/Duplicate it should move straight to "Set aside", not linger in "Added by hand".
+        out = self._run([self._asset("p1", source="commons", import_method="search_pick", kind="image")],
+                        decisions={"p1": "reject"})
+        self.assertEqual(out["manual"], [])
+        self.assertNotIn("p1", out["visible"])
+        self.assertIn("p1", out["setAside"])
+
+    def test_set_aside_holds_both_duplicate_and_irrelevant_since_both_are_decision_reject(self):
+        # The UI's Duplicate and Irrelevant buttons both set decisions[a.id]="reject" (see setLabel()) --
+        # notUsed()/setAsideAssets() can't tell them apart and shouldn't need to; both belong in "Set aside".
+        assets = [
+            self._asset("dup", source="commons", import_method="search", status="approved",
+                        vetting={"risk": "low", "relevance": 0.9}),
+            self._asset("irrelevant", source="commons", import_method="search", status="approved",
+                        vetting={"risk": "low", "relevance": 0.9}),
+        ]
+        out = self._run(assets, decisions={"dup": "reject", "irrelevant": "reject"})
+        self.assertEqual(out["visible"], [])
+        self.assertEqual(set(out["setAside"]), {"dup", "irrelevant"})
+
+    def test_set_aside_is_independent_of_the_kind_and_source_filters(self):
+        # It's a distinct bucket, not a filtered view of the main grid -- a rejected item stays visible in
+        # "Set aside" even when the active source/kind filters would otherwise exclude it from the grid.
+        out = self._run([self._asset("s1", source="commons", import_method="search", status="rejected",
+                                      kind="image", vetting={"risk": "low", "relevance": 0.9})],
+                        srcFilter="archive", kindFilter="video")
+        self.assertIn("s1", out["setAside"])
 
 
 if __name__ == "__main__":

@@ -77,6 +77,16 @@ pictured and where the usage rights stand, beyond what the automated flags alone
   something an automated round kept on its own -- so it gets the identical always-visible treatment rather than a
   separate panel. (A YouTube pick already got this for free: adding one reuses `/assets/add-url` itself, which
   already stamps `manual_url`.)
+
+  **"Set aside"** (requested directly: "the ones that are irrelevant should get out of the view but should be
+  saved in a tab where it can be re-reviewed if needed") is a second collapsed-by-default panel, below "Added
+  by hand", holding every asset currently marked Duplicate or Irrelevant -- both decide `reject`, and once
+  they do there's nothing left to actively decide about them, so they leave the main grid rather than
+  cluttering it permanently. It updates the moment you click the label, before any save round-trip, and the
+  reverse works the same way: click Use on anything in there (including something saved as rejected from an
+  earlier session) and it comes back to the main grid immediately. Filters and sort order don't apply to Set
+  Aside -- it's every set-aside item regardless of the active source/kind filter, so nothing quietly falls out
+  of it while you're narrowed to one source.
 - **Add your own footage** (below Add links, #10) opens onto a list of whatever's currently sitting in the server's
   `library/scraped/` folder -- your own scraper's output, or anything you dropped there yourself. Nothing here is
   added to any job by itself: tick the specific files this job should use (each gets an optional note, e.g. why
@@ -144,6 +154,15 @@ pictured and where the usage rights stand, beyond what the automated flags alone
   block: neither has a free API to call, only a search page to open. Anything worth using -- from a link-out
   button, the paste-back box, or one of the four "search here" blocks -- comes back in the normal way and still
   goes through the same vetting/decision flow as everything else.
+
+  **No repeats** (requested directly, so a later iteration "moves on to the next batch" instead of showing the
+  same items again): all four "search here" blocks now filter out anything whose URL is already on the job
+  (`known_urls`, computed from every asset already added, not just ones from that source) before returning
+  results, so re-running the same search after adding a few results, or in a later review round, doesn't show
+  you what you already have. Internet Archive/Chronicling America/Commons filter then truncate to the requested
+  count; YouTube can't over-fetch on demand the way those three can, so it asks `yt-dlp` for double the requested
+  count and filters+truncates after, so you still get a full page of new results even when some of what YouTube
+  returned had already been added.
 
 In the terminal, after submitting in the browser, type `web` at the asset prompt so the script carries on.
 

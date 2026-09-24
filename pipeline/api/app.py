@@ -309,7 +309,11 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Pick one by POSTing its `url` to assets_add_url above, same as any pasted link (still auto-flagged
         high risk, still needs a note). JSON: {query, count?} -> [{id, title, url, uploader, duration,
         thumbnail, upload_date, description}, ...]. Logged to sources/youtube_search/requests.jsonl like any
-        other outbound call, success or failure."""
+        other outbound call, success or failure. Anything whose URL is already in this job is left out, same
+        as source_search_view below -- searching the same term again on a later iteration only shows
+        genuinely new candidates (requested directly: "no repeats"). Since yt-dlp is asked for exactly
+        `count` results and this filters after the fact, `count * 2` is requested so a search with some
+        already-seen results among the first `count` still has a real shot at returning a full `count`."""
         job_id = r.path_params["id"]
         d = await body(r)
         query = (d.get("query") or "").strip()
@@ -320,10 +324,11 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         job = orch.get(job_id)                       # 404 if unknown
         if job.state is not JobState.ASSETS_REVIEW:
             raise HTTPException(409, f"YouTube search is only available during asset review (job is '{job.state.value}')")
+        known_urls = {a.source_url for a in job.assets if a.source_url}
         log_dir = orch.store.job_dir(job_id) / "sources" / "youtube_search"
         log = LoggedHttp(log_dir, "youtube_search")
         try:
-            results = await search_youtube(query, count)
+            results = await search_youtube(query, count * 2)
         except SourceUnavailable as exc:
             log._log(method="yt-dlp-search", url=f"ytsearch{count}:{query}", status=None,
                      purpose=f"search YouTube for '{query}'", error=str(exc))
@@ -332,6 +337,7 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
             log._log(method="yt-dlp-search", url=f"ytsearch{count}:{query}", status=None,
                      purpose=f"search YouTube for '{query}'", error=str(exc))
             raise HTTPException(422, f"YouTube search failed: {exc}") from None
+        results = [r for r in results if r.get("url") not in known_urls][:count]
         log._log(method="yt-dlp-search", url=f"ytsearch{count}:{query}", status=200,
                  purpose=f"search YouTube for '{query}'", found=len(results))
         return JSONResponse(results)
@@ -356,7 +362,10 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         downloaded until a specific result is picked via assets_add_candidate below. Runs regardless of
         which sources this job was actually configured with, same as youtube_search_view above. JSON:
         {source, query, count?} -> [{id, url, kind, mime, title, description, page_url, author, license,
-        license_url, attribution, width, height, duration}, ...]."""
+        license_url, attribution, width, height, duration}, ...]. Anything with a URL already in this job
+        (added by this endpoint, "Add links", or the job's own normal sourcing round, whatever its current
+        decision) is left out -- searching the same term again on a later iteration only shows genuinely new
+        candidates, not ones already sitting in the job (requested directly: "no repeats")."""
         job_id = r.path_params["id"]
         d = await body(r)
         source = (d.get("source") or "").strip()
@@ -378,6 +387,7 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
             raise HTTPException(503, str(exc)) from None
         except Exception as exc:
             raise HTTPException(422, f"{INLINE_SEARCH_SOURCES[source]} search failed: {exc}") from None
+        cands = [c for c in cands if c.url not in ctx.known_urls]
         out = [{"id": f"{source}-{i}-{hashlib.sha1(c.url.encode()).hexdigest()[:8]}", "url": c.url, "kind": c.kind,
                 "mime": c.mime, "title": c.title, "description": c.description, "page_url": c.page_url,
                 "author": c.author, "license": c.license, "license_url": c.license_url, "attribution": c.attribution,

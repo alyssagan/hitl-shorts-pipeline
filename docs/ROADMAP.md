@@ -39,6 +39,45 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: "Set aside" panel for Irrelevant/Duplicate, and "no repeats" on re-running a search (2026-09-24)
+Two more pieces of the same feedback thread as the "Find more" work above, both requested directly in one
+message: "the ones that are irrelevant should get out of the view but should be saved in a tab where it
+can be re-reviewed if needed" and "if i add items from these searches it should save, and then if i want
+to do another iteration it should keep what was saved and move on to the next batch no repeats."
+
+**Set aside.** Marking a card Irrelevant or Duplicate was leaving it sitting in the main grid forever --
+both labels set `decisions[a.id]="reject"` (`setLabel()`), but nothing then moved the card anywhere, so
+decided-and-rejected items just accumulated as clutter with nothing left to do about them. `notUsed(a)`
+(`pipeline/api/review_page.py`) is true for anything locally decided `"reject"`, falling back to a saved
+`status==="rejected"` when there's no local decision yet -- a local decision always wins over the
+last-saved server status, so clicking Use on something saved as rejected from an earlier session brings it
+back immediately rather than waiting on a save round-trip. `setAsideAssets()` filters the job to exactly
+those, `visible()` now excludes them from the main grid, and `manualUrlAssets()` excludes them too so a
+pending manual/search-pick item that gets marked Irrelevant moves straight to Set Aside rather than
+lingering in "Added by hand". `setAsidePanel()` renders them in a new collapsed-by-default panel (mirroring
+`manualLinksPanel()`'s layout, reusing the same `card()` renderer so Use/Duplicate/Irrelevant work
+identically there), wired into `assetReviewBody()` right after "Added by hand".
+
+**No repeats.** Checked before writing anything: whether an added search-pick item *persists* was already
+true (`Orchestrator.reject_assets` only queues the next round's config, it never touches `job.assets`, and
+`sourcing.py`'s per-source dedup already includes search-picked assets since `keep_one()` stamps
+`source=self.name`) -- no fix needed there. What was actually missing was dedup on the two *on-demand*
+search endpoints themselves: re-running the same "Find more" search in a later iteration could show a
+result already added or already seen, since neither endpoint filtered against `job.assets` before. Fixed
+in `pipeline/api/app.py`: `source_search_view` now drops any candidate whose URL is already in
+`ctx.known_urls` (computed from all of `job.assets`, not source-scoped like the normal per-round dedup)
+before truncating to the requested count; `youtube_search_view` can't over-fetch on demand the way the
+archive-style adapters can, so it now asks `search_youtube()` for `count * 2` results and filters+truncates
+after, so a full page of `count` new results still comes back even when some of what YouTube returns has
+already been added.
+
+- 6 new tests: 1 backend (`tests/test_api_sources.py`, dedup on the YouTube search endpoint; the two
+  existing count-clamp tests there were also updated for the doubled overfetch), 5 frontend
+  (`tests/test_review_page_manual_links.py`, covering the local-reject-wins-immediately case, the
+  saved-status fallback, the local-approve-overrides-saved-reject precedence case, a pending
+  manual/search-pick item moving straight to Set Aside, and Set Aside being independent of the kind/source
+  filters). Full suite: 547 passing (up from 540), zero regressions.
+
 ## Done: fix "Find more" search-adds vanishing silently below the relevance threshold (2026-09-24)
 Real bug, caught immediately: Aly tried "Add this one" on an Internet Archive/Commons search result and
 reported "no it just jerks" -- the add was actually succeeding (that's the page reloading), but the new
