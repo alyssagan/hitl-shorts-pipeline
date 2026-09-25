@@ -39,6 +39,32 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: content niches -- niche-aware keyword phrasing + Stage 3 evaluation schema (2026-09-25)
+Requested directly, as a full architecture spec ("MASTER NICHE PROMPT STRATEGIES" for 5 niches -- True
+Crime, Conspiracy, Science & Astronomy, Pet Product, Food/Bakery -- plus an "Evaluation Engine Output
+Schema" for Stage 3). Layered onto the existing 3-gate pipeline rather than a rearchitecture into the
+spec's own 5-stage numbering -- see docs/NICHES.md's "What this does NOT do" for the reasoning and what a
+follow-up would need to cover if that reordering is actually wanted.
+
+- New optional `Job.niche` (`pipeline/core/models.py`): one of the 5 values, `None` by default -- a job
+  with no niche is byte-for-byte unaffected by any of this.
+- `pipeline/niches.py`: the per-niche source rewards/penalties (reusing the existing `ARCHIVE_SOURCES`/
+  `STOCK_SOURCES` groups, no new source adapters) and the keyword-prompt guidance strings.
+- `pipeline/stages/keywords/llm.py`: appends one niche-specific guidance line to the keyword-writing
+  prompt when a job has a niche set.
+- `pipeline/vetting/niche.py` (new): computes the requested schema per asset every vetting round --
+  `niche_evaluated`/`relevance_score` (1-10, rescaled from the existing 0..1 relevance)/`aesthetic_fit`
+  (`Excellent`/`Acceptable`/`Jarring`, deterministic by source adapter)/`risk_assessment` (quotes the
+  existing risk summary)/`reasoning`/`action` (`Approved`/`Flagged for Review`/`Rejected`, a SUGGESTION
+  only -- never applied to `Asset.status`; Gate 2 still needs an explicit human decision on every asset).
+  Deterministic and explainable, the same philosophy as `rules.py`'s risk rules -- no new paid LLM call.
+- New `GET /jobs/{id}/niche-evaluation` report endpoint; `--niche` on `scripts/poc.py`; the review page
+  shows an "aesthetic: ..." badge and the evaluation's reasoning in the existing "Why this score and risk"
+  panel, plus a niche chip in the job header.
+- Explicitly NOT implemented: Instagram/TikTok as searchable sources for Pet/Food (no adapter exists for
+  either platform's API; would need new paid/authenticated access -- not added without approval). A
+  specific Instagram/TikTok URL still works through the existing "Add links" yt-dlp downloader.
+
 ## Done: stock photo pull budget + deferred relevance scoring ("stop go limits") (2026-09-25)
 Requested directly: "let's pull stock photos first and score relevance later... we should have stop go
 limits depending how much we've pulled already and be able to continue if we realize after vetting there

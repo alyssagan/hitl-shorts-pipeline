@@ -285,6 +285,62 @@ class YoutubeSearchEndpointTests(ApiSourcesTests):
         self.assertIn("boom", entries[1]["error"])
 
 
+class RejectAssetsStockAndDeferEndpointTests(ApiSourcesTests):
+    """POST /jobs/{id}/assets/reject's new stock_limit/defer_relevance fields, and POST
+    /jobs/{id}/assets/score-relevance -- both requested directly ("stop go limits depending how much we've
+    pulled already" / "pull stock photos first and score relevance later"). The stock-cap and defer-scoring
+    MECHANICS themselves are covered at the unit level in tests/test_stock_budget.py and
+    tests/test_defer_relevance.py; this only checks the HTTP plumbing actually wires them through."""
+    def to_assets_review(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        jid = r.json()["id"]
+        self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        j = self.wait(jid, "keywords_review")
+        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        j = self.wait(jid, "assets_review")
+        return jid, j
+
+    def test_stock_limit_and_defer_relevance_persist_onto_the_job(self):
+        jid, _ = self.to_assets_review()
+        r = self.client.post(f"/jobs/{jid}/assets/reject",
+                             json={"reviewer": "Aly", "stock_limit": 12, "defer_relevance": True})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.wait(jid, "assets_review")
+        after = self.client.get(f"/jobs/{jid}").json()
+        self.assertEqual(after["providers"]["options"]["stock_limit"], 12)
+        self.assertTrue(after["providers"]["options"]["defer_relevance"])
+
+    def test_omitting_them_leaves_any_existing_value_untouched(self):
+        jid, _ = self.to_assets_review()
+        self.client.post(f"/jobs/{jid}/assets/reject", json={"reviewer": "Aly", "stock_limit": 5})
+        self.wait(jid, "assets_review")
+        # A later round that doesn't mention stock_limit at all must not silently reset/clear it.
+        self.client.post(f"/jobs/{jid}/assets/reject", json={"reviewer": "Aly", "max_queries": 3})
+        self.wait(jid, "assets_review")
+        after = self.client.get(f"/jobs/{jid}").json()
+        self.assertEqual(after["providers"]["options"]["stock_limit"], 5)
+
+    def test_score_relevance_endpoint_scores_pending_assets(self):
+        jid, j = self.to_assets_review()
+        self.assertTrue(all(a["vetting"]["relevance"] is not None for a in j["assets"]))
+        r = self.client.post(f"/jobs/{jid}/assets/score-relevance", json={"reviewer": "Aly"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(all(a["vetting"]["relevance"] is not None for a in r.json()["assets"]))
+
+    def test_score_relevance_endpoint_requires_a_reviewer(self):
+        jid, _ = self.to_assets_review()
+        r = self.client.post(f"/jobs/{jid}/assets/score-relevance", json={})
+        self.assertEqual(r.status_code, 422)
+
+    def test_score_relevance_endpoint_with_nothing_pending_is_a_422(self):
+        jid, j = self.to_assets_review()
+        decisions = {a["id"]: {"decision": "reject", "note": "not needed"} for a in j["assets"]}
+        self.client.post(f"/jobs/{jid}/assets/review", json={"decisions": decisions, "reviewer": "Aly"})
+        r = self.client.post(f"/jobs/{jid}/assets/score-relevance", json={"reviewer": "Aly"})
+        self.assertEqual(r.status_code, 422)
+
+
 class FolderFilesEndpointTests(unittest.TestCase):
     """GET /jobs/{id}/folder-files (#10): browse-only listing of the server's own-footage folder, with
     which files (if any) are already queued for this specific job."""
@@ -590,3 +646,44 @@ class RelevanceScorerWiringTests(unittest.TestCase):
                 self.assertTrue(all(a["vetting"]["scoring_method"] == "llm-semantic" and a["vetting"]["method_version"] == "llm-semantic-v1"
                                      for a in j["assets"]))
                 self.assertTrue(all(a["vetting"]["relevance"] == 0.05 for a in j["assets"]))
+
+
+class NicheEndpointTests(ApiSourcesTests):
+    """Content niches over HTTP (docs/NICHES.md): POST /jobs accepts/validates `niche`, and
+    GET /jobs/{id}/niche-evaluation reports the requested per-asset schema. Unit coverage for the
+    evaluation engine itself lives in tests/test_niches.py; orchestrator wiring in
+    tests/test_niches_integration.py -- this file only checks the HTTP plumbing."""
+
+    def test_an_unknown_niche_is_a_422_not_a_500(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly", "niche": "not_a_real_niche",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        self.assertEqual(r.status_code, 422)
+
+    def test_a_job_with_no_niche_has_an_empty_report(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        jid = r.json()["id"]
+        report = self.client.get(f"/jobs/{jid}/niche-evaluation").json()
+        self.assertIsNone(report["niche"])
+        self.assertEqual(report["evaluations"], [])
+
+    def test_a_valid_niche_flows_through_to_the_report_after_vetting(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly", "niche": "science",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        jid = r.json()["id"]
+        self.assertEqual(r.json()["niche"], "science")
+        self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        j = self.wait(jid, "keywords_review")
+        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        j = self.wait(jid, "assets_review")
+        self.assertTrue(all(a["vetting"]["niche_evaluation"] is not None for a in j["assets"]))
+        self.assertTrue(all(a["vetting"]["niche_evaluation"]["niche_evaluated"] == "Science & Astronomy" for a in j["assets"]))
+        report = self.client.get(f"/jobs/{jid}/niche-evaluation").json()
+        self.assertEqual(report["niche"], "science")
+        self.assertEqual({e["asset_id"] for e in report["evaluations"]}, {a["id"] for a in j["assets"]})
+        for e in report["evaluations"]:
+            self.assertIn(e["action"], ("Approved", "Flagged for Review", "Rejected"))
+            self.assertIn(e["aesthetic_fit"], ("Excellent", "Acceptable", "Jarring"))
+
+    def test_niche_evaluation_report_404s_for_an_unknown_job(self):
+        self.assertEqual(self.client.get("/jobs/zzz/niche-evaluation").status_code, 404)

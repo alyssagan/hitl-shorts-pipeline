@@ -1,6 +1,11 @@
 """HTTP API (Starlette). Your web UI talks to this; it holds no business logic.
 
-  POST /jobs                          {subject, providers?}     create
+  POST /jobs                          {subject, providers?, niche?}   create. niche (requested directly,
+                                        full "MASTER NICHE PROMPT STRATEGIES" spec): one of "true_crime",
+                                        "conspiracy", "science", "pet_product", "food_bakery" -- optional,
+                                        biases keyword phrasing (pipeline/stages/keywords/llm.py) and adds a
+                                        niche_evaluation to every asset's vetting (see GET .../niche-evaluation
+                                        below and pipeline/niches.py). Omit for a job unaffected by any of this.
   POST /jobs/{id}/start                                          -> keywords_running
   POST /jobs/{id}/keywords/review     {approved_ids, extra_terms?, reviewer}   GATE 1 approve
   POST /jobs/{id}/keywords/reject     {feedback, reviewer}                     GATE 1 re-run
@@ -57,6 +62,12 @@
                                         explicit action, never inferred. Any job state.
   GET  /jobs/{id}/asset-report        #13: per-source photo/video/research counts, category/identity/rights
                                         breakdowns, and the job's running LLM cost (same numbers as /usage).
+  GET  /jobs/{id}/niche-evaluation    {niche, evaluations:[{asset_id, niche_evaluated, relevance_score(1-10),
+                                        aesthetic_fit, risk_assessment, reasoning, action}, ...]} -- Stage 3's
+                                        evaluation-engine schema (requested directly), one record per vetted
+                                        asset. `action` is a SUGGESTED label only; it never changes Asset.status
+                                        -- Gate 2 still needs an explicit human decision on every asset. Empty
+                                        `evaluations` when the job has no niche set (see POST /jobs above).
   GET  /methods                        what each relevance-scoring method+version does (docs/SCORING_CHANGELOG.md)
   GET  /label-reasons                  the three labels and the suggested (extensible) reason list
   GET  /render-settings                {aspect}   the deployment's render aspect ratio (config/pipeline.toml
@@ -221,7 +232,7 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
             for name in providers.sources:
                 if name not in avail["sources"]:
                     raise ValueError(f"unknown source '{name}'. available: {avail['sources']}")
-        job = await orch.create_job(d.get("subject", ""), providers, reviewer=d.get("reviewer", ""))
+        job = await orch.create_job(d.get("subject", ""), providers, reviewer=d.get("reviewer", ""), niche=d.get("niche"))
         return JSONResponse(_job_json(job), status_code=201)
 
     async def get_job(r: Request):
@@ -513,6 +524,10 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         orch.get(r.path_params["id"])                       # 404 if unknown
         return JSONResponse(orch.asset_report(r.path_params["id"]))
 
+    async def niche_evaluation_view(r: Request):
+        orch.get(r.path_params["id"])                       # 404 if unknown
+        return JSONResponse(orch.niche_evaluation_report(r.path_params["id"]))
+
     async def case_reference_name(r: Request):
         d = await body(r)
         return await orch.set_case_canonical_name(r.path_params["id"], d.get("canonical_name", ""),
@@ -696,6 +711,7 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/assets/{{asset_id}}/rights", wrap(asset_rights), methods=["POST"]),
         Route(f"{P}/assets/{{asset_id}}/category", wrap(asset_category), methods=["POST"]),
         Route(f"{P}/asset-report", wrap(asset_report_view), methods=["GET"]),
+        Route(f"{P}/niche-evaluation", wrap(niche_evaluation_view), methods=["GET"]),
         Route(f"{P}/assets/{{asset_id}}/file", wrap(asset_file), methods=["GET"]),
         Route(f"{P}/case-reference", wrap(case_reference_name), methods=["POST"]),
         Route(f"{P}/case-reference/facts", wrap(case_reference_fact_add), methods=["POST"]),

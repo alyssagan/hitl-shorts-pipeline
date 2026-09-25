@@ -15,7 +15,10 @@ decision at scoring time, `scored by: <method> [<version>]` (e.g. `scored by: tf
 one method scored the asset that round, a plain-English note on how the final decision was reached, a nested "What does `<version>`
 do?" panel with that method's full definition (description, formula/prompt, parameters -- fetched once from `GET /methods`, see
 docs/SCORING_CHANGELOG.md), every risk rule that fired (its rule id, severity, plain-English message and the actual evidence text
-that triggered it -- e.g. `PLATFORM_SOURCE`, `LIC_SA`, `LIC_UNKNOWN`), and which search found it. It's **open by default** on every
+that triggered it -- e.g. `PLATFORM_SOURCE`, `LIC_SA`, `LIC_UNKNOWN`), and which search found it. On a job with a niche set
+(docs/NICHES.md), the panel also shows the niche evaluation -- aesthetic fit and a suggested action, plus a plain-English
+reasoning line -- with an "aesthetic: Excellent/Acceptable/Jarring" badge next to the other badges; the suggested action is
+a label only and never changes your own decision below it. It's **open by default** on every
 card (requested directly, after "high risk" was mistaken for "rejected" during testing) -- collapsing one sticks across
 re-renders (`whyOpen`, per asset id) rather than silently popping back open the next time the page refreshes. The category/
 identity/rights badges below (#13) are the other half of this: click "Case connection & rights" on a card for who's actually

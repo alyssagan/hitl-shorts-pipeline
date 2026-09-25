@@ -203,6 +203,8 @@ projects/cute-cats-294eb679f060/
 How risk is judged, rule by rule: [docs/VETTING.md](docs/VETTING.md). How relevance is scored: [docs/SCORING.md](docs/SCORING.md).
 Checking whether a scoring method/version is actually any good: [docs/EVALUATION.md](docs/EVALUATION.md). Adding another scraping
 source: [docs/ADD_A_SOURCE.md](docs/ADD_A_SOURCE.md). Trade-offs we chose on purpose and may improve: [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md). Voices, models and sources to try, with results: [docs/OPTIONS_TO_TRY.md](docs/OPTIONS_TO_TRY.md).
+Optional content niches (True Crime, Conspiracy, Science, Pet Product, Food/Bakery) that bias keyword phrasing and add a
+per-asset aesthetic/relevance evaluation at Gate 2: [docs/NICHES.md](docs/NICHES.md).
 
 ## Adding your own provider
 

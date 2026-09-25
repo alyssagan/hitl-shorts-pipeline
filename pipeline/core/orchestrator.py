@@ -40,6 +40,8 @@ from ..vetting.rules import RELEVANCE_MIN, RULES, STOPWORDS, VERSION as VETTING_
 from ..vetting.tfidf_relevance import VERSION as TFIDF_VERSION, tfidf_scores
 from ..vetting.llm_relevance import VERSION as LLM_SEMANTIC_VERSION
 from ..vetting.method_registry import METHOD_VERSIONS
+from ..vetting import niche as niche_eval
+from ..niches import NICHES
 
 VETTER = machine("vetting-rules", VETTING_VERSION)
 MATCHER = machine("clip-matcher", "1")
@@ -154,17 +156,21 @@ class Orchestrator:
         return self.store.load(job_id)
 
     # ------------------------------------------------------------------ creation
-    async def create_job(self, subject: str, providers: ProviderChoice | None = None, *, reviewer: str = "") -> Job:
-        job = Job(subject=subject.strip(), providers=providers or ProviderChoice())
+    async def create_job(self, subject: str, providers: ProviderChoice | None = None, *, reviewer: str = "",
+                          niche: str | None = None) -> Job:
+        if niche and niche not in NICHES:
+            raise ValueError(f"unknown niche '{niche}'. available: {list(NICHES)}")
+        job = Job(subject=subject.strip(), providers=providers or ProviderChoice(), niche=niche or None)
         if not job.subject:
             raise ValueError("subject is required")
         job.log("note", "job created")
         self.store.save(job)
         joblog.write(self.store.job_dir(job.id), "INFO", "project", f"created '{job.subject}'", job=job.id,
-                     folder=job.slug, sources=",".join(job.providers.sources), keywords=job.providers.keywords)
+                     folder=job.slug, sources=",".join(job.providers.sources), keywords=job.providers.keywords,
+                     niche=job.niche)
         self._rec(job.id, "project", "created", self._who(reviewer), decision="create", subject={"subject": job.subject, "folder": job.slug},
                   reason="Project started by a person.",
-                  logic={"providers_chosen": job.providers.model_dump()},
+                  logic={"providers_chosen": job.providers.model_dump(), "niche": job.niche},
                   outputs={"project_dir": str(self.store.job_dir(job.id))})
         return job
 
@@ -491,6 +497,14 @@ class Orchestrator:
             "by_identity_status": counts("identity_status"), "by_rights_status": counts("rights_status"),
             "usage": self.usage_summary(job_id),
         }
+
+    def niche_evaluation_report(self, job_id: str) -> dict[str, Any]:
+        """Stage 3's "Evaluation Engine Output Schema" (requested directly, full spec), for every asset
+        that's been vetted this job -- GET /jobs/{id}/niche-evaluation. Read-only, computed on demand from
+        each asset's already-stored Vetting.niche_evaluation (pipeline/vetting/niche.py); empty `evaluations`
+        when the job has no niche set."""
+        job = self.get(job_id)
+        return {"niche": job.niche, "evaluations": niche_eval.evaluate_job(job)}
 
     async def approve_assets(self, job_id: str, *, reviewer: str = "", note: str = "") -> Job:
         actor = self._who(reviewer, require=True)
@@ -1300,6 +1314,9 @@ class Orchestrator:
         min_rel = float(job.providers.options.get("min_relevance", RELEVANCE_MIN))
         vet_all(job.assets, terms, min_rel, llm_scores, tfidf_scores_batch,
                 llm_version=LLM_SEMANTIC_VERSION, tfidf_version=TFIDF_VERSION)
+        # Stage 3's evaluation-engine schema (requested directly, full spec) -- a no-op unless job.niche is
+        # set; re-expresses the vetting this call just did through the niche's aesthetic lens, nothing more.
+        niche_eval.apply_to_job(job)
         by_risk: dict[str, int] = {}
         for a in job.assets:
             r = a.vetting.risk if a.vetting else "unvetted"

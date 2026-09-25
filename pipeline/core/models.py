@@ -86,6 +86,13 @@ class Keyword(BaseModel):
     alternatives: list[str] = Field(default_factory=list)  # other phrasings to try if this one comes up empty
 
 
+Niche = Literal["true_crime", "conspiracy", "science", "pet_product", "food_bakery"]
+# The 5 core content niches (requested directly, full "MASTER NICHE PROMPT STRATEGIES" spec). Optional on
+# Job -- None (the default) means a job behaves exactly as it did before this existed: no aesthetic bias in
+# keyword phrasing (pipeline/stages/keywords/llm.py), no niche_evaluation on any asset's Vetting. The actual
+# per-niche source/aesthetic mappings live in pipeline/niches.py, not here, so this module doesn't need to
+# import pipeline.sources.
+
 Severity = Literal["info", "low", "medium", "high"]
 
 
@@ -107,6 +114,29 @@ class ScoreContribution(BaseModel):
     score: float | None = None
     why: str = ""
     used_for_decision: bool = False         # True on whichever contribution's score became `Vetting.relevance`
+
+
+AestheticFit = Literal["Excellent", "Acceptable", "Jarring"]
+NicheEvalAction = Literal["Approved", "Flagged for Review", "Rejected"]
+
+
+class NicheEvaluation(BaseModel):
+    """Stage 3's "Evaluation Engine Output Schema" (requested directly, verbatim field names/shapes),
+    computed once per vetting round for every asset once a niche is set on the job (pipeline/vetting/
+    niche.py). It never re-judges risk or relevance itself -- it only re-expresses what vet_asset() already
+    decided (Vetting.relevance/risk/flags) through the niche's aesthetic lens (pipeline/niches.py).
+    `action` is a SUGGESTED label for this schema ONLY: it is never applied to Asset.status. Gate 2 still
+    requires an explicit human Approve/Reject on every asset, exactly as before (see rules.py's own
+    docstring: "Nothing here approves or rejects an asset. Every asset still goes to a human.")."""
+    niche_evaluated: str = ""               # the niche's display label, e.g. "True Crime"
+    relevance_score: int | None = None      # 1-10 (derived from Vetting.relevance*10, floor of 1 once scored);
+                                             # None = not yet relevance-scored this round (never 0 -- see niche.py)
+    aesthetic_fit: AestheticFit | None = None
+    risk_assessment: str = ""               # Vetting.summary, carried over verbatim -- this module never re-risks
+    reasoning: str = ""                     # one-line plain-English justification
+    action: NicheEvalAction | None = None
+    method: str = ""                        # this evaluation formula's own version, e.g. "niche-eval-v1" --
+                                             # not part of the requested schema; left out of any exported report
 
 
 class Vetting(BaseModel):
@@ -131,6 +161,7 @@ class Vetting(BaseModel):
                                              # AT THE TIME OF SCORING; "" only when relevance is None (not scored)
     contribution_note: str = ""             # plain-English: how the contribution(s) below produced the final decision
     contributions: list[ScoreContribution] = Field(default_factory=list)
+    niche_evaluation: NicheEvaluation | None = None   # set only when Job.niche is set -- see NicheEvaluation above
 
 
 AssetCategory = Literal["verified_case", "unverified_case_candidate", "historical_context", "illustrative_stock", "reconstruction"]
@@ -347,6 +378,10 @@ class Job(BaseModel):
     slug: str = ""
     state: JobState = JobState.CREATED
     providers: ProviderChoice = Field(default_factory=ProviderChoice)
+    niche: Niche | None = None              # one of the 5 core content niches (requested directly), or None
+                                             # for a job that behaves exactly as it did before this existed
+                                             # (no aesthetic bias in keyword phrasing, no niche_evaluation on
+                                             # any asset). See pipeline/niches.py for what each niche means.
 
     keywords: list[Keyword] = Field(default_factory=list)
     assets: list[Asset] = Field(default_factory=list)

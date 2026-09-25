@@ -134,6 +134,10 @@ const IMPORT_METHOD_LABELS = {search:"an automated search", manual_url:"a pasted
 // cross-checks the two, same pattern tests/test_review_page_source_search.py uses for SEARCHABLE_SOURCES) --
 // only used here to show how much of the stock photo budget has been used, never to decide routing itself.
 const STOCK_SOURCES = new Set(["pexels","pixabay","unsplash","nasa"]);
+// Must match pipeline/niches.py's NICHE_LABELS exactly (tests/test_review_page_niches.py cross-checks the
+// two) -- display text only, purely cosmetic; the niche value itself always comes from the job.
+const NICHE_LABELS = {true_crime:"True Crime", conspiracy:"Conspiracy", science:"Science & Astronomy",
+  pet_product:"Pet Product", food_bakery:"Food / Bakery"};
 
 async function loadStatic(){
   // Job-independent, small and unchanging within a session -- fetched once (docs/EVALUATION.md, docs/REVIEW_UI.md).
@@ -675,6 +679,10 @@ function card(a){
       `${v.contribution_note||""}\n\nSee docs/SCORING.md for how each method works.`),
     def?h("details",{}, h("summary",{},`What does ${v.method_version} do?`), h("div",{class:"why"}, defText)):null,
     h("div",{class:"why"}, `${v.summary||""}\nRisk-rules version: ${v.method||"?"}\nFound by search: "${a.query||""}"`),
+    v.niche_evaluation?h("div",{class:"why"},
+      `Niche evaluation (${v.niche_evaluation.niche_evaluated}): aesthetic fit ${v.niche_evaluation.aesthetic_fit}, `+
+      `suggested action "${v.niche_evaluation.action}" -- this is a SUGGESTION only, it never changes your `+
+      `decision below.\n${v.niche_evaluation.reasoning}`):null,
     flags.length?h("div",{class:"why"}, flags):null);
   const needsNote = d==="approve" && r==="high";
   const form = labelForms[a.id]||{};
@@ -700,6 +708,8 @@ function card(a){
         h("span",{class:"b"}, a.source), h("span",{class:"b"}, a.kind),
         below(a)?h("span",{class:"b"},"below threshold"):null,
         v.usable===false?h("span",{class:"b hi"},"can't be used (too small)"):null,
+        v.niche_evaluation?h("span",{class:"b"+(v.niche_evaluation.aesthetic_fit==="Jarring"?" med":v.niche_evaluation.aesthetic_fit==="Excellent"?" lo":"")},
+          "aesthetic: "+v.niche_evaluation.aesthetic_fit):null,
         a.category?h("span",{class:"b"}, CATEGORY_LABELS[a.category]||a.category):h("span",{class:"b"},"not categorized"),
         h("span",{class:"b"+(a.identity_status==="verified"?" lo":a.identity_status==="disputed"?" hi":"")},
           "identity: "+(IDENTITY_LABELS[a.identity_status]||a.identity_status)),
@@ -1341,7 +1351,8 @@ function render(){
   const xs = visible();
   const warn = (job.source_notes||[]).filter(n=>n.warning).map(n=>h("div",{class:"banner"},"Warning: "+n.warning));
   const top = h("header",{},
-    h("div",{}, h("h1",{}, job.subject), h("div",{class:"sub"}, "Job ", job.id, " · state: ", h("span",{class:"chip"}, job.state), " · ",
+    h("div",{}, h("h1",{}, job.subject), h("div",{class:"sub"}, "Job ", job.id, " · state: ", h("span",{class:"chip"}, job.state),
+        job.niche ? [" · niche: ", h("span",{class:"chip"}, NICHE_LABELS[job.niche]||job.niche)] : null, " · ",
         h("a",{href:"/review"},"all projects"), " · ", h("a",{href:`/jobs/${JOB}/decisions?format=md`,target:"_blank"},"decision log"))),
     h("div",{class:"bar"},
       inScenes ? h("span",{class:"tally"}, `${job.scenes.length} scene(s)`) : h("span",{class:"tally"}, `${c.use} use · ${c.rej} reject · ${c.und} undecided · ${c.hidden} hidden`),

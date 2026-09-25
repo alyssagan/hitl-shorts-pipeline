@@ -411,6 +411,10 @@ def main() -> None:
     ap.add_argument("--sources", default="wikipedia,commons",
                     help='where to pull text/images from, comma separated: wikipedia,commons,pexels,folder ("" = your own clips only)')
     ap.add_argument("--reviewer", default="", help="your name, written to the decision log next to every choice you make")
+    ap.add_argument("--niche", default="", choices=["", "true_crime", "conspiracy", "science", "pet_product", "food_bakery"],
+                     help="one of the 5 core content niches (optional): biases keyword phrasing toward that "
+                          "niche's aesthetic and adds a niche_evaluation (relevance/aesthetic_fit/risk/action) "
+                          "to every asset at Gate 2 -- see docs/NICHES.md")
     ap.add_argument("--urls", metavar="FILE", help="text file of URLs to pull videos from, one per line: URL | note | position "
                     "(adds the 'urls' source). Pass '-' instead of a file to paste them straight into the terminal "
                     "(one per line, blank line or Ctrl-D to finish) -- no file to save first")
@@ -494,8 +498,11 @@ def main() -> None:
             if "urls" not in sources:
                 sources.append("urls")
             print(f"Read {len(options['urls'])} URL(s) from {origin}")
-        job = api.call("POST", "/jobs", {"subject": subject, "reviewer": reviewer,
-                                         "providers": {"keywords": keywords_provider, "sources": sources, "options": options}})
+        create_body = {"subject": subject, "reviewer": reviewer,
+                       "providers": {"keywords": keywords_provider, "sources": sources, "options": options}}
+        if args.niche:
+            create_body["niche"] = args.niche
+        job = api.call("POST", "/jobs", create_body)
         print(f"Created job {job['id']}  ->  folder: projects/{job['slug']}-{job['id']}/")
         api.call("POST", f"/jobs/{job['id']}/start", {"reviewer": reviewer})
 

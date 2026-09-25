@@ -88,6 +88,13 @@ Get more" panel — see docs/REVIEW_UI.md — not yet exposed as `scripts/poc.py
 Both persist in `job.providers.options` (`stock_limit`/`defer_relevance`) the same way `max_queries`/
 `per_query` already do, so they're visible in the job's own state and in the decision log, not just the UI.
 
+## Content niches (True Crime, Conspiracy, Science, Pet Product, Food/Bakery)
+Set `--niche` (or `"niche"` in `POST /jobs`) to one of `true_crime`, `conspiracy`, `science`, `pet_product`,
+`food_bakery` and the pipeline biases keyword phrasing toward that niche's aesthetic and adds a per-asset
+`niche_evaluation` (relevance 1-10, aesthetic fit, a suggested action) at Gate 2 -- see **docs/NICHES.md**
+for the full schema and what this deliberately does and doesn't change. Optional; omit it and a job behaves
+exactly as before.
+
 ## Example
 ```
 python3 scripts/poc.py "true crime jack the ripper" --keywords manual --keywords-file library/keywords/jack-the-ripper.txt \

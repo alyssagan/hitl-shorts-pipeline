@@ -27,6 +27,7 @@ from ...core.decisions import ai
 from ..llm_http import post_chat
 from ...core.models import Job, Keyword
 from ...sources.groups import ARCHIVE_SOURCES, STOCK_SOURCES, useful_groups
+from ...niches import NICHE_KEYWORD_GUIDANCE
 from ..base import StageContext
 
 
@@ -67,6 +68,16 @@ def _source_guidance(sources: list[str]) -> str:
     return "\n".join(lines) or '- Match the actual visual content these libraries hold, not the topic in the abstract.'
 
 
+def _niche_guidance(niche: str | None) -> str:
+    """One extra prompt line for the job's niche (requested directly, "MASTER NICHE PROMPT STRATEGIES"),
+    steering phrasing toward that niche's aesthetic on top of _source_guidance() above -- empty string (no
+    extra line at all) when the job has no niche set, so a job with niche=None gets byte-for-byte the same
+    prompt as before this existed."""
+    if not niche:
+        return ""
+    return NICHE_KEYWORD_GUIDANCE.get(niche, "")
+
+
 PROMPT = """You are helping find real photos and video clips to show on screen in a short video about: {subject}
 {feedback}
 These phrases are SEARCH QUERIES for photo/video and reference-text libraries -- not SEO keywords for the
@@ -100,6 +111,7 @@ Rules for a good phrase:
   "TikTok", "short video", "2024 update", "facts", "top 10", "vs", or similar. Those describe a VIDEO ABOUT
   the topic, not a photo or clip OF something -- a photo/video library has nothing that will match them.
 {source_guidance}
+{niche_guidance}
 - Do not repeat yourself or offer near-duplicate phrases.
 
 Return ONLY a JSON array of {n} objects, best first, each with:
@@ -137,7 +149,7 @@ class LLMKeywordStage:
         sources = list(job.providers.sources)
         sources_line = ", ".join(sources) if sources else "none -- your own library/clips/ folder only"
         prompt = PROMPT.format(subject=job.subject, feedback=feedback, n=self.count, sources_line=sources_line,
-                               source_guidance=_source_guidance(sources))
+                               source_guidance=_source_guidance(sources), niche_guidance=_niche_guidance(job.niche))
 
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         joblog.info("keywords", f"asking {self.model} for {self.count} keywords about '{job.subject}'")
@@ -151,6 +163,7 @@ class LLMKeywordStage:
         endpoint_used = self.fallback["base_url"] if getattr(resp, "pipeline_fell_back", False) and self.fallback else self.base_url
         self.last_trace = {"prompt": prompt, "model": model_used, "endpoint": endpoint_used,
                            "feedback_used": list(job.keyword_feedback), "sources_this_round": sources,
+                           "niche": job.niche,
                            "note": "phrases are aimed at photo/video archive search for these sources, not SEO; "
                                     "volume/difficulty are the model's estimates, not measured data"}
         if getattr(resp, "pipeline_fell_back", False):

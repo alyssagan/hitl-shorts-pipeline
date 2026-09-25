@@ -91,7 +91,7 @@ class KeywordPromptSourceGuidanceTests(unittest.TestCase):
 
     def test_prompt_never_asks_for_seo_or_social_media_phrasing(self):
         rendered = PROMPT.format(subject="cats", feedback="", n=5, sources_line="wikipedia, pexels",
-                                 source_guidance=_source_guidance(["wikipedia", "pexels"]))
+                                 source_guidance=_source_guidance(["wikipedia", "pexels"]), niche_guidance="")
         self.assertIn("SEARCH QUERIES", rendered)
         self.assertIn("TikTok", rendered)             # named as an example of what NOT to produce
         self.assertNotIn("SEO analyst", rendered)      # the old framing that caused literal SEO-style terms
@@ -100,13 +100,13 @@ class KeywordPromptSourceGuidanceTests(unittest.TestCase):
         for sources in ([], ["wikipedia"], ["pexels"], ["wikipedia", "pexels", "urls"], ["nasa"]):
             sources_line = ", ".join(sources) if sources else "none -- your own library/clips/ folder only"
             PROMPT.format(subject="x", feedback="", n=10, sources_line=sources_line,
-                         source_guidance=_source_guidance(sources))   # raises KeyError/IndexError if malformed
+                         source_guidance=_source_guidance(sources), niche_guidance="")   # raises KeyError/IndexError if malformed
 
     def test_prompt_defines_all_four_groups_with_the_required_examples(self):
         # #3: the prompt must give the exact search-example phrases from the requirements doc, framed
         # explicitly as examples (not assertions that matching material exists).
         rendered = PROMPT.format(subject="x", feedback="", n=5, sources_line="wikipedia, commons, pexels",
-                                 source_guidance=_source_guidance(["wikipedia", "commons", "pexels"]))
+                                 source_guidance=_source_guidance(["wikipedia", "commons", "pexels"]), niche_guidance="")
         self.assertIn("Corazon Amurao interview", rendered)
         self.assertIn("Chicago residential streets 1960s", rendered)
         self.assertIn("empty hospital hallway", rendered)
