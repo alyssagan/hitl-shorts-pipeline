@@ -68,6 +68,26 @@ folder and urls ignore it since they don't page through results the same way). M
 more to look at in the review page -- the min score slider is what keeps that manageable; raise `--min-relevance` too if the
 extra volume is mostly noise.
 
+## Stock photo budget, and deferring relevance scoring
+Two more per-job knobs (requested directly), both set from the browser review page's "Not enough good ones?
+Get more" panel — see docs/REVIEW_UI.md — not yet exposed as `scripts/poc.py` flags:
+
+- **Stock photo limit**: caps how many assets from the generic stock sources (pexels/pixabay/unsplash/nasa
+  — `pipeline/sources/groups.py`'s `STOCK_SOURCES`) the job pulls in TOTAL, cumulatively across every round,
+  not per-keyword like `--per-query` above. Leave it blank for no limit (the default, same as every job
+  before this option existed). Once it's hit, sourcing stops pulling from those sources and says so — raise
+  the number and click Next batch/Search again again to pick up where it left off; nothing already pulled is
+  lost or re-fetched.
+- **Defer relevance scoring**: skips scoring the next round's pending assets against your keywords — risk
+  and license checks still run on every asset either way, so nothing unsafe goes unflagged — until you
+  explicitly click **Score relevance now**. Useful together with the stock limit: pull a capped batch first,
+  decide later whether it's worth spending the scoring pass on. A deferred asset shows a "not yet scored"
+  badge instead of a score, and is never hidden by the min-score slider (only a *scored* item under the
+  threshold gets hidden), so nothing here narrows what you can see -- it only delays when scoring happens.
+
+Both persist in `job.providers.options` (`stock_limit`/`defer_relevance`) the same way `max_queries`/
+`per_query` already do, so they're visible in the job's own state and in the decision log, not just the UI.
+
 ## Example
 ```
 python3 scripts/poc.py "true crime jack the ripper" --keywords manual --keywords-file library/keywords/jack-the-ripper.txt \

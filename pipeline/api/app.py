@@ -8,14 +8,23 @@
                                         duplicate_of_asset_id?}}, reviewer}    GATE 2 per asset
   POST /jobs/{id}/assets/approve      {reviewer, note?}                        GATE 2 done -> scenes
   POST /jobs/{id}/assets/reject       {feedback, extra_queries?, max_queries?, per_query?, videos_per_query?,
-                                        extra_urls_text?, folder_files?, reviewer}   GATE 2 search again / next
-                                        batch (max_queries alone, no feedback, just pulls more keywords) / more
-                                        photos per keyword. extra_urls_text queues links (one per line, "url |
-                                        note | position") for the NEXT sourcing round -- no per-link feedback;
-                                        prefer /assets/add-url below for anything the UI does. folder_files
-                                        queues specific relative paths from the server's own-footage folder
-                                        (#10, see GET /jobs/{id}/folder-files) for the next round, each a plain
-                                        path or {path, note} -- explicit per-job selection, not the whole folder.
+                                        extra_urls_text?, folder_files?, stock_limit?, defer_relevance?, reviewer}
+                                        GATE 2 search again / next batch (max_queries alone, no feedback, just
+                                        pulls more keywords) / more photos per keyword. extra_urls_text queues
+                                        links (one per line, "url | note | position") for the NEXT sourcing
+                                        round -- no per-link feedback; prefer /assets/add-url below for anything
+                                        the UI does. folder_files queues specific relative paths from the
+                                        server's own-footage folder (#10, see GET /jobs/{id}/folder-files) for
+                                        the next round, each a plain path or {path, note} -- explicit per-job
+                                        selection, not the whole folder. stock_limit caps how many stock-source
+                                        (pexels/pixabay/unsplash/nasa) assets the job pulls in TOTAL, cumulative
+                                        across every round -- 0/omitted stays unlimited. defer_relevance skips
+                                        relevance scoring for the next round (risk/license rules still run) --
+                                        see /assets/score-relevance below for scoring them once you're ready.
+  POST /jobs/{id}/assets/score-relevance   {reviewer}   GATE 2 "Score relevance now": scores whatever's
+                                        pending right now against the real approved keywords -- the only thing
+                                        that ever scores a defer_relevance round, since nothing else
+                                        auto-triggers it. Works at any job state with pending assets.
   POST /jobs/{id}/assets/add-url      {url, note?, position?, reviewer}   GATE 2 "Add links": download and add
                                         ONE link synchronously (#9), same yt-dlp/direct pattern Gate 3's
                                         from-url uses, with an immediate success/failure result. The asset
@@ -566,7 +575,15 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         return await orch.reject_assets(r.path_params["id"], d.get("feedback", ""), d.get("extra_queries"),
                                          reviewer=d.get("reviewer", ""), max_queries=d.get("max_queries"),
                                          per_query=d.get("per_query"), videos_per_query=d.get("videos_per_query"),
-                                         extra_urls_text=d.get("extra_urls_text", ""), folder_files=d.get("folder_files"))
+                                         extra_urls_text=d.get("extra_urls_text", ""), folder_files=d.get("folder_files"),
+                                         stock_limit=d.get("stock_limit"), defer_relevance=d.get("defer_relevance"))
+
+    async def assets_score_relevance(r: Request):
+        """Gate 2's "Score relevance now" (requested directly): scores whatever's pending right now against
+        the job's real approved keywords, independent of `defer_relevance` -- the only thing that ever
+        scores a deferred round's assets, since nothing else re-triggers it automatically."""
+        d = await body(r)
+        return await orch.score_relevance(r.path_params["id"], reviewer=d.get("reviewer", ""))
 
     async def folder_files_list(r: Request):
         """What's currently sitting in the server's configured `library/scraped` folder (#10), for a human to
@@ -668,6 +685,7 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route(f"{P}/assets/review", wrap(assets_review), methods=["POST"]),
         Route(f"{P}/assets/approve", wrap(assets_approve), methods=["POST"]),
         Route(f"{P}/assets/reject", wrap(assets_reject), methods=["POST"]),
+        Route(f"{P}/assets/score-relevance", wrap(assets_score_relevance), methods=["POST"]),
         Route(f"{P}/assets/add-url", wrap(assets_add_url), methods=["POST"]),
         Route(f"{P}/youtube-search", wrap(youtube_search_view), methods=["POST"]),
         Route(f"{P}/source-search", wrap(source_search_view), methods=["POST"]),

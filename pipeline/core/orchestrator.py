@@ -350,6 +350,34 @@ class Orchestrator:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+    async def score_relevance(self, job_id: str, *, reviewer: str = "") -> Job:
+        """Gate 2's "Score relevance now" (requested directly, alongside `defer_relevance` and the stock
+        photo budget: "let's pull stock photos first and score relevance later"). A `defer_relevance` round
+        never scores relevance on its own -- this is the only thing that ever does it for those pending
+        assets, whenever the reviewer is actually ready, not automatically the moment they're pulled. Runs
+        the real two-tier TF-IDF/LLM scoring (_score_relevance) against the job's real approved-keyword
+        terms and always applies it (`force_score=True` on _apply_vetting) -- `defer_relevance` only silences
+        the AUTOMATIC trigger after sourcing, never this explicit one, so calling this always scores for
+        real even on a job that still has the option set (it simply won't get auto-rescored again on its
+        own after this). Works at any job state with pending assets, same as label_asset()/
+        set_asset_identity() above -- not gated to sitting at ASSETS_REVIEW, so re-scoring after the job has
+        moved on (a later "search again" round, say) is possible too."""
+        actor = self._who(reviewer, require=True)
+        job = self.get(job_id)
+        pending = sum(1 for a in job.assets if a.status == "pending")
+        if not pending:
+            raise ValueError("no pending assets to score")
+        scores = await self._score_relevance(job)
+
+        def fn(j: Job) -> None:
+            self._apply_vetting(j, scores, force_score=True)
+        result = await self._mutate(job_id, fn)
+        self._rec(job_id, "vetting", "relevance_scored_on_demand", actor, decision="score",
+                  reason="Reviewer explicitly asked for relevance scoring now, rather than waiting for it to run "
+                         "automatically after the next sourcing round.",
+                  outputs={"pending_assets_scored": pending, "job_state_at_score_time": job.state.value})
+        return result
+
     async def set_asset_identity(self, job_id: str, asset_id: str, *, status: str, depicts: str = "",
                                   case_connection: str = "", identity_evidence: str = "", notes: str = "",
                                   reviewer: str = "") -> Job:
@@ -479,13 +507,24 @@ class Orchestrator:
     async def reject_assets(self, job_id: str, feedback: str = "", extra_queries: list[str] | None = None, *,
                              reviewer: str = "", max_queries: int | None = None, per_query: int | None = None,
                              videos_per_query: int | None = None, extra_urls_text: str = "",
-                             folder_files: list | None = None) -> Job:
+                             folder_files: list | None = None, stock_limit: int | None = None,
+                             defer_relevance: bool | None = None) -> Job:
         """Send the batch back to sourcing, optionally with new search terms and/or new per-job overrides:
         `max_queries` (how many approved keywords the next round, and every round after it, searches) and
         `per_query`/`videos_per_query` (how many photos/videos each source keeps PER keyword) -- see
         queries_for()/SourcingStage.run in pipeline/stages/sourcing.py. This is what backs both the review
         page's "Search again" (feedback + extra_queries) and its "Next batch" (max_queries only, no feedback
         needed -- it just pulls more of the keywords already approved).
+
+        `stock_limit` (requested directly, "stop go limits depending how much we've pulled already") caps
+        how many stock-source assets (pexels/pixabay/unsplash/nasa) the job pulls in total, cumulatively
+        across every round from here on -- SourcingStage.run stops/truncates once it's reached. Pass a
+        higher number than before to explicitly "continue" pulling once you've seen the scores and decided
+        you need more; 0 (or never setting it) stays unlimited, same as every job before this option existed.
+        `defer_relevance` (paired with it: "let's pull stock photos first and score relevance later") skips
+        relevance scoring for the next round -- risk/license rules still run -- until score_relevance() is
+        called explicitly. Both persist in job.providers.options (like max_queries/per_query already do)
+        until changed again, not just for one round.
 
         `extra_urls_text` is the review page's "Add links" box: one URL per line, same `url | note | position`
         format scripts/poc.py's --urls file uses (parsed by pipeline/sources/urls.py's parse_url_lines). New
@@ -520,6 +559,10 @@ class Orchestrator:
                 job.providers.options["per_query"] = int(per_query)
             if videos_per_query is not None:
                 job.providers.options["videos_per_query"] = int(videos_per_query)
+            if stock_limit is not None:
+                job.providers.options["stock_limit"] = int(stock_limit)
+            if defer_relevance is not None:
+                job.providers.options["defer_relevance"] = bool(defer_relevance)
             new_urls = [e for e in parse_url_lines(extra_urls_text) if e["url"]]
             if new_urls:
                 existing = list(job.providers.options.get("urls", []))
@@ -548,7 +591,8 @@ class Orchestrator:
                       reason=feedback or "(no reason given)",
                       outputs={"extra_queries": extra, "max_queries": max_queries, "per_query": per_query,
                                "videos_per_query": videos_per_query, "extra_urls": [e["url"] for e in new_urls] or None,
-                               "folder_files": [e["path"] for e in new_files] or None})
+                               "folder_files": [e["path"] for e in new_files] or None,
+                               "stock_limit": stock_limit, "defer_relevance": defer_relevance})
         return await self._mutate(job_id, fn)
 
     # ------------------------------------------------------------------ gate 3: scenes
@@ -1073,11 +1117,17 @@ class Orchestrator:
                     res = await stage.run(job, ctx)
                     job = await self._commit(job_id, state, "sourcing_done", lambda j: self._apply_sourcing(j, stage, res))
                     # Vetting is quick and always follows sourcing: do it right away. The relevance scorer (if
-                    # configured) needs an LLM call, so it runs here, before the (sync) vetting commit.
-                    scores = await self._score_relevance(job)
+                    # configured) needs an LLM call, so it runs here, before the (sync) vetting commit -- unless
+                    # `defer_relevance` is set (requested directly: "pull stock photos first, score relevance
+                    # later"), in which case that LLM/TF-IDF call is skipped entirely for now -- there's nothing
+                    # to spend it on until a human explicitly asks for it via score_relevance() below. Risk/
+                    # license rules still run either way; only the relevance score/threshold-hiding step waits.
+                    defer = bool(job.providers.options.get("defer_relevance"))
+                    scores = ({}, None) if defer else await self._score_relevance(job)
                     result_job = await self._commit(job_id, JobState.VETTING_RUNNING, "vetting_done", lambda j: self._apply_vetting(j, scores))
                 elif state is JobState.VETTING_RUNNING:
-                    scores = await self._score_relevance(job)
+                    defer = bool(job.providers.options.get("defer_relevance"))
+                    scores = ({}, None) if defer else await self._score_relevance(job)
                     result_job = await self._commit(job_id, state, "vetting_done", lambda j: self._apply_vetting(j, scores))
                 elif state is JobState.SCENES_RUNNING:
                     stage = self.registry.scene_stage(job.providers.scenes)
@@ -1233,9 +1283,20 @@ class Orchestrator:
             joblog.warn("relevance", f"LLM relevance scoring unavailable this round, using the TF-IDF score instead: {type(exc).__name__}: {exc}")
             return tfidf, {}
 
-    def _apply_vetting(self, job: Job, scores: tuple[dict[str, tuple[float, str]], dict[str, tuple[float, str]] | None] | None = None) -> None:
-        tfidf_scores_batch, llm_scores = scores if scores is not None else ({}, None)
-        terms = [k.term for k in job.approved_keywords] + list(job.providers.options.get("extra_queries", []))
+    def _apply_vetting(self, job: Job, scores: tuple[dict[str, tuple[float, str]], dict[str, tuple[float, str]] | None] | None = None,
+                        *, force_score: bool = False) -> None:
+        # `defer_relevance` (requested directly, alongside the stock photo budget): skip relevance scoring
+        # for this round, but never the risk/license rules -- vet_asset()'s other RULES don't depend on
+        # topic_terms at all, so passing an empty list here only suppresses relevance() (and the RELEVANCE_LOW
+        # flag it can add); PLATFORM_SOURCE/LIC_*/etc. still fire exactly as if this option weren't set. An
+        # asset with no relevance score is never hidden by the review page's min-score slider (below() only
+        # hides a *scored* item under the threshold), so a deferred round's pending assets simply all show up,
+        # unfiltered, until score_relevance() (an explicit human action, force_score=True) scores them for
+        # real. force_score always wins over defer_relevance -- that's what makes it "on demand" rather than
+        # a second, conflicting auto-trigger.
+        defer = bool(job.providers.options.get("defer_relevance")) and not force_score
+        tfidf_scores_batch, llm_scores = ({}, None) if defer else (scores if scores is not None else ({}, None))
+        terms = [] if defer else [k.term for k in job.approved_keywords] + list(job.providers.options.get("extra_queries", []))
         min_rel = float(job.providers.options.get("min_relevance", RELEVANCE_MIN))
         vet_all(job.assets, terms, min_rel, llm_scores, tfidf_scores_batch,
                 llm_version=LLM_SEMANTIC_VERSION, tfidf_version=TFIDF_VERSION)
@@ -1258,11 +1319,16 @@ class Orchestrator:
         methods_used = sorted(methods)
         formulas_used = {m: RELEVANCE_FORMULA_BY_METHOD.get(m, "(unknown method version -- formula not on record; check docs/SCORING_CHANGELOG.md)")
                           for m in methods_used}
-        self._rec(job.id, "vetting", "relevance_scoring", VETTER, decision=f"{hidden} hidden below {round(min_rel * 100)}%",
-                  reason="Every asset got a 0-100% relevance score against the approved keywords. Assets under the threshold are hidden from "
-                         "the default review list (still saved on disk and approvable by asking to show hidden).",
+        self._rec(job.id, "vetting", "relevance_scoring", VETTER,
+                  decision="deferred (relevance scoring skipped this round)" if defer else f"{hidden} hidden below {round(min_rel * 100)}%",
+                  reason=("Relevance scoring was deferred for this round ('defer_relevance') -- risk/license rules "
+                          "still ran on every asset, but nothing was scored against your keywords, so nothing is "
+                          "hidden by the threshold yet. Use 'Score relevance now' when you're ready to score them."
+                          if defer else
+                          "Every asset got a 0-100% relevance score against the approved keywords. Assets under the threshold are hidden from "
+                          "the default review list (still saved on disk and approvable by asking to show hidden)."),
                   logic={"methods_used_this_round": methods_used, "formulas_by_method": formulas_used,
-                         "keywords_scored_against": terms, "threshold": min_rel,
+                         "keywords_scored_against": terms, "threshold": min_rel, "deferred": defer,
                          "filler_words_ignored": sorted(STOPWORDS), "changelog": "docs/SCORING_CHANGELOG.md", "doc": "docs/SCORING.md"},
                   outputs={"hidden_count": hidden, "shown_count": sum(1 for a in job.assets if a.status == "pending") - hidden})
         for a in job.assets:

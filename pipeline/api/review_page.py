@@ -116,6 +116,11 @@ let findPasteUrl = "", findPasteBusy = false, findPasteError = "", findPasteOk =
                           // reachable right where the plain link-out buttons (Google Images/FindAGrave/TikTok/
                           // Facebook) are, so finding something on one of those sites doesn't mean scrolling
                           // away to paste its link in.
+let stockLimitDraft = "", deferRelevanceDraft = false;   // "stop go limits" (requested directly) -- drafts for
+                          // the stock photo budget/defer-scoring inputs in "Get more", synced from the job's
+                          // current options each load() so the fields always start showing what's actually set.
+let scoreRelevanceBusy = false, scoreRelevanceError = "";   // "Score relevance now" (requested directly,
+                          // alongside the budget: "pull stock photos first and score relevance later")
 const CATEGORY_LABELS = {verified_case:"verified case", unverified_case_candidate:"unverified case candidate",
   historical_context:"historical context", illustrative_stock:"illustrative stock", reconstruction:"reconstruction"};
 const IDENTITY_LABELS = {unverified:"unverified", verified:"verified", disputed:"disputed"};
@@ -125,6 +130,10 @@ const GROUP_LABELS = {research:"research", case:"case", historical:"historical",
 const IMPORT_METHOD_LABELS = {search:"an automated search", manual_url:"a pasted link (\"Add links\")",
   search_pick:"a specific pick from a \"Find more\" search", local_folder:"your own footage folder",
   scene_upload:"a Gate 3 upload/drop"};
+// Must match pipeline/sources/groups.py's STOCK_SOURCES exactly (tests/test_review_page_stock_budget.py
+// cross-checks the two, same pattern tests/test_review_page_source_search.py uses for SEARCHABLE_SOURCES) --
+// only used here to show how much of the stock photo budget has been used, never to decide routing itself.
+const STOCK_SOURCES = new Set(["pexels","pixabay","unsplash","nasa"]);
 
 async function loadStatic(){
   // Job-independent, small and unchanging within a session -- fetched once (docs/EVALUATION.md, docs/REVIEW_UI.md).
@@ -140,6 +149,8 @@ async function load(){
   else minScore = Number(store.get("minScore:"+JOB));
   if (store.get("batchSize:"+JOB)==null) batchSize = opt.max_queries!=null ? Number(opt.max_queries) : 10;
   else batchSize = Number(store.get("batchSize:"+JOB));
+  stockLimitDraft = opt.stock_limit ? String(opt.stock_limit) : "";
+  deferRelevanceDraft = !!opt.defer_relevance;
   for (const a of job.assets){
     if (a.status!=="pending" && decisions[a.id]==null){ decisions[a.id]=a.status==="approved"?"approve":"reject"; notes[a.id]=a.decision_note||""; }
   }
@@ -647,11 +658,20 @@ function card(a){
   const defText = def ? [def.description, def.formula_or_prompt, def.model_note,
       Object.keys(def.parameters||{}).length ? "Parameters: "+Object.entries(def.parameters).map(([k,val])=>`${k} = ${val}`).join("; ") : "",
       def.why_changed ? "Why this version: "+def.why_changed : ""].filter(Boolean).join("\n\n") : "";
+  // A pending asset can be null-relevance for two different reasons -- no keywords were ever approved to
+  // score against (rare, legacy), or scoring was deliberately deferred for this round (defer_relevance,
+  // requested directly: "pull stock photos first, score relevance later"). scoring_method=="" alongside no
+  // relevance_why is the deferred case in practice (a real "no keywords" job still runs the keyword-match
+  // fallback and sets relevance_why); say so explicitly rather than the generic, easy-to-misread fallback.
+  const deferredLooking = score(a)==null && a.status==="pending" && !v.scoring_method && !v.relevance_why;
+  const relevanceWhy = deferredLooking
+    ? "(not yet scored -- relevance scoring was deferred for this round; use \"Score relevance now\" below the grid when you're ready)"
+    : (v.relevance_why || "(no keyword to score against)");
   const why = h("details",{open: whyOpen[a.id]!==false, ontoggle:e=>{whyOpen[a.id]=e.target.open;}},
     h("summary",{},"Why this score and risk"),
     h("div",{class:"why"},
       `Relevance score: ${pct(score(a))}  (threshold at scoring time: ${pct(v.relevance_threshold)}, machine decision: ${v.relevance_decision||"n/a"})\n` +
-      `${scoredBy}\n${v.relevance_why||"(no keyword to score against)"}\n` + contribLines +
+      `${scoredBy}\n${relevanceWhy}\n` + contribLines +
       `${v.contribution_note||""}\n\nSee docs/SCORING.md for how each method works.`),
     def?h("details",{}, h("summary",{},`What does ${v.method_version} do?`), h("div",{class:"why"}, defText)):null,
     h("div",{class:"why"}, `${v.summary||""}\nRisk-rules version: ${v.method||"?"}\nFound by search: "${a.query||""}"`),
@@ -673,7 +693,9 @@ function card(a){
     h("div",{class:"media"}, media),
     h("div",{class:"body"},
       h("div",{class:"badges"},
-        h("span",{class:"b score"}, "score "+pct(score(a))),
+        score(a)==null && a.status==="pending"
+          ? h("span",{class:"b med"},"not yet scored")
+          : h("span",{class:"b score"}, "score "+pct(score(a))),
         h("span",{class:"b "+({high:"hi",medium:"med",low:"lo"}[r])}, "risk "+r),
         h("span",{class:"b"}, a.source), h("span",{class:"b"}, a.kind),
         below(a)?h("span",{class:"b"},"below threshold"):null,
@@ -756,6 +778,16 @@ async function persistDecisions(reviewer){
   }
   if (Object.keys(out).length) await api("POST",`/jobs/${JOB}/assets/review`,{decisions:out, reviewer});
 }
+function stockDeferBody(){
+  // Shared by nextBatch/searchAgain -- stockLimitDraft/deferRelevanceDraft (requested directly: "stop go
+  // limits depending how much we've pulled already" / "pull stock photos first, score relevance later")
+  // mirror batchSize's own pattern: blank stock_limit means "don't touch it" (reject_assets only ever
+  // changes a field it's actually given), so leaving the box empty never silently resets an existing limit.
+  const out = {};
+  if (stockLimitDraft!=="" && stockLimitDraft!=null) out.stock_limit = Math.max(0, Number(stockLimitDraft)||0);
+  out.defer_relevance = !!deferRelevanceDraft;
+  return out;
+}
 async function searchAgain(){
   const fb = document.getElementById("fb").value, xq = document.getElementById("xq").value;
   const missing = missingHighRiskNotes();
@@ -764,7 +796,8 @@ async function searchAgain(){
   try{
     const reviewer = (store.get("reviewer")||"").trim();
     await persistDecisions(reviewer);
-    await api("POST",`/jobs/${JOB}/assets/reject`,{feedback:fb, extra_queries:xq.split(",").map(s=>s.trim()).filter(Boolean), reviewer});
+    await api("POST",`/jobs/${JOB}/assets/reject`,Object.assign({feedback:fb,
+        extra_queries:xq.split(",").map(s=>s.trim()).filter(Boolean), reviewer}, stockDeferBody()));
     busy=false; await load();
   }catch(e){ busy=false; error=String(e.message||e); render(); }
 }
@@ -813,9 +846,19 @@ async function nextBatch(){
   try{
     const reviewer = (store.get("reviewer")||"").trim();
     await persistDecisions(reviewer);
-    await api("POST",`/jobs/${JOB}/assets/reject`,{max_queries: Math.max(1, Number(batchSize)||10), reviewer});
+    await api("POST",`/jobs/${JOB}/assets/reject`,Object.assign({max_queries: Math.max(1, Number(batchSize)||10), reviewer}, stockDeferBody()));
     busy=false; await load();
   }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function scoreRelevanceNow(){
+  // "Score relevance now" (requested directly) -- scores whatever's pending against the real approved
+  // keywords right now, regardless of defer_relevance; the only thing that ever scores a deferred round.
+  scoreRelevanceBusy=true; scoreRelevanceError=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    await api("POST",`/jobs/${JOB}/assets/score-relevance`,{reviewer});
+    scoreRelevanceBusy=false; await load();
+  }catch(e){ scoreRelevanceBusy=false; scoreRelevanceError=String(e.message||e); render(); }
 }
 async function loadAssetReport(){
   // Per-job/per-source summary (#13) -- photo/video/research counts, category/identity/rights breakdowns,
@@ -1235,6 +1278,33 @@ function sceneCard(s, i, n){
         oninput:e=>{sceneNotes[s.id]=e.target.value;}}, sceneNotes[s.id]!=null?sceneNotes[s.id]:(s.note||"")));
 }
 
+function stockAndDeferPanel(){
+  // "Stop go limits" + "pull stock photos first, score relevance later" (both requested directly, same
+  // message). stockUsed counts against STOCK_SOURCES regardless of whether a limit is even set, so the
+  // number is there to inform the decision of whether to set one, not just to explain one already active.
+  const stockUsed = job.assets.filter(a=>STOCK_SOURCES.has(a.source)).length;
+  const limit = (job.providers&&job.providers.options&&job.providers.options.stock_limit) || 0;
+  const unscored = job.assets.filter(a=>a.status==="pending" && score(a)==null).length;
+  return h("div",{style:"margin-top:12px;padding-top:12px;border-top:1px solid var(--line)"},
+    h("div",{class:"sub"},"Stock photos (pexels/pixabay/unsplash/nasa): "+stockUsed+
+        (limit ? ` of your ${limit}-photo limit` : " pulled so far, no limit set") +
+        ". Set a limit to stop pulling more once you hit it -- raise it any time (including after seeing how "+
+        "many scored well) to pick up where it left off, no repeats. Deferring relevance scoring lets you pull "+
+        "a batch first and decide when to actually score it -- risk/license checks still run either way, "+
+        "nothing unsafe goes unflagged."),
+    h("div",{class:"bar"},
+      h("label",{}, "Stock photo limit ", h("input",{type:"number",min:0,step:1,
+          placeholder:"no limit", value:stockLimitDraft, style:"width:84px",
+          oninput:e=>{stockLimitDraft=e.target.value;}})),
+      h("label",{}, h("input",{type:"checkbox",checked:deferRelevanceDraft,
+          onchange:e=>{deferRelevanceDraft=e.target.checked;}}), "Defer relevance scoring for the next round"),
+      h("span",{class:"meta"},"(applies next time you click Next batch or Search again above)")),
+    unscored ? h("div",{class:"bar",style:"margin-top:8px"},
+      h("span",{class:"meta"}, unscored+" pending asset(s) not yet scored for relevance."),
+      h("button",{class:"primary",disabled:scoreRelevanceBusy,onclick:scoreRelevanceNow},
+        scoreRelevanceBusy?"Scoring…":"Score relevance now"),
+      scoreRelevanceError?h("span",{class:"meta",style:"color:var(--no)"},scoreRelevanceError):null) : null);
+}
 function folderFilesPanel(){
   // "Add your own footage" (#10): a file here is only ever added to THIS job because you explicitly ticked
   // it -- nothing in the server's own-footage folder reaches any job on its own.
@@ -1308,6 +1378,7 @@ function render(){
         h("input",{type:"text",id:"xq",placeholder:"e.g. whitechapel 1888, victorian london street",size:44}),
         h("input",{type:"text",id:"fb",placeholder:"what was wrong with these?",size:34}),
         h("button",{disabled:busy,onclick:searchAgain},"Search again")),
+      stockAndDeferPanel(),
       h("div",{style:"margin-top:12px;padding-top:12px;border-top:1px solid var(--line)"},
         h("div",{class:"sub"},"Or add links -- a YouTube/TikTok/X/Vimeo/Instagram/news link (pulled with yt-dlp) or a direct "+
           ".mp4/.jpg/... link, one per line. Optionally \"URL | note | position\" (position: a scene number or intro/end). "+

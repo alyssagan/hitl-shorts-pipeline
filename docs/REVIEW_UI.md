@@ -7,7 +7,10 @@ moves from one to the other. The terminal prints the exact link. Served by the p
 ## Gate 2: assets
 
 Each card shows the photo or video (click a photo to enlarge, videos have controls), the **relevance score**, risk, source, license,
-author, size/length and a link to the original page. "Why this score and risk" opens the logic: the relevance threshold and machine
+author, size/length and a link to the original page. A card whose relevance scoring was deferred (see "Stock photo budget"
+below) shows **"not yet scored"** instead of a score -- it's never hidden by the min-score slider, since that only hides a
+*scored* item under the threshold, so a deferred batch still shows up in the main grid, just without a score yet. "Why this
+score and risk" opens the logic: the relevance threshold and machine
 decision at scoring time, `scored by: <method> [<version>]` (e.g. `scored by: tfidf [tfidf-v1]`), every contribution when more than
 one method scored the asset that round, a plain-English note on how the final decision was reached, a nested "What does `<version>`
 do?" panel with that method's full definition (description, formula/prompt, parameters -- fetched once from `GET /methods`, see
@@ -46,6 +49,22 @@ pictured and where the usage rights stand, beyond what the automated flags alone
   job's `max_queries` for every round after this one (see "Many keywords: batches" in docs/RUNNING.md), so once you've
   picked a comfortable size you don't have to reset it each round. **Search again** is for steering it: add specific
   new search terms and/or say what was wrong; fetches the next page of results without repeats.
+
+  **Stock photo budget & deferred scoring** (requested directly: "stop go limits depending how much we've pulled
+  already" / "let's pull stock photos first and score relevance later"), right below the Next batch/Search again
+  buttons: a **stock photo limit** field caps how many assets from the generic stock sources (pexels/pixabay/unsplash/
+  nasa) the job pulls in TOTAL, cumulative across every round -- once it's hit, sourcing stops pulling from those
+  sources for the rest of that round and a "Warning: ... stock photo limit reached" banner says so plainly at the
+  top of the page. Leave it blank for no limit. Raise the number and click Next batch/Search again again any time to
+  "continue" -- nothing already pulled is lost, and nothing is re-fetched. A **"Defer relevance scoring"** checkbox
+  next to it skips scoring the *next* round's pending assets against your keywords entirely -- risk/license rules
+  (PLATFORM_SOURCE, LIC_*, etc.) still run on every asset regardless, so nothing unsafe ever goes unflagged, only the
+  relevance number and its threshold-hiding are what wait. Both fields show what's currently set on the job each time
+  the page loads, and only change what you explicitly touch -- leaving the limit field blank never clears an existing
+  one, and the checkbox always reflects (and sends) its own current state. Whenever any pending assets are still
+  unscored, a **"Score relevance now"** button appears right there: click it any time you're ready to actually run
+  the real TF-IDF/LLM scoring on them, independent of whether Defer relevance scoring is still checked -- this button
+  always scores for real, since it's the one and only thing that scores a deferred round's assets at all.
 - **Add links** (below the other two, #9) is for a specific video/photo you already have a URL for -- paste one or
   more, one per line, same `url | note | position` format as `scripts/poc.py --urls`. Unlike Next batch/Search again,
   each line downloads **right away**, one at a time, and shows its own result underneath the box as it finishes --

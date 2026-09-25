@@ -21,7 +21,7 @@ from ..sources.base import (
     DEFAULT_USER_AGENT, CredentialsMissing, LoggedHttp, ProviderError, RateLimited,
     ResponseParseError, SourceAdapter, SourceContext, SourceUnavailable,
 )
-from ..sources.groups import GROUP_ASSET_CATEGORY, GROUP_POOLS, QUERYLESS_SOURCES
+from ..sources.groups import GROUP_ASSET_CATEGORY, GROUP_POOLS, QUERYLESS_SOURCES, STOCK_SOURCES
 from .base import StageContext
 
 
@@ -117,6 +117,16 @@ class SourcingStage:
                     adapter.videos_per_query = int(videos_per_query)
         if not queries:
             raise SourcingError("no approved keywords to search for")
+        # Stock photo budget (requested directly: "stop go limits depending how much we've pulled already"),
+        # separate from per_query/max_queries -- those cap per-keyword and per-round pulls, not the running
+        # total. `stock_limit` counts cumulatively across every round for the job (STOCK_SOURCES = generic
+        # pexels/pixabay/unsplash/nasa, pipeline/sources/groups.py), so it holds even across several
+        # "Next batch"/"Search again" rounds, not just this one. None/0/absent means unlimited, same as
+        # every job before this option existed (#1: preserve existing work). Archive/case sources are
+        # untouched by this -- the budget only ever applies to the generic stock group.
+        stock_limit = job.providers.options.get("stock_limit")
+        stock_limit = int(stock_limit) if stock_limit else None
+        stock_pulled = sum(1 for a in job.assets if a.source in STOCK_SOURCES) if stock_limit is not None else 0
         out = SourcingResult(queries=queries)
         joblog.info("sourcing", f"searching {len(queries)} keyword(s) on {len(job.providers.sources)} source(s)",
                     keywords=queries, sources=",".join(job.providers.sources))
@@ -157,6 +167,16 @@ class SourcingStage:
                 joblog.info("sourcing", f"{name}: no queries this round route to it (their group doesn't pool here)")
                 out.trace.append({"source": name, "skipped_source": "no queries this round belong to a group that "
                                   "routes to this source", "outcome": "no_queries_routed"})
+                continue
+            if stock_limit is not None and name in STOCK_SOURCES and stock_pulled >= stock_limit:
+                joblog.info("sourcing", f"{name}: skipped, stock photo limit already reached ({stock_pulled}/{stock_limit})")
+                # Also carries a `warning` (not just `skipped_source`) so the review page's existing
+                # "Warning: ..." banner (which only reads source_notes[].warning) surfaces this without
+                # needing its own special case -- every other skipped_source outcome stays silent there,
+                # same as before; this one specifically needs to be seen, since it's the whole point of the
+                # stop half of "stop go limits".
+                msg = f"{name}: stock photo limit reached ({stock_pulled}/{stock_limit}) -- raise it in \"Get more\" below to pull more"
+                out.trace.append({"source": name, "skipped_source": msg, "warning": msg, "outcome": "stock_limit_reached"})
                 continue
             src_dir = ctx.project_dir / "sources" / name
             (src_dir / "files").mkdir(parents=True, exist_ok=True)
@@ -221,6 +241,20 @@ class SourcingStage:
                                 skipped=len(t["skipped"]) if isinstance(t.get("skipped"), list) else t.get("skipped"),
                                 page=t.get("page"), outcome=t.get("outcome"))
             joblog.info("sourcing", f"{name} done in {time.monotonic() - t0:.1f}s", new_assets=len(res.assets), new_references=len(res.references))
+            if stock_limit is not None and name in STOCK_SOURCES and res.assets:
+                remaining = max(0, stock_limit - stock_pulled)
+                if len(res.assets) > remaining:
+                    # The adapter already downloaded these (per_query/videos_per_query still apply per query --
+                    # this is a cumulative cap on top of that), so the overage isn't free, but truncating here
+                    # rather than earlier keeps the per-source fetch() call itself untouched and this budget a
+                    # thin layer on top of it, not a rewrite of every stock adapter's own pagination.
+                    dropped = len(res.assets) - remaining
+                    res.assets = res.assets[:remaining]
+                    joblog.info("sourcing", f"{name}: kept {remaining} of this round's results, {dropped} over "
+                                             f"the stock photo limit ({stock_limit})")
+                    out.trace.append({"source": name, "warning": f"{name}: stock photo limit ({stock_limit}) reached "
+                                      f"mid-round -- kept {remaining}, {dropped} more found but not kept", "outcome": "stock_limit_partial"})
+                stock_pulled += len(res.assets)
             if informative_routing:
                 # #7/#18: stamp each new asset with the AssetCategory its own originating query's group
                 # implies -- never "verified_case" (that's always an explicit human decision, see

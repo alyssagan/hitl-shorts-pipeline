@@ -39,6 +39,49 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: stock photo pull budget + deferred relevance scoring ("stop go limits") (2026-09-25)
+Requested directly: "let's pull stock photos first and score relevance later... we should have stop go
+limits depending how much we've pulled already and be able to continue if we realize after vetting there
+isn't more." Before this, every sourcing round auto-triggered relevance scoring immediately after
+(`Orchestrator.run_pending`) with no way to separate the two, and there was no cap on how many stock photos
+(pexels/pixabay/unsplash/nasa) a job could pull in total -- only a per-keyword cap (`per_query`).
+
+**Stock photo budget** (`providers.options["stock_limit"]`, `pipeline/stages/sourcing.py`): caps STOCK_SOURCES
+assets cumulatively across every round for the job, not per-round. `SourcingStage.run` skips a stock source
+entirely once the running total already meets the cap, and truncates (doesn't reject outright) a single
+fetch that would overshoot it mid-round -- either way a trace note carries both `skipped_source` (for the
+log/manifest, consistent with every other skip reason) and `warning` (so the review page's existing
+"Warning: ..." banner surfaces it with no new frontend plumbing). 0/unset stays unlimited, same as every job
+before this option existed. Raising the number and clicking Next batch/Search again again is the "continue"
+half -- nothing already pulled is lost or re-fetched.
+
+**Deferred relevance scoring** (`providers.options["defer_relevance"]`): `_apply_vetting` (orchestrator.py)
+passes empty topic_terms to `vet_all` when set, which suppresses `relevance()` (and the `RELEVANCE_LOW` flag
+it can add) without touching any of the OTHER risk rules -- those don't depend on topic_terms at all, so
+PLATFORM_SOURCE/LIC_*/etc. still fire exactly as before. The (possibly costly) TF-IDF/LLM scoring call is
+skipped entirely at the two `run_pending` dispatch sites rather than just discarded, so nothing is spent on
+it until asked for. A null-relevance asset is never hidden by the review page's min-score slider (`below()`
+only hides a *scored* item under the threshold), so a deferred round's pending assets simply show up
+unfiltered, with a **"not yet scored"** badge in place of a score.
+
+**`Orchestrator.score_relevance()` / "Score relevance now"** (new `POST /jobs/{id}/assets/score-relevance`):
+the only thing that ever scores a deferred round's assets, since nothing else re-triggers it automatically.
+Always scores for real regardless of `defer_relevance` (`force_score=True` on `_apply_vetting`) -- the option
+only ever silences the automatic post-sourcing trigger, never this explicit one. Works at any job state with
+pending assets, same "not gated to one gate" precedent as `label_asset`/`set_asset_identity`.
+
+Both options are exposed from the existing "Get more" panel (`pipeline/api/review_page.py`) right below
+Next batch/Search again, following `max_queries`/`per_query`'s own pattern: they persist in
+`job.providers.options` until changed again, sync from the job's current value on every page load, and a
+blank stock-limit field never resets an existing one.
+
+- 22 new tests: `tests/test_stock_budget.py` (7, the cumulative-cap/truncation mechanics via a fake
+  `SourcingStage` adapter), `tests/test_defer_relevance.py` (4) and `tests/test_score_relevance_now.py` (5,
+  full Orchestrator + mock-transport integration), 5 in `tests/test_api_sources.py` (the HTTP plumbing), and
+  6 in `tests/test_review_page_stock_budget.py` (the frontend badge/why-text logic and a `STOCK_SOURCES`
+  frontend/backend cross-check, same pattern as `SEARCHABLE_SOURCES`). Full suite: 579 passing (up from 551),
+  zero regressions.
+
 ## Done: YouTube search no longer fails outright when one result hits YouTube's sign-in/bot wall (2026-09-24)
 Real bug, reported verbatim: `YouTube search failed: YouTube search failed: [youtube] yAM3U7OrEaY: Sign in
 to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication.` Two separate
