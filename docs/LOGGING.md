@@ -120,6 +120,32 @@ totals and a per-model breakdown, the same way `/timing` rolls up stage duration
   logged in full to `sources/<source>/requests.jsonl` -- see the table at the top of this document -- this
   section is specifically about the LLM calls, which weren't counted anywhere before.
 
+## Splitting quota across stages
+Google's Gemini free tier (`free_quota` above) is scoped **per Google Cloud project**, not per API key --
+every key under the same project shares one combined RPM/RPD budget. By default `[keywords]`, `[relevance]`,
+and `[script]` all fall back to the same `GEMINI_API_KEY`, so all three share that one pool. If a job's usage
+rollup (or repeated `429`/`model busy` retries in the activity log) shows you're hitting that ceiling, each
+stage can be pointed at its own key/project independently, via its own override env var in `.env`:
+
+- `KEYWORD_LLM_API_KEY` -- keywords only.
+- `RELEVANCE_LLM_API_KEY` -- relevance/scoring only (see `docs/SCORING.md`).
+- `SCRIPT_LLM_API_KEY` -- script generation only.
+
+Each falls back to the env var named in that section's own `api_key_env` (`config/pipeline.toml`), which itself
+falls back to `GEMINI_API_KEY` -- so leaving all three unset keeps today's shared-key behavior exactly as it
+is. Setting only one doesn't touch the other two. A separate key still needs its own Google Cloud project to
+actually get its own quota pool -- Google AI Studio's Projects page only *imports* an existing project, so a
+genuinely new one is created at [console.cloud.google.com](https://console.cloud.google.com) (project
+dropdown -> "New Project"), then imported into AI Studio to generate a key under it. A second key under the
+*same* project shares the same budget as the first, so this only helps if each new key really is under its
+own project.
+
+Which stage to split off first depends on where the calls actually pile up, not symmetry: keywords is usually
+one call per job (often skipped entirely via the `keywords_dir` reuse cache, `docs/RUNNING.md` "Keyword files,
+always"); relevance can batch several calls per vetting round when many assets land in the borderline band
+(`max_llm_per_round`); script gets re-called on every Gate 3 rejection, and is the heaviest caller while
+iterating on `script_style` prompts (`docs/SCRIPT_STYLES.md`), since every rejected draft is another full call.
+
 ## LLM fallback provider
 Every LLM call already retries the *same* provider a few times on 429/500/502/503/504 (see the debugging
 checklist above). `[llm_fallback]` in `config/pipeline.toml` adds a second line of defense: a single backup

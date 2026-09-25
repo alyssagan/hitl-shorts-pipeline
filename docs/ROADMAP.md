@@ -61,6 +61,25 @@ natural next increment looks like).
 - Deliberately NOT grounded in sourced text (unlike the default prompt) -- see docs/SCRIPT_STYLES.md
   "Accuracy trade-off" for what that means for `true_crime_mystery` specifically.
 
+## Done: per-stage Gemini key override for script generation (2026-09-25)
+Requested directly, following on from the script-styles work above and a question about splitting Gemini
+quota (rate limits are scoped per Google Cloud project, not per key -- `[keywords]`/`[relevance]`/`[script]`
+all defaulting to the same `GEMINI_API_KEY` means all three share one project's budget). `[keywords]` and
+`[relevance]` already had their own override env var (`KEYWORD_LLM_API_KEY`/`RELEVANCE_LLM_API_KEY`,
+falling back to that section's `api_key_env`, falling back to `GEMINI_API_KEY`); `[script]` was the odd one
+out -- it only ever read `script_cfg["api_key_env"]` directly, with no per-stage override layer.
+
+- `pipeline/stages/registry.py`'s `script_writer()`: added `SCRIPT_LLM_API_KEY` as the same
+  override-then-fall-back-to-`api_key_env` pattern the other two stages use. No other behavior change --
+  every job that hasn't set this stays on exactly the key it resolved to before.
+- `docs/LOGGING.md` "Splitting quota across stages" (new): explains the per-project quota scoping, all three
+  override vars in one place, and which stage is actually worth splitting off first (script is the heaviest,
+  most bursty caller while iterating on `script_style` prompts -- every Gate 3 rejection is another call).
+- `.env.example`/`config/pipeline.toml` `[script]`: documented, matching the existing `[keywords]` comment.
+- `tests/test_registry_llm_keys.py` (new, 9 tests): pins the override precedence for all three stages
+  (env override > section `api_key_env` > `GEMINI_API_KEY` default > no key -> stage disabled), and that
+  setting one stage's override doesn't leak into the other two.
+
 ## Done: content niches -- niche-aware keyword phrasing + Stage 3 evaluation schema (2026-09-25)
 Requested directly, as a full architecture spec ("MASTER NICHE PROMPT STRATEGIES" for 5 niches -- True
 Crime, Conspiracy, Science & Astronomy, Pet Product, Food/Bakery -- plus an "Evaluation Engine Output

@@ -205,10 +205,14 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
     script_cfg = settings.get("script", {})
 
     def script_writer():
-        """Our own longer script writer; needs a key. Without one, MoneyPrinterTurbo writes the script."""
+        """Our own longer script writer; needs a key. Without one, MoneyPrinterTurbo writes the script.
+        SCRIPT_LLM_API_KEY in .env overrides the variable named in [script] api_key_env, the same
+        override-then-fall-back-to-api_key_env pattern [keywords]/[relevance] already use above -- lets
+        script generation run against its own Gemini project/key (and so its own free-tier quota pool)
+        without keywords/relevance sharing it, or vice versa."""
         if script_cfg.get("provider", "llm") != "llm":
             return None
-        key = os.getenv(script_cfg.get("api_key_env", "GEMINI_API_KEY"), "")
+        key = os.getenv("SCRIPT_LLM_API_KEY", "") or os.getenv(script_cfg.get("api_key_env", "GEMINI_API_KEY"), "")
         if not key:
             return None
         return ScriptWriter(

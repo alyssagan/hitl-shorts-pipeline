@@ -108,6 +108,9 @@ max_llm_per_round = 40
 [script]
 # Our own script writer (longer and better grounded than MoneyPrinterTurbo's). Uses any
 # OpenAI-compatible endpoint; the default is Gemini's free tier with GEMINI_API_KEY from .env.
+# The key is SCRIPT_LLM_API_KEY from .env if set, otherwise the variable named in api_key_env below --
+# same override pattern as [keywords]/[relevance], so script generation can run on its own Gemini
+# project/key and quota pool instead of sharing one with keywords+relevance.
 # Set provider = "mpt" (or leave the key empty) to let MoneyPrinterTurbo write the script instead.
 provider = "llm"
 base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
