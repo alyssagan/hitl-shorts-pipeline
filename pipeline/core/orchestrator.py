@@ -42,6 +42,7 @@ from ..vetting.llm_relevance import VERSION as LLM_SEMANTIC_VERSION
 from ..vetting.method_registry import METHOD_VERSIONS
 from ..vetting import niche as niche_eval
 from ..niches import NICHES
+from ..stages.scenes.script_styles import SCRIPT_STYLES
 
 VETTER = machine("vetting-rules", VETTING_VERSION)
 MATCHER = machine("clip-matcher", "1")
@@ -157,20 +158,23 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ creation
     async def create_job(self, subject: str, providers: ProviderChoice | None = None, *, reviewer: str = "",
-                          niche: str | None = None) -> Job:
+                          niche: str | None = None, script_style: str | None = None) -> Job:
         if niche and niche not in NICHES:
             raise ValueError(f"unknown niche '{niche}'. available: {list(NICHES)}")
-        job = Job(subject=subject.strip(), providers=providers or ProviderChoice(), niche=niche or None)
+        if script_style and script_style not in SCRIPT_STYLES:
+            raise ValueError(f"unknown script_style '{script_style}'. available: {list(SCRIPT_STYLES)}")
+        job = Job(subject=subject.strip(), providers=providers or ProviderChoice(), niche=niche or None,
+                  script_style=script_style or None)
         if not job.subject:
             raise ValueError("subject is required")
         job.log("note", "job created")
         self.store.save(job)
         joblog.write(self.store.job_dir(job.id), "INFO", "project", f"created '{job.subject}'", job=job.id,
                      folder=job.slug, sources=",".join(job.providers.sources), keywords=job.providers.keywords,
-                     niche=job.niche)
+                     niche=job.niche, script_style=job.script_style)
         self._rec(job.id, "project", "created", self._who(reviewer), decision="create", subject={"subject": job.subject, "folder": job.slug},
                   reason="Project started by a person.",
-                  logic={"providers_chosen": job.providers.model_dump(), "niche": job.niche},
+                  logic={"providers_chosen": job.providers.model_dump(), "niche": job.niche, "script_style": job.script_style},
                   outputs={"project_dir": str(self.store.job_dir(job.id))})
         return job
 

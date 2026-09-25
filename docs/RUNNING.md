@@ -95,6 +95,13 @@ Set `--niche` (or `"niche"` in `POST /jobs`) to one of `true_crime`, `conspiracy
 for the full schema and what this deliberately does and doesn't change. Optional; omit it and a job behaves
 exactly as before.
 
+## Script-writing styles (4 scriptwriter personas)
+Set `--script-style` (or `"script_style"` in `POST /jobs`) to one of `true_crime_mystery`, `stem_science`,
+`dtc_marketing`, `math_cs` and the Gate 3 scriptwriter uses that persona's system prompt and word-count target
+instead of its default source-grounded prompt. Independent of `--niche` -- set either, neither, or both. See
+**docs/SCRIPT_STYLES.md**, especially "Accuracy trade-off": unlike the default prompt, none of these 4 ground
+the script in sourced text. Optional; omit it and a job behaves exactly as before.
+
 ## Example
 ```
 python3 scripts/poc.py "true crime jack the ripper" --keywords manual --keywords-file library/keywords/jack-the-ripper.txt \

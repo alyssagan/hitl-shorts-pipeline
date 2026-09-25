@@ -1,11 +1,17 @@
 """HTTP API (Starlette). Your web UI talks to this; it holds no business logic.
 
-  POST /jobs                          {subject, providers?, niche?}   create. niche (requested directly,
-                                        full "MASTER NICHE PROMPT STRATEGIES" spec): one of "true_crime",
-                                        "conspiracy", "science", "pet_product", "food_bakery" -- optional,
-                                        biases keyword phrasing (pipeline/stages/keywords/llm.py) and adds a
-                                        niche_evaluation to every asset's vetting (see GET .../niche-evaluation
-                                        below and pipeline/niches.py). Omit for a job unaffected by any of this.
+  POST /jobs                          {subject, providers?, niche?, script_style?}   create. niche (requested
+                                        directly, full "MASTER NICHE PROMPT STRATEGIES" spec): one of
+                                        "true_crime", "conspiracy", "science", "pet_product", "food_bakery" --
+                                        optional, biases keyword phrasing (pipeline/stages/keywords/llm.py) and
+                                        adds a niche_evaluation to every asset's vetting (see GET
+                                        .../niche-evaluation below and pipeline/niches.py). script_style
+                                        (requested directly, 4 niche-tuned scriptwriter personas): one of
+                                        "true_crime_mystery", "stem_science", "dtc_marketing", "math_cs" --
+                                        optional, replaces the scriptwriter's own source-grounded prompt with
+                                        one of these voices at SCENES_RUNNING (see
+                                        pipeline/stages/scenes/script_styles.py). Independent of niche -- omit
+                                        either or both for a job unaffected by them.
   POST /jobs/{id}/start                                          -> keywords_running
   POST /jobs/{id}/keywords/review     {approved_ids, extra_terms?, reviewer}   GATE 1 approve
   POST /jobs/{id}/keywords/reject     {feedback, reviewer}                     GATE 1 re-run
@@ -232,7 +238,8 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
             for name in providers.sources:
                 if name not in avail["sources"]:
                     raise ValueError(f"unknown source '{name}'. available: {avail['sources']}")
-        job = await orch.create_job(d.get("subject", ""), providers, reviewer=d.get("reviewer", ""), niche=d.get("niche"))
+        job = await orch.create_job(d.get("subject", ""), providers, reviewer=d.get("reviewer", ""), niche=d.get("niche"),
+                                    script_style=d.get("script_style"))
         return JSONResponse(_job_json(job), status_code=201)
 
     async def get_job(r: Request):

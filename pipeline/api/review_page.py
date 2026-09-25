@@ -138,6 +138,11 @@ const STOCK_SOURCES = new Set(["pexels","pixabay","unsplash","nasa"]);
 // two) -- display text only, purely cosmetic; the niche value itself always comes from the job.
 const NICHE_LABELS = {true_crime:"True Crime", conspiracy:"Conspiracy", science:"Science & Astronomy",
   pet_product:"Pet Product", food_bakery:"Food / Bakery"};
+// Must match pipeline/stages/scenes/script_styles.py's STYLE_LABELS exactly (tests/test_review_page_niches.py
+// cross-checks the two) -- display text only; independent of NICHE_LABELS above, see that module's docstring.
+const SCRIPT_STYLE_LABELS = {true_crime_mystery:"History, Conspiracy & True Crime",
+  stem_science:"STEM (Science, Anatomy, Biology, Chemistry)", dtc_marketing:"DTC, Pet & Food Marketing",
+  math_cs:"Math, Statistics & Computer Science"};
 
 async function loadStatic(){
   // Job-independent, small and unchanging within a session -- fetched once (docs/EVALUATION.md, docs/REVIEW_UI.md).
@@ -1352,7 +1357,8 @@ function render(){
   const warn = (job.source_notes||[]).filter(n=>n.warning).map(n=>h("div",{class:"banner"},"Warning: "+n.warning));
   const top = h("header",{},
     h("div",{}, h("h1",{}, job.subject), h("div",{class:"sub"}, "Job ", job.id, " · state: ", h("span",{class:"chip"}, job.state),
-        job.niche ? [" · niche: ", h("span",{class:"chip"}, NICHE_LABELS[job.niche]||job.niche)] : null, " · ",
+        job.niche ? [" · niche: ", h("span",{class:"chip"}, NICHE_LABELS[job.niche]||job.niche)] : null,
+        job.script_style ? [" · script style: ", h("span",{class:"chip"}, SCRIPT_STYLE_LABELS[job.script_style]||job.script_style)] : null, " · ",
         h("a",{href:"/review"},"all projects"), " · ", h("a",{href:`/jobs/${JOB}/decisions?format=md`,target:"_blank"},"decision log"))),
     h("div",{class:"bar"},
       inScenes ? h("span",{class:"tally"}, `${job.scenes.length} scene(s)`) : h("span",{class:"tally"}, `${c.use} use · ${c.rej} reject · ${c.und} undecided · ${c.hidden} hidden`),

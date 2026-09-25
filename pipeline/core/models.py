@@ -93,6 +93,13 @@ Niche = Literal["true_crime", "conspiracy", "science", "pet_product", "food_bake
 # per-niche source/aesthetic mappings live in pipeline/niches.py, not here, so this module doesn't need to
 # import pipeline.sources.
 
+ScriptStyle = Literal["true_crime_mystery", "stem_science", "dtc_marketing", "math_cs"]
+# 4 scriptwriter "voices" (requested directly, 4 niche-tuned scriptwriting personas), each with its own
+# system prompt and word-count target -- pipeline/stages/scenes/script_styles.py has the full text. This is
+# independent of `Niche` above: Niche biases keyword phrasing and asset aesthetic scoring; ScriptStyle
+# controls the script's own voice/structure/length. Optional on Job -- None (the default) means the
+# scriptwriter uses its original source-grounded prompt, unchanged from before this existed.
+
 Severity = Literal["info", "low", "medium", "high"]
 
 
@@ -382,6 +389,9 @@ class Job(BaseModel):
                                              # for a job that behaves exactly as it did before this existed
                                              # (no aesthetic bias in keyword phrasing, no niche_evaluation on
                                              # any asset). See pipeline/niches.py for what each niche means.
+    script_style: ScriptStyle | None = None  # one of 4 scriptwriter voices (requested directly), or None for
+                                             # the writer's original source-grounded prompt. Independent of
+                                             # `niche` above -- see pipeline/stages/scenes/script_styles.py.
 
     keywords: list[Keyword] = Field(default_factory=list)
     assets: list[Asset] = Field(default_factory=list)

@@ -9,6 +9,7 @@ import unittest
 
 from pipeline.api.review_page import PAGE
 from pipeline.niches import NICHE_LABELS
+from pipeline.stages.scenes.script_styles import STYLE_LABELS as SCRIPT_STYLE_LABELS
 
 
 def _extract(pattern: str) -> str:
@@ -24,6 +25,11 @@ class NicheLabelsCrossCheckTests(unittest.TestCase):
         pairs = re.findall(r'(\w+):"([^"]*)"', js)
         self.assertEqual(dict(pairs), NICHE_LABELS)
 
+    def test_frontend_script_style_labels_match_the_backends_exactly(self):
+        js = _extract(r"const SCRIPT_STYLE_LABELS = \{.*?\};")
+        pairs = re.findall(r'(\w+):"([^"]*)"', js)
+        self.assertEqual(dict(pairs), SCRIPT_STYLE_LABELS)
+
 
 class NicheEvaluationSurfacedInTheCardTests(unittest.TestCase):
     """Not a full render (see test_review_page_stock_budget.py's Node-harness pattern for that level of
@@ -37,6 +43,9 @@ class NicheEvaluationSurfacedInTheCardTests(unittest.TestCase):
 
     def test_header_reads_niche_off_the_job(self):
         self.assertIn("job.niche", PAGE)
+
+    def test_header_reads_script_style_off_the_job(self):
+        self.assertIn("job.script_style", PAGE)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from ...core import joblog
 from ...core.models import Job
 from ..llm_http import post_chat
 from ..mpt_client import MptError
+from .script_styles import SCRIPT_STYLES, ScriptStyleSpec
 
 WORDS_PER_SECOND = 2.6          # a typical narration pace, about 155 words a minute
 
@@ -96,13 +97,13 @@ class ScriptWriter:
                                paragraphs=paragraphs, keywords=kw, feedback=fb, sources=sources)
         return prompt, used
 
-    async def write(self, job: Job, keywords: list[str]) -> tuple[str, dict]:
-        prompt, used = self.build_prompt(job, keywords)
+    async def _call(self, messages: list[dict]) -> tuple[str, str, str, bool]:
+        """Shared HTTP call + response parsing for both the default and the styled prompt paths. Returns
+        (raw text, model that actually answered, endpoint that actually answered, whether it fell back)."""
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        joblog.info("script", f"asking {self.model} for about {self.target_words} words", grounded_on=len(used), prompt_chars=len(prompt))
         async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
             resp = await post_chat(client, f"{self.base_url}/chat/completions", headers,
-                                   {"model": self.model, "messages": [{"role": "user", "content": prompt}]}, what="script writer",
+                                   {"model": self.model, "messages": messages}, what="script writer",
                                    waits=self.retry_waits, fallback=self.fallback)
         if resp.status_code != 200:
             try:
@@ -119,6 +120,16 @@ class ScriptWriter:
         # What actually answered -- the primary model unless post_chat() fell back to the backup provider.
         model_used = getattr(resp, "pipeline_model", self.model)
         endpoint_used = self.fallback["base_url"] if getattr(resp, "pipeline_fell_back", False) and self.fallback else self.base_url
+        return text, model_used, endpoint_used, getattr(resp, "pipeline_fell_back", False)
+
+    async def write(self, job: Job, keywords: list[str]) -> tuple[str, dict]:
+        style = SCRIPT_STYLES.get(job.script_style) if job.script_style else None
+        if style:
+            return await self._write_styled(job, style)
+
+        prompt, used = self.build_prompt(job, keywords)
+        joblog.info("script", f"asking {self.model} for about {self.target_words} words", grounded_on=len(used), prompt_chars=len(prompt))
+        text, model_used, endpoint_used, fell_back = await self._call([{"role": "user", "content": prompt}])
         script = clean_script(text)
         if not script:
             raise MptError("script model returned an empty script")
@@ -127,9 +138,37 @@ class ScriptWriter:
         trace = {"writer": "own", "model": model_used, "endpoint": endpoint_used, "prompt": prompt,
                  "target_words": self.target_words, "words": n, "est_seconds": round(n / WORDS_PER_SECOND),
                  "grounded_on": used, "feedback_used": list(job.scene_feedback), "keywords": keywords}
-        if getattr(resp, "pipeline_fell_back", False):
+        if fell_back:
             trace["fell_back_from"] = {"model": self.model, "endpoint": self.base_url}
-            trace["provider"] = getattr(resp, "pipeline_provider", "backup")
+            trace["provider"] = "backup"
         if n < self.target_words * 0.6:
             trace["warning"] = f"Script is well under the {self.target_words}-word target ({n} words)."
+        return script, trace
+
+    async def _write_styled(self, job: Job, style: ScriptStyleSpec) -> tuple[str, dict]:
+        """One of the 4 niche-tuned scriptwriter personas (pipeline/stages/scenes/script_styles.py) instead
+        of the default source-grounded prompt. Deliberately NOT grounded in job.references -- see that
+        module's docstring "Accuracy trade-off". Reviewer feedback from a rejected draft still reaches the
+        model (the one thing every script path always honors), appended to the task message."""
+        task = style.task_template.format(subject=job.subject)
+        if job.scene_feedback:
+            task += "\n\nReviewer notes on the previous draft (follow them): " + " | ".join(job.scene_feedback)
+        messages = [{"role": "system", "content": style.system_prompt}, {"role": "user", "content": task}]
+        joblog.info("script", f"asking {self.model} for a {style.label} script ({style.min_words}-{style.max_words} words)",
+                    style=style.key, grounded_on=0)
+        text, model_used, endpoint_used, fell_back = await self._call(messages)
+        script = clean_script(text)
+        if not script:
+            raise MptError("script model returned an empty script")
+        n = word_count(script)
+        joblog.info("script", f"got {n} words (about {round(n / WORDS_PER_SECOND)}s spoken)")
+        trace = {"writer": "own", "style": style.key, "style_label": style.label, "model": model_used,
+                 "endpoint": endpoint_used, "messages": messages, "target_words_range": [style.min_words, style.max_words],
+                 "words": n, "est_seconds": round(n / WORDS_PER_SECOND), "grounded_on": [],
+                 "feedback_used": list(job.scene_feedback), "keywords": []}
+        if fell_back:
+            trace["fell_back_from"] = {"model": self.model, "endpoint": self.base_url}
+            trace["provider"] = "backup"
+        if n < style.min_words or n > style.max_words:
+            trace["warning"] = f"Script is {n} words, outside the {style.min_words}-{style.max_words} target for {style.label}."
         return script, trace

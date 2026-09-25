@@ -687,3 +687,23 @@ class NicheEndpointTests(ApiSourcesTests):
 
     def test_niche_evaluation_report_404s_for_an_unknown_job(self):
         self.assertEqual(self.client.get("/jobs/zzz/niche-evaluation").status_code, 404)
+
+
+class ScriptStyleEndpointTests(ApiSourcesTests):
+    """Script-writing styles over HTTP: POST /jobs accepts/validates `script_style`, independently of
+    `niche` (docs/SCRIPT_STYLES.md). Unit coverage for the styles themselves and ScriptWriter's styled path
+    lives in tests/test_script_styles.py -- this file only checks the HTTP plumbing."""
+
+    def test_an_unknown_script_style_is_a_422_not_a_500(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly", "script_style": "not_a_real_style",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        self.assertEqual(r.status_code, 422)
+
+    def test_a_valid_script_style_persists_independently_of_niche(self):
+        r = self.client.post("/jobs", json={"subject": "cats", "reviewer": "Aly", "niche": "science",
+                                            "script_style": "math_cs",
+                                            "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
+        self.assertEqual(r.status_code, 201)
+        body = r.json()
+        self.assertEqual(body["script_style"], "math_cs")
+        self.assertEqual(body["niche"], "science")   # neither field overwrites the other

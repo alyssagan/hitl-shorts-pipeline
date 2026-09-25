@@ -205,6 +205,8 @@ Checking whether a scoring method/version is actually any good: [docs/EVALUATION
 source: [docs/ADD_A_SOURCE.md](docs/ADD_A_SOURCE.md). Trade-offs we chose on purpose and may improve: [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md). Voices, models and sources to try, with results: [docs/OPTIONS_TO_TRY.md](docs/OPTIONS_TO_TRY.md).
 Optional content niches (True Crime, Conspiracy, Science, Pet Product, Food/Bakery) that bias keyword phrasing and add a
 per-asset aesthetic/relevance evaluation at Gate 2: [docs/NICHES.md](docs/NICHES.md).
+Optional script-writing styles (4 retention-mechanics scriptwriter personas, independent of niches) for the Gate 3
+scriptwriter: [docs/SCRIPT_STYLES.md](docs/SCRIPT_STYLES.md).
 
 ## Adding your own provider
 

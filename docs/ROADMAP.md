@@ -39,6 +39,28 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: script-writing styles -- 4 retention-mechanics scriptwriter personas (2026-09-25)
+Requested directly: 4 system prompts (History/Conspiracy/True Crime, STEM, DTC/Pet/Food Marketing,
+Math/Stats/CS), each with its own retention-mechanics instructions and word-count target, for the Gate 3
+scriptwriter. First increment toward a "script first" pipeline the same conversation also asked about --
+this piece only adds the scriptwriter voices; it does not reorder keywords-before-script (see
+docs/SCRIPT_STYLES.md's "What this does NOT do" for why that's a separate, bigger decision, and what the
+natural next increment looks like).
+
+- New optional `Job.script_style` (`pipeline/core/models.py`): one of 4 values, `None` by default -- a job
+  with no script_style is byte-for-byte unaffected. Independent of `Job.niche` (different code paths,
+  different purpose, no niche equivalent for `math_cs`) -- see docs/SCRIPT_STYLES.md "How this relates to
+  niches".
+- `pipeline/stages/scenes/script_styles.py` (new): the 4 personas, verbatim as requested.
+- `pipeline/stages/scenes/writer.py`'s `ScriptWriter`: a styled call sends the persona as a `system` message
+  and the task (topic + word target + reviewer feedback) as the `user` message, skips the default
+  source-grounding entirely, and checks the word count against the style's own range instead of the
+  config's single `target_words`. Same retry/fallback transport (`post_chat()`) as every other path.
+- `--script-style` on `scripts/poc.py`; `POST /jobs {"script_style": ...}`; review page shows a "script
+  style: ..." chip in the job header.
+- Deliberately NOT grounded in sourced text (unlike the default prompt) -- see docs/SCRIPT_STYLES.md
+  "Accuracy trade-off" for what that means for `true_crime_mystery` specifically.
+
 ## Done: content niches -- niche-aware keyword phrasing + Stage 3 evaluation schema (2026-09-25)
 Requested directly, as a full architecture spec ("MASTER NICHE PROMPT STRATEGIES" for 5 niches -- True
 Crime, Conspiracy, Science & Astronomy, Pet Product, Food/Bakery -- plus an "Evaluation Engine Output
