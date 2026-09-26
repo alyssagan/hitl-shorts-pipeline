@@ -14,7 +14,7 @@ from pathlib import Path
 import httpx
 
 from ...core import joblog
-from ...core.models import Job
+from ...core.models import Job, TextRef
 from ..llm_http import post_chat
 from ..mpt_client import MptError
 from .script_styles import SCRIPT_STYLES, ScriptStyleSpec
@@ -32,7 +32,21 @@ Subject: {subject}
 
 Length: about {words} words (roughly {seconds} seconds spoken), in {paragraphs} short paragraphs
 separated by a blank line. Each paragraph is one idea, one to three sentences, built around ONE concrete,
-picturable subject (see above). Open with a hook.
+picturable subject (see above).
+
+RETENTION MECHANICS (this decides whether someone keeps watching or scrolls past):
+- Cold open, not chronological order: read the whole source text first and find the single most
+  surprising, unresolved, or contradictory fact in it -- wherever it falls in the timeline. Open with THAT,
+  as a bold claim or a question the rest of the script hasn't answered yet. Never open with background,
+  scene-setting, or an introduction ("Today we're looking at...", "Let's talk about...", "In [year]...").
+  Whatever plain scene-setting facts you need, place them after the hook, not before it.
+- Open loop: the hook must raise a real question the source text can actually answer. Keep that tension
+  alive through the middle -- every paragraph should add a new piece of evidence or raise the stakes, never
+  just restate the hook -- and pay it off with the single most weighty fact you have in the FINAL
+  paragraph, so there's a reason to watch to the end instead of getting the answer up front.
+- Sentence economy: short, direct sentences. Cut anything that doesn't add a new fact or move the story
+  forward, and never summarize or repeat a point you already made.
+
 Write plain spoken sentences only: no headings, markdown, bullet points, emoji, stage directions,
 scene numbers or timestamps.
 
@@ -71,11 +85,14 @@ class ScriptWriter:
         self.fallback = fallback   # config/pipeline.toml [llm_fallback], via registry.build_llm_fallback()
         self.retry_waits: tuple[float, ...] | None = None      # None = the defaults in llm_http
 
-    def sources_text(self, job: Job) -> tuple[str, list[dict]]:
-        """Source text for the prompt. The budget is split evenly across the articles so
-        one long article cannot crowd the others out."""
+    def sources_text(self, job: Job, references: list[TextRef] | None = None) -> tuple[str, list[dict]]:
+        """Source text for the prompt. The budget is split evenly across the articles so one long
+        article cannot crowd the others out. `references` defaults to `job.references` -- pass it
+        explicitly when the caller has a freshly-fetched list not yet persisted onto the job (write_
+        script(), pipeline/stages/scenes/mpt.py, since research is now fetched in this same round,
+        before the script exists to approve)."""
         bodies = []
-        for r in job.references:
+        for r in (job.references if references is None else references):
             try:
                 bodies.append((r, Path(r.path).read_text(encoding="utf-8").split("\n\n", 1)[-1]))
             except OSError:
@@ -86,12 +103,12 @@ class ScriptWriter:
         parts = [f'--- "{r.title}" ({r.url}) ---\n{body[:share]}' for r, body in bodies]
         return "\n\n".join(parts), [{"title": r.title, "url": r.url, "chars_used": min(len(b), share)} for r, b in bodies]
 
-    def build_prompt(self, job: Job, keywords: list[str]) -> tuple[str, list[dict]]:
-        sources, used = self.sources_text(job)
+    def build_prompt(self, job: Job, keywords: list[str], references: list[TextRef] | None = None) -> tuple[str, list[dict]]:
+        sources, used = self.sources_text(job, references)
         paragraphs = max(4, round(self.target_words / 40))
         kw = f"Work these approved keywords in naturally: {', '.join(keywords)}.\n" if keywords else ""
-        fb = ("Reviewer notes on the previous draft (follow them): " + " | ".join(job.scene_feedback) + "\n"
-              if job.scene_feedback else "")
+        fb = ("Reviewer notes on the previous draft (follow them): " + " | ".join(job.script_feedback) + "\n"
+              if job.script_feedback else "")
         prompt = PROMPT.format(subject=job.subject, words=self.target_words,
                                seconds=round(self.target_words / WORDS_PER_SECOND),
                                paragraphs=paragraphs, keywords=kw, feedback=fb, sources=sources)
@@ -122,12 +139,12 @@ class ScriptWriter:
         endpoint_used = self.fallback["base_url"] if getattr(resp, "pipeline_fell_back", False) and self.fallback else self.base_url
         return text, model_used, endpoint_used, getattr(resp, "pipeline_fell_back", False)
 
-    async def write(self, job: Job, keywords: list[str]) -> tuple[str, dict]:
+    async def write(self, job: Job, keywords: list[str], references: list[TextRef] | None = None) -> tuple[str, dict]:
         style = SCRIPT_STYLES.get(job.script_style) if job.script_style else None
         if style:
             return await self._write_styled(job, style)
 
-        prompt, used = self.build_prompt(job, keywords)
+        prompt, used = self.build_prompt(job, keywords, references)
         joblog.info("script", f"asking {self.model} for about {self.target_words} words", grounded_on=len(used), prompt_chars=len(prompt))
         text, model_used, endpoint_used, fell_back = await self._call([{"role": "user", "content": prompt}])
         script = clean_script(text)
@@ -137,7 +154,7 @@ class ScriptWriter:
         joblog.info("script", f"got {n} words (about {round(n / WORDS_PER_SECOND)}s spoken)")
         trace = {"writer": "own", "model": model_used, "endpoint": endpoint_used, "prompt": prompt,
                  "target_words": self.target_words, "words": n, "est_seconds": round(n / WORDS_PER_SECOND),
-                 "grounded_on": used, "feedback_used": list(job.scene_feedback), "keywords": keywords}
+                 "grounded_on": used, "feedback_used": list(job.script_feedback), "keywords": keywords}
         if fell_back:
             trace["fell_back_from"] = {"model": self.model, "endpoint": self.base_url}
             trace["provider"] = "backup"
@@ -151,8 +168,8 @@ class ScriptWriter:
         module's docstring "Accuracy trade-off". Reviewer feedback from a rejected draft still reaches the
         model (the one thing every script path always honors), appended to the task message."""
         task = style.task_template.format(subject=job.subject)
-        if job.scene_feedback:
-            task += "\n\nReviewer notes on the previous draft (follow them): " + " | ".join(job.scene_feedback)
+        if job.script_feedback:
+            task += "\n\nReviewer notes on the previous draft (follow them): " + " | ".join(job.script_feedback)
         messages = [{"role": "system", "content": style.system_prompt}, {"role": "user", "content": task}]
         joblog.info("script", f"asking {self.model} for a {style.label} script ({style.min_words}-{style.max_words} words)",
                     style=style.key, grounded_on=0)
@@ -165,7 +182,7 @@ class ScriptWriter:
         trace = {"writer": "own", "style": style.key, "style_label": style.label, "model": model_used,
                  "endpoint": endpoint_used, "messages": messages, "target_words_range": [style.min_words, style.max_words],
                  "words": n, "est_seconds": round(n / WORDS_PER_SECOND), "grounded_on": [],
-                 "feedback_used": list(job.scene_feedback), "keywords": []}
+                 "feedback_used": list(job.script_feedback), "keywords": []}
         if fell_back:
             trace["fell_back_from"] = {"model": self.model, "endpoint": self.base_url}
             trace["provider"] = "backup"

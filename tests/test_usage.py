@@ -181,8 +181,10 @@ class EndToEndUsageTests(unittest.TestCase):
                                        "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
-        j = self._wait(client, jid, "keywords_review")
-        client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        self._wait(client, jid, "script_review")
+        client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
+        # Keywords are auto-approved by default (docs/PIPELINE_STAGES.md); the job runs straight
+        # through keywords_review to sourcing/vetting on its own.
         self._wait(client, jid, "assets_review")
 
         self.assertGreater(calls["n"], 0)          # the LLM really was called at least once
@@ -222,8 +224,10 @@ class EndToEndUsageTests(unittest.TestCase):
                                        "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
-        j = self._wait(client, jid, "keywords_review")
-        client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        self._wait(client, jid, "script_review")
+        client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
+        # Keywords are auto-approved by default (docs/PIPELINE_STAGES.md); the job runs straight
+        # through keywords_review to sourcing/vetting on its own.
         self._wait(client, jid, "assets_review")
 
         out = client.get(f"/jobs/{jid}/usage").json()

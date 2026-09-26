@@ -2,12 +2,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import httpx
 
 from pipeline.core.models import Job, Keyword, Scene, TextRef
 from pipeline.stages.base import StageContext
-from pipeline.stages.keywords.llm import PROMPT, LLMKeywordStage, _source_guidance, parse_keywords
+from pipeline.stages.keywords.llm import (
+    PROMPT, LLMKeywordStage, _already_covered_guidance, _group_definitions_block, _source_guidance, parse_keywords,
+    parse_scene_keywords,
+)
 from pipeline.stages.keywords.manual import ManualKeywordStage
 from pipeline.stages.mpt_client import MptClient, MptError
 from pipeline.stages.render.mpt import MptRenderStage
@@ -91,7 +95,8 @@ class KeywordPromptSourceGuidanceTests(unittest.TestCase):
 
     def test_prompt_never_asks_for_seo_or_social_media_phrasing(self):
         rendered = PROMPT.format(subject="cats", feedback="", n=5, sources_line="wikipedia, pexels",
-                                 source_guidance=_source_guidance(["wikipedia", "pexels"]), niche_guidance="")
+                                 source_guidance=_source_guidance(["wikipedia", "pexels"]), niche_guidance="",
+                                 group_definitions=_group_definitions_block(), already_covered="")
         self.assertIn("SEARCH QUERIES", rendered)
         self.assertIn("TikTok", rendered)             # named as an example of what NOT to produce
         self.assertNotIn("SEO analyst", rendered)      # the old framing that caused literal SEO-style terms
@@ -100,13 +105,18 @@ class KeywordPromptSourceGuidanceTests(unittest.TestCase):
         for sources in ([], ["wikipedia"], ["pexels"], ["wikipedia", "pexels", "urls"], ["nasa"]):
             sources_line = ", ".join(sources) if sources else "none -- your own library/clips/ folder only"
             PROMPT.format(subject="x", feedback="", n=10, sources_line=sources_line,
-                         source_guidance=_source_guidance(sources), niche_guidance="")   # raises KeyError/IndexError if malformed
+                         source_guidance=_source_guidance(sources), niche_guidance="",
+                         group_definitions=_group_definitions_block(), already_covered="")   # raises KeyError/IndexError if malformed
 
     def test_prompt_defines_all_four_groups_with_the_required_examples(self):
         # #3: the prompt must give the exact search-example phrases from the requirements doc, framed
-        # explicitly as examples (not assertions that matching material exists).
+        # explicitly as examples (not assertions that matching material exists). These now come from
+        # config/query_groups.toml via _group_definitions_block() (#"config file that's easily readable"),
+        # not a hardcoded string here -- this test still pins the actual rendered prompt, so editing that
+        # file to remove/garble a required example still fails this test, same as before it existed.
         rendered = PROMPT.format(subject="x", feedback="", n=5, sources_line="wikipedia, commons, pexels",
-                                 source_guidance=_source_guidance(["wikipedia", "commons", "pexels"]), niche_guidance="")
+                                 source_guidance=_source_guidance(["wikipedia", "commons", "pexels"]), niche_guidance="",
+                                 group_definitions=_group_definitions_block(), already_covered="")
         self.assertIn("Corazon Amurao interview", rendered)
         self.assertIn("Chicago residential streets 1960s", rendered)
         self.assertIn("empty hospital hallway", rendered)
@@ -115,6 +125,29 @@ class KeywordPromptSourceGuidanceTests(unittest.TestCase):
         self.assertIn('"historical"', rendered)
         self.assertIn('"stock"', rendered)
         self.assertIn("not a claim that matching material exists", rendered)
+
+    def test_group_definitions_block_reads_from_the_config_file_not_a_hardcoded_string(self):
+        # Regression coverage for the config-file extraction itself: patch what GROUP_DEFINITIONS holds and
+        # confirm the rendered block actually changes, proving _group_definitions_block() is a live read of
+        # pipeline/sources/groups.py's GROUP_DEFINITIONS (config/query_groups.toml at runtime), not a copy.
+        from pipeline.stages.keywords import llm as llm_module
+        override = {"description": "a totally different stock description",
+                    "example": "a brand new stock example", "example_why": "because a test said so"}
+        with mock.patch.dict(llm_module.GROUP_DEFINITIONS, {"stock": override}):
+            block = _group_definitions_block()
+        self.assertIn("a totally different stock description", block)
+        self.assertIn("a brand new stock example", block)
+
+    def test_already_covered_guidance_is_empty_when_nothing_to_list(self):
+        self.assertEqual(_already_covered_guidance(None), "")
+        self.assertEqual(_already_covered_guidance([]), "")
+        self.assertEqual(_already_covered_guidance(["  ", ""]), "")
+
+    def test_already_covered_guidance_lists_and_dedupes_terms(self):
+        g = _already_covered_guidance(["whitechapel 1888", "whitechapel 1888", " victorian london street "])
+        self.assertIn("whitechapel 1888", g)
+        self.assertIn("victorian london street", g)
+        self.assertIn("do not repeat", g.lower())
 
     def test_guidance_names_which_groups_are_useful_this_round(self):
         # Only Wikipedia configured -> only "research" is useful; case/historical/stock have nowhere to go.
@@ -196,6 +229,52 @@ class KeywordTests(unittest.IsolatedAsyncioTestCase):
         out = await ManualKeywordStage().run(job, StageContext(Path(".")))
         self.assertEqual([k.term for k in out], ["Cats", "purring"])
 
+
+class SceneShotListKeywordTests(unittest.TestCase):
+    """docs/ROADMAP.md backlog item F: parse_scene_keywords() now reads a per-scene "queries" shot list
+    (2-4 strings, most-specific-first) instead of a single "term", collapsing it onto one Keyword per
+    scene (queries[0] -> term, queries[1:] -> alternatives) so scene_index/routing/approval all keep
+    working exactly as they did with one term per scene."""
+
+    def _scenes(self, n=2):
+        return [Scene(index=i, narration=f"scene {i}") for i in range(n)]
+
+    def test_queries_array_becomes_term_plus_alternatives(self):
+        text = ('[{"scene_index": 0, "queries": ["corazon amurao interview", "1966 hospital ward", '
+                '"vintage hospital corridor"], "group": "case", "why": "shows the survivor"}]')
+        kws = parse_scene_keywords(text, "llm:m", self._scenes(1))
+        self.assertEqual(len(kws), 1)
+        k = kws[0]
+        self.assertEqual(k.term, "corazon amurao interview")
+        self.assertEqual(k.alternatives, ["1966 hospital ward", "vintage hospital corridor"])
+        self.assertEqual(k.group, "case")
+        self.assertEqual(k.scene_index, 0)
+        self.assertEqual(k.meta["shot_list"], ["corazon amurao interview", "1966 hospital ward", "vintage hospital corridor"])
+
+    def test_dedups_a_repeated_query_within_one_scenes_shot_list(self):
+        text = '[{"scene_index": 0, "queries": ["a", "a", "b"], "group": "historical"}]'
+        k = parse_scene_keywords(text, "llm:m", self._scenes(1))[0]
+        self.assertEqual((k.term, k.alternatives), ("a", ["b"]))
+
+    def test_tolerates_an_old_style_single_term_response(self):
+        # Defensive: a weaker fallback model, or a stale cached response, that ignores the new "queries"
+        # field and still answers with the old single "term" degrades to a 1-query shot list rather than
+        # losing the scene's keyword entirely.
+        text = '[{"scene_index": 0, "term": "whitechapel murder scene", "group": "case"}]'
+        k = parse_scene_keywords(text, "llm:m", self._scenes(1))[0]
+        self.assertEqual((k.term, k.alternatives), ("whitechapel murder scene", []))
+
+    def test_item_with_no_usable_queries_is_skipped_like_a_missing_term_was(self):
+        text = '[{"scene_index": 0, "queries": ["", "  "]}, {"scene_index": 1, "queries": ["b"]}]'
+        kws = parse_scene_keywords(text, "llm:m", self._scenes(2))
+        self.assertEqual([k.scene_index for k in kws], [1])
+
+    def test_scene_prompt_asks_for_an_ordered_shot_list(self):
+        from pipeline.stages.keywords.llm import SCENE_PROMPT
+        self.assertIn("2 to 4 queries", SCENE_PROMPT)
+        self.assertIn("ideal, highly specific shot", SCENE_PROMPT)
+        self.assertIn('"queries"', SCENE_PROMPT)
+
     async def test_manual_stage_with_no_seeds_traces_the_subject_fallback(self):
         """Where the keywords came from (docs/LOGGING.md): no --keywords-file at all."""
         stage = ManualKeywordStage()
@@ -264,6 +343,30 @@ class KeywordTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("too generic", seen["body"]["messages"][0]["content"])
         self.assertEqual(out[0].term, "a")
 
+    async def test_llm_stage_passes_already_covered_and_extra_feedback_into_the_prompt(self):
+        # Gate 2's "Suggest more search terms" (orchestrator.suggest_keywords) is the only caller that ever
+        # sets these -- confirms they actually reach the LLM request, not just that run() accepts them.
+        seen = {}
+        def handler(req: httpx.Request):
+            seen["body"] = json.loads(req.content)
+            return httpx.Response(200, json={"choices": [{"message": {"content": '[{"term":"b"}]'}}]})
+        stage = LLMKeywordStage("http://llm/v1", "sk-test", "m")
+        real = httpx.AsyncClient
+        httpx.AsyncClient = lambda **kw: real(transport=httpx.MockTransport(handler), **kw)
+        try:
+            job = Job(subject="cats")
+            await stage.run(job, StageContext(Path(".")), already_covered=["whitechapel 1888", "whitechapel 1888"],
+                            extra_feedback="more photos of the actual building")
+        finally:
+            httpx.AsyncClient = real
+        content = seen["body"]["messages"][0]["content"]
+        self.assertIn("whitechapel 1888", content)
+        self.assertIn("more photos of the actual building", content)
+        # A term repeated in the input list is only listed once in the prompt.
+        self.assertEqual(content.count("whitechapel 1888"), 1)
+        self.assertEqual(stage.last_trace["already_covered"], ["whitechapel 1888"])
+        self.assertEqual(stage.last_trace["extra_feedback"], "more photos of the actual building")
+
 
 class SceneTests(unittest.IsolatedAsyncioTestCase):
     def test_split_scenes(self):
@@ -286,6 +389,7 @@ class SceneTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await src.fetch(s, Path(d), used))
 
     async def test_script_prompt_never_exceeds_mpt_limit(self):
+        # write_script() (not run() -- that no longer writes a script at all, docs/PIPELINE_STAGES.md)
         mpt = FakeMpt()
         client = MptClient("http://mpt", transport=httpx.MockTransport(mpt))
         with tempfile.TemporaryDirectory() as lib, tempfile.TemporaryDirectory() as assets:
@@ -293,10 +397,9 @@ class SceneTests(unittest.IsolatedAsyncioTestCase):
             src.write_text("Title\n\n" + "Octopuses have three hearts. " * 500, encoding="utf-8")
             stage = MptSceneStage(client, LocalFolderClipSource(lib), voice_name="v", generate_audio=False)
             job = Job(subject="octopuses")
-            job.keywords = [Keyword(term="octopus", approved=True)]
             job.references = [TextRef(source="wikipedia", title="Octopus", url="http://x", path=str(src))]
-            job.scene_feedback = ["make it punchier " * 20]
-            await stage.run(job, StageContext(Path(assets)))
+            job.script_feedback = ["make it punchier " * 20]
+            await stage.write_script(job, StageContext(Path(assets)))
         script_req = next(b for m, p, b in mpt.requests if p == "/api/v1/scripts")
         self.assertLessEqual(len(script_req["video_script_prompt"]), 2000)
 
@@ -317,29 +420,45 @@ class SceneTests(unittest.IsolatedAsyncioTestCase):
             b.write_text("Octopus\n\n" + "octopus hearts. " * 800, encoding="utf-8")
             stage = MptSceneStage(client, LocalFolderClipSource(lib), voice_name="v", generate_audio=False)
             job = Job(subject="octopuses")
-            job.keywords = [Keyword(term="octopus", approved=True)]
             job.references = [TextRef(source="wikipedia", title="Kraken", url="http://k", path=str(a)),
                               TextRef(source="wikipedia", title="Octopus", url="http://o", path=str(b))]
-            await stage.run(job, StageContext(Path(assets)))
+            await stage.write_script(job, StageContext(Path(assets)))
         prompt = next(b for m, p, b in mpt.requests if p == "/api/v1/scripts")["video_script_prompt"]
         self.assertIn("octopus hearts", prompt)
         self.assertLessEqual(len(prompt), 2000)
 
-    async def test_mpt_scene_stage_builds_scenes_from_approved_keywords_only(self):
+    async def test_write_script_no_longer_mentions_keywords_none_exist_yet(self):
+        """Since the reorder (docs/PIPELINE_STAGES.md), keywords are derived FROM the script, so none
+        exist when write_script() runs -- the old "Work these approved keywords in naturally" prompt
+        line is gone entirely, and reviewer feedback comes from job.script_feedback, not scene_feedback."""
+        mpt = FakeMpt()
+        client = MptClient("http://mpt", transport=httpx.MockTransport(mpt))
+        with tempfile.TemporaryDirectory() as lib, tempfile.TemporaryDirectory() as assets:
+            stage = MptSceneStage(client, LocalFolderClipSource(lib), voice_name="v")
+            job = Job(subject="cats")
+            job.script_feedback = ["punchier"]
+            await stage.write_script(job, StageContext(Path(assets)))
+        prompt = next(b for m, p, b in mpt.requests if p == "/api/v1/scripts")["video_script_prompt"]
+        self.assertNotIn("Work these approved keywords", prompt)
+        self.assertIn("punchier", prompt)
+
+    async def test_run_matches_clips_and_audio_to_already_written_scenes(self):
+        """run() (SCENES_RUNNING, shrunk) no longer writes a script -- job.scenes must already exist
+        (as write_script() + keywords_running would have left them, each with its own search_terms),
+        and this only fills in clip_path/asset_id/audio per scene."""
         mpt = FakeMpt()
         client = MptClient("http://mpt", transport=httpx.MockTransport(mpt))
         with tempfile.TemporaryDirectory() as lib, tempfile.TemporaryDirectory() as assets:
             (Path(lib) / "cat.mp4").write_bytes(b"x")
             stage = MptSceneStage(client, LocalFolderClipSource(lib), voice_name="v", generate_audio=True)
             job = Job(subject="cats")
-            job.keywords = [Keyword(term="cat facts", approved=True), Keyword(term="dogs")]
-            job.scene_feedback = ["punchier"]
+            job.script = "Cats are great.\n\nThey sleep all day."
+            job.scenes = [Scene(index=0, narration="Cats are great.", search_terms=["cat facts"]),
+                         Scene(index=1, narration="They sleep all day.", search_terms=["cat facts"])]
             res = await stage.run(job, StageContext(Path(assets)))
-        script_req = next(b for m, p, b in mpt.requests if p == "/api/v1/scripts")
-        self.assertIn("cat facts", script_req["video_script_prompt"])
-        self.assertNotIn("dogs", script_req["video_script_prompt"])
-        self.assertIn("punchier", script_req["video_script_prompt"])
-        self.assertEqual(len(res.scenes), 2)                      # 4 sentences / 2 per scene
+        self.assertFalse(any(p == "/api/v1/scripts" for _, p, _ in mpt.requests))   # no script call at all
+        self.assertEqual(res.script, job.script)                 # unchanged, just passed through
+        self.assertEqual(len(res.scenes), 2)
         self.assertTrue(res.scenes[0].clip_path.endswith("cat.mp4"))
         self.assertIsNone(res.scenes[1].clip_path)                # library exhausted
         self.assertTrue(res.scenes[0].audio_path.endswith("scene_00.mp3"))

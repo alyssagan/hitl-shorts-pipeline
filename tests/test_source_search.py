@@ -105,8 +105,10 @@ class SourceSearchEndpointTests(unittest.TestCase):
                                                           "sources": list(sources)}})
         jid = r.json()["id"]
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
-        j = self.wait(jid, "keywords_review")
-        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
+        # Keywords are auto-approved by default (docs/PIPELINE_STAGES.md) -- no keywords/review call
+        # needed here, the job runs straight through to sourcing/vetting on its own.
         j = self.wait(jid, "assets_review")
         return jid, j
 

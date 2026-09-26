@@ -44,6 +44,11 @@ textarea.note{width:100%;min-height:52px}
 .labelform{display:flex;flex-direction:column;gap:6px;padding:8px;background:var(--bg);border-radius:6px}
 .labelform select,.labelform input{width:100%}
 .banner{padding:10px 14px;border-radius:8px;background:var(--nobg);margin-bottom:14px}
+.ksec{margin:22px 0 10px}.ksec:first-child{margin-top:0}
+.ksec .khead{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:8px 16px;
+  border-bottom:1px solid var(--line);padding-bottom:6px;margin-bottom:10px}
+.ksec .khead b{font-size:14.5px}
+.ksec .kempty{color:var(--mute);font-size:13px;padding:2px 0 4px}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:16px 0}
 .err{color:var(--no);margin:8px 0;white-space:pre-wrap}
 .lb{position:fixed;inset:0;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;z-index:20}
@@ -91,6 +96,12 @@ async function loadLog(){
   const el = document.getElementById("logbox"); if(el){ el.textContent = logLines.join("\n"); el.scrollTop = el.scrollHeight; }
 }
 let job=null, decisions={}, notes={}, labels={}, labelSaved={}, labelForms={}, dupIds={}, minScore=0.5, showHidden=false, srcFilter="", kindFilter="", sortBy="risk", busy=false, error="", batchSize=10;
+// "Suggest more search terms" (Gate 2, reuses the same LLM keyword-writing stage the auto-approved
+// keyword step -- "Gate 1½", docs/PIPELINE_STAGES.md -- uses: config/query_groups.toml has the shared
+// group vocabulary): suggestIds/suggestChecked hold the LAST /keywords/
+// suggest call's result until the reviewer approves or dismisses it -- transient, not persisted, since an
+// unapproved suggestion sitting unreviewed in job.keywords is already harmless on its own (never searched).
+let suggestFeedback="", suggestBusy=false, suggestError="", suggestIds=null, suggestChecked={};
 let sceneNarration={}, sceneOrder=null, sceneClipOverride={}, sceneNotes={}, dragSceneId=null;
 let dragAssetPath=null, pendingIntent={};   // pendingIntent: assetId -> scene id it was dragged onto, while it's still high-risk/pending
 let methodDefs={}, labelReasons=[];
@@ -121,6 +132,10 @@ let stockLimitDraft = "", deferRelevanceDraft = false;   // "stop go limits" (re
                           // current options each load() so the fields always start showing what's actually set.
 let scoreRelevanceBusy = false, scoreRelevanceError = "";   // "Score relevance now" (requested directly,
                           // alongside the budget: "pull stock photos first and score relevance later")
+let scriptDraft = "", scriptDraftKey = null;   // Gate 1 (script_review): editable draft of job.script, kept
+                          // across poll-driven reloads the same way sceneNarration is -- reset only when the
+                          // underlying job.script itself changes (a fresh draft, or a rewrite after reject),
+                          // never on an unrelated poll tick while the reviewer is mid-edit.
 const CATEGORY_LABELS = {verified_case:"verified case", unverified_case_candidate:"unverified case candidate",
   historical_context:"historical context", illustrative_stock:"illustrative stock", reconstruction:"reconstruction"};
 const IDENTITY_LABELS = {unverified:"unverified", verified:"verified", disputed:"disputed"};
@@ -164,8 +179,13 @@ async function load(){
     if (a.status!=="pending" && decisions[a.id]==null){ decisions[a.id]=a.status==="approved"?"approve":"reject"; notes[a.id]=a.decision_note||""; }
   }
   syncScenes();
+  syncScriptDraft();
   if (job.state==="scenes_review" && coverageLoadedFor!==job.id){ coverageLoadedFor=job.id; loadCoverage(); }
   render();
+}
+function syncScriptDraft(){
+  const key = job.id+"|"+(job.script||"");
+  if (scriptDraftKey !== key){ scriptDraftKey = key; scriptDraft = job.script||""; }
 }
 async function loadCoverage(){
   // #12: fetched once per job as soon as it reaches scenes_review, so the coverage check is visible before
@@ -865,6 +885,39 @@ async function nextBatch(){
     busy=false; await load();
   }catch(e){ busy=false; error=String(e.message||e); render(); }
 }
+async function suggestKeywords(){
+  // Asks the SAME LLM keyword-writing stage the auto-approved keyword step ("Gate 1½") used for a fresh batch of group-tagged phrases, mid
+  // asset review -- an alternative to hand-typing terms into "Search again" (those have no group of their
+  // own, so routing sends them to every configured source regardless of fit; these come back with a real
+  // research/case/historical/stock classification and get routed correctly once approved below).
+  suggestBusy=true; suggestError=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    const resp = await api("POST", `/jobs/${JOB}/keywords/suggest`, {feedback: suggestFeedback, reviewer});
+    job = resp;   // already the full job JSON (kw_suggest's response), no separate load() needed
+    suggestIds = resp.suggested_ids || [];
+    suggestChecked = {}; suggestIds.forEach(id => { suggestChecked[id] = true; });
+    suggestBusy=false; render();
+  }catch(e){ suggestBusy=false; suggestError=String(e.message||e); render(); }
+}
+function dismissSuggestions(){
+  // No API call needed -- an unapproved suggestion left sitting in job.keywords is already inert (never
+  // searched, never shown as its own section in the grid below), same as a Gate-1 keyword rejected by
+  // omission. This just clears the reviewer's own local checklist of them.
+  suggestIds = null; suggestChecked = {}; suggestFeedback = ""; render();
+}
+async function addSuggested(){
+  const ids = (suggestIds||[]).filter(id => suggestChecked[id]);
+  if (!ids.length){ suggestError = "Check at least one suggestion first, or Dismiss to clear them."; render(); return; }
+  suggestBusy=true; suggestError=""; render();
+  try{
+    const reviewer = (store.get("reviewer")||"").trim();
+    await api("POST", `/jobs/${JOB}/keywords/approve-suggested`, {keyword_ids: ids, reviewer});
+    suggestIds = null; suggestChecked = {}; suggestFeedback = "";
+    suggestBusy=false; await load();   // new approved keyword(s) now show up as their own (empty, "not searched
+                                        // yet") section below -- "Next batch" is what actually searches them.
+  }catch(e){ suggestBusy=false; suggestError=String(e.message||e); render(); }
+}
 async function scoreRelevanceNow(){
   // "Score relevance now" (requested directly) -- scores whatever's pending against the real approved
   // keywords right now, regardless of defer_relevance; the only thing that ever scores a deferred round.
@@ -922,6 +975,55 @@ function bulk(kind){
     if (kind==="rej") decisions[a.id]="reject";
   }
   render();
+}
+
+/* ---------------------------------------------------------------- gate 1: script review */
+function scriptWordsLineFor(text){
+  const words = (text||"").trim().split(/\s+/).filter(Boolean).length;
+  return `${words} word(s), about ${Math.round(words/2.6)}s spoken`;
+}
+function updateScriptDraftWords(){
+  // Same idea as updateScriptPreview() below for Gate 3 -- patches the word count in place on every
+  // keystroke instead of calling render(), so the textarea is never rebuilt and the cursor never jumps.
+  const el = document.getElementById("scriptDraftWords"); if (el) el.textContent = scriptWordsLineFor(scriptDraft);
+}
+function scriptReviewBody(){
+  // Gate 1 (docs/PIPELINE_STAGES.md): the freshly-written narration, before anything else has run --
+  // no keywords, no sourcing, no scenes with clips yet. Approving with an edited draft re-splits it into
+  // fresh scenes (Orchestrator.approve_script) -- there's nothing scene-specific to lose at this point.
+  // "Ask for a rewrite instead" sends written feedback back to the writer and starts over from a blank
+  // script (Orchestrator.reject_script clears job.script/job.scenes and loops back to SCRIPT_RUNNING).
+  return h("div",{},
+    h("div",{class:"panel"},
+      h("b",{},"Script"),
+      h("div",{class:"sub"},"Edit the narration below if you want to change anything, then approve -- this becomes the script "+
+        "everything downstream (keywords, sourcing, scenes) works from."),
+      h("div",{id:"scriptDraftWords",class:"meta",style:"margin:4px 0"}, scriptWordsLineFor(scriptDraft)),
+      h("textarea",{class:"note",style:"min-height:280px;width:100%;font-family:inherit",
+          oninput:e=>{scriptDraft=e.target.value; updateScriptDraftWords();}}, scriptDraft)),
+    h("div",{class:"panel"},
+      h("div",{class:"bar"},
+        h("button",{class:"primary",disabled:busy,onclick:approveScript},"Approve script")),
+      h("div",{class:"bar",style:"margin-top:10px"},
+        h("input",{type:"text",id:"scriptfb",placeholder:"what should change? (e.g. wrong facts, wrong tone, too long/short)",size:50}),
+        h("button",{disabled:busy,onclick:rejectScript},"Ask for a rewrite instead"))));
+}
+async function approveScript(){
+  busy=true; error=""; render();
+  try{
+    const reviewer=(store.get("reviewer")||"").trim();
+    await api("POST",`/jobs/${JOB}/script/approve`,{reviewer, edited_script: scriptDraft||""});
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
+}
+async function rejectScript(){
+  const fb = document.getElementById("scriptfb").value;
+  if (!fb.trim()){ error="Say what should change before asking for a rewrite."; render(); return; }
+  busy=true; error=""; render();
+  try{
+    await api("POST",`/jobs/${JOB}/script/reject`,{feedback:fb, reviewer:(store.get("reviewer")||"").trim()});
+    busy=false; await load();
+  }catch(e){ busy=false; error=String(e.message||e); render(); }
 }
 
 /* -------------------------------------------------------------- gate 3: scenes/script */
@@ -1132,7 +1234,7 @@ function visualCoveragePanel(){
   };
   return h("div",{class:"panel", style:"border-color:var(--med)"},
     h("b",{},`Visual coverage: ${coverage.unresolved.length + mismatches.length} need(s) not resolved yet`),
-    h("div",{class:"sub"},"These came from the visual checklist (Gate 1's approved keywords, or added by hand). "+
+    h("div",{class:"sub"},"These came from the visual checklist (approved keywords from \"Gate 1½\", or added by hand). "+
       "Nothing renders past them silently -- either resolve each one below, or approve with an explicit override "+
       "note explaining why it's OK to go ahead without them."),
     coverage.unresolved.map(item => itemRow(item, null)),
@@ -1293,6 +1395,36 @@ function sceneCard(s, i, n){
         oninput:e=>{sceneNotes[s.id]=e.target.value;}}, sceneNotes[s.id]!=null?sceneNotes[s.id]:(s.note||"")));
 }
 
+function suggestKeywordsPanel(){
+  // Gate 2's "Suggest more search terms" (requested directly: an alternative to typing terms into "Search
+  // again" by hand or running a separate outside prompt -- reuses the SAME LLM keyword-writing stage Gate
+  // 1 uses, so a suggestion carries a real group, correctly routed once approved, unlike "Search again"'s
+  // ungrouped extra_queries). Only offered for jobs using the "llm" keyword provider (job.providers.keywords)
+  // -- "manual" has no model behind it to ask.
+  const isLlm = (job.providers && job.providers.keywords) === "llm";
+  const reviewing = (suggestIds||[]).map(id => (job.keywords||[]).find(k => k.id === id)).filter(Boolean);
+  return h("div",{style:"margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"},
+    h("div",{class:"bar"},
+      h("input",{type:"text",value:suggestFeedback,size:44,placeholder:"what's missing? (optional, e.g. a specific person's name)",
+        disabled:!isLlm, oninput:e=>{suggestFeedback=e.target.value;}}),
+      h("button",{disabled:busy||suggestBusy||!isLlm,
+        title: isLlm ? "Asks the same LLM that wrote your first batch of keywords for more, tagged with their own group"
+                     : "This job's keyword provider isn't \"llm\" -- there's no model to ask for more",
+        onclick:suggestKeywords}, suggestBusy?"Asking...":"Suggest more search terms")),
+    suggestError?h("div",{class:"err"}, suggestError):null,
+    reviewing.length ? h("div",{style:"margin-top:8px"},
+      h("div",{class:"sub"}, `${reviewing.length} suggestion(s) -- check the ones worth searching, then Add. Nothing is `+
+        `searched until you do; "Next batch" below will pick up whatever you add next.`),
+      h("div",{style:"display:flex;flex-direction:column;gap:6px;margin-top:6px"},
+        reviewing.map(k => h("label",{style:"display:flex;gap:8px;align-items:baseline"},
+          h("input",{type:"checkbox",checked:!!suggestChecked[k.id],
+            onchange:e=>{suggestChecked[k.id]=e.target.checked;render();}}),
+          h("span",{}, h("b",{},k.term), " ", h("span",{class:"chip"}, GROUP_LABELS[k.group]||k.group),
+            k.meta&&k.meta.why ? h("span",{class:"meta"}, " -- "+k.meta.why) : null)))),
+      h("div",{class:"bar",style:"margin-top:8px"},
+        h("button",{class:"primary",disabled:busy||suggestBusy,onclick:addSuggested},"Add checked"),
+        h("button",{disabled:busy||suggestBusy,onclick:dismissSuggestions},"Dismiss"))) : null);
+}
 function stockAndDeferPanel(){
   // "Stop go limits" + "pull stock photos first, score relevance later" (both requested directly, same
   // message). stockUsed counts against STOCK_SOURCES regardless of whether a limit is even set, so the
@@ -1349,7 +1481,8 @@ function folderFilesPanel(){
 }
 function render(){
   if(!job) return;
-  const c = counts(), reviewing = job.state==="assets_review", inScenes = job.state==="scenes_review";
+  const c = counts(), reviewing = job.state==="assets_review", inScenes = job.state==="scenes_review", inScript = job.state==="script_review";
+  const hideGrid = inScenes || inScript;
   const sources = [...new Set(job.assets.map(a=>a.source))];
   const opt=(id,cur,vals)=>h("select",{id,onchange:e=>{ if(id==="src")srcFilter=e.target.value; if(id==="kind")kindFilter=e.target.value; if(id==="sort")sortBy=e.target.value; render();}},
       vals.map(([v,t])=>h("option",{value:v,selected:v===cur},t)));
@@ -1361,21 +1494,22 @@ function render(){
         job.script_style ? [" · script style: ", h("span",{class:"chip"}, SCRIPT_STYLE_LABELS[job.script_style]||job.script_style)] : null, " · ",
         h("a",{href:"/review"},"all projects"), " · ", h("a",{href:`/jobs/${JOB}/decisions?format=md`,target:"_blank"},"decision log"))),
     h("div",{class:"bar"},
-      inScenes ? h("span",{class:"tally"}, `${job.scenes.length} scene(s)`) : h("span",{class:"tally"}, `${c.use} use · ${c.rej} reject · ${c.und} undecided · ${c.hidden} hidden`),
+      inScript ? h("span",{class:"tally"}, scriptWordsLineFor(scriptDraft)) :
+        (inScenes ? h("span",{class:"tally"}, `${job.scenes.length} scene(s)`) : h("span",{class:"tally"}, `${c.use} use · ${c.rej} reject · ${c.und} undecided · ${c.hidden} hidden`)),
       h("label",{}, "Your name ", h("input",{type:"text",value:store.get("reviewer")||"",placeholder:"recorded in the log",oninput:e=>store.set("reviewer",e.target.value)})),
-      inScenes ? null : h("label",{}, "Min score ", h("input",{type:"range",min:0,max:100,step:5,value:Math.round(minScore*100),
+      hideGrid ? null : h("label",{}, "Min score ", h("input",{type:"range",min:0,max:100,step:5,value:Math.round(minScore*100),
           oninput:e=>{minScore=e.target.value/100;store.set("minScore:"+JOB,String(minScore));render();}}), h("b",{}, pct(minScore))),
-      inScenes ? null : h("label",{}, h("input",{type:"checkbox",checked:showHidden,onchange:e=>{showHidden=e.target.checked;render();}}), "show below threshold"),
-      inScenes ? null : h("label",{}, "Source ", opt("src",srcFilter,[["","all"],...sources.map(s=>[s,s])])),
-      inScenes ? null : h("label",{}, "Type ", opt("kind",kindFilter,[["","all"],["image","photos"],["video","videos"]])),
-      inScenes ? null : h("label",{}, "Sort ", opt("sort",sortBy,[["risk","risk (low first), best score first within each"],["score","best score"],["source","source"]])),
-      inScenes ? null : h("button",{onclick:()=>bulk("use")},"Use all shown (not high-risk)"),
-      inScenes ? null : h("button",{onclick:()=>bulk("rej")},"Mark all shown undecided irrelevant"),
-      inScenes ? null : h("button",{id:"submit",class:"primary",disabled:true,onclick:submit},"...")));
+      hideGrid ? null : h("label",{}, h("input",{type:"checkbox",checked:showHidden,onchange:e=>{showHidden=e.target.checked;render();}}), "show below threshold"),
+      hideGrid ? null : h("label",{}, "Source ", opt("src",srcFilter,[["","all"],...sources.map(s=>[s,s])])),
+      hideGrid ? null : h("label",{}, "Type ", opt("kind",kindFilter,[["","all"],["image","photos"],["video","videos"]])),
+      hideGrid ? null : h("label",{}, "Sort ", opt("sort",sortBy,[["risk","risk (low first), best score first within each"],["score","best score"],["source","source"]])),
+      hideGrid ? null : h("button",{onclick:()=>bulk("use")},"Use all shown (not high-risk)"),
+      hideGrid ? null : h("button",{onclick:()=>bulk("rej")},"Mark all shown undecided irrelevant"),
+      hideGrid ? null : h("button",{id:"submit",class:"primary",disabled:true,onclick:submit},"...")));
   const body = h("main",{},
-    (!reviewing && !inScenes)?h("div",{class:"banner"},`This project is in state "${job.state}", not asset or scene review. This page will refresh when it reaches one.`):null,
+    (!reviewing && !inScenes && !inScript)?h("div",{class:"banner"},`This project is in state "${job.state}", not script, asset, or scene review. This page will refresh when it reaches one.`):null,
     warn, error?h("div",{class:"err"},error):null,
-    inScenes ? sceneReviewBody() : assetReviewBody(xs),
+    inScript ? scriptReviewBody() : (inScenes ? sceneReviewBody() : assetReviewBody(xs)),
     h("div",{class:"panel"}, h("details",{open:logOpen,ontoggle:e=>{logOpen=e.target.open; if(logOpen) loadLog();}},
       h("summary",{},"Activity log (what the pipeline did, step by step)"),
       h("div",{class:"bar"}, h("label",{},"Detail ", h("select",{onchange:e=>{logLevel=e.target.value;loadLog();}},
@@ -1395,6 +1529,7 @@ function render(){
         h("input",{type:"text",id:"xq",placeholder:"e.g. whitechapel 1888, victorian london street",size:44}),
         h("input",{type:"text",id:"fb",placeholder:"what was wrong with these?",size:34}),
         h("button",{disabled:busy,onclick:searchAgain},"Search again")),
+      suggestKeywordsPanel(),
       stockAndDeferPanel(),
       h("div",{style:"margin-top:12px;padding-top:12px;border-top:1px solid var(--line)"},
         h("div",{class:"sub"},"Or add links -- a YouTube/TikTok/X/Vimeo/Instagram/news link (pulled with yt-dlp) or a direct "+
@@ -1446,7 +1581,56 @@ function setAsidePanel(){
           "look again. Click Use on any card to bring it back into the main grid."),
         h("div",{class:"grid",style:"margin-top:8px"}, xs.map(card)))));
 }
+// Groups the already-filtered/sorted `xs` (visible()'s output) into one section per approved keyword,
+// requested directly: "different keywords should have a different section, if not enough is pulled up, a
+// next section should definitely be easy to do." Every approved keyword gets a section even if nothing in
+// `xs` matched it -- an empty section next to a full one is exactly the signal that keyword needs another
+// round -- and any term that produced items but isn't (or is no longer) an approved keyword (custom "Search
+// again" terms, or old rounds before an approval changed) still gets its own trailing section rather than
+// silently vanishing. Sort order within each section is whatever visible() already chose (Map insertion
+// preserves first-seen order from `xs`); only which section an item lands in changes here.
+function keywordSections(xs){
+  const byTerm = new Map();
+  xs.forEach(a=>{
+    const key = a.query || "(no search term recorded)";
+    if (!byTerm.has(key)) byTerm.set(key, []);
+    byTerm.get(key).push(a);
+  });
+  // job.source_notes (pipeline/stages/sourcing.py) has one entry per query actually sent to a source --
+  // success or failure -- so it's the only place that can tell "zero results" apart from "never searched".
+  const notesByTerm = new Map();
+  (job.source_notes||[]).forEach(n=>{
+    if (!n.query) return;   // source-level notes (credentials/rate-limit/etc.) carry no query
+    if (!notesByTerm.has(n.query)) notesByTerm.set(n.query, []);
+    notesByTerm.get(n.query).push(n);
+  });
+  const sections = [], seen = new Set();
+  (job.keywords||[]).filter(k=>k.approved).forEach(k=>{
+    seen.add(k.term);
+    sections.push({term:k.term, group:k.group, items:byTerm.get(k.term)||[], notes:notesByTerm.get(k.term)||[]});
+  });
+  byTerm.forEach((items,term)=>{
+    if (seen.has(term)) return;
+    sections.push({term, group:null, items, notes:notesByTerm.get(term)||[]});
+  });
+  return sections;
+}
+// One line per section header: what searching that term actually turned up, per source, or "not searched
+// yet" so an unsearched approved keyword doesn't read the same as one that came back empty.
+function sectionSummary(notes){
+  if (!notes.length) return "not searched yet";
+  const bySource = new Map();
+  notes.forEach(n=>{
+    if (!bySource.has(n.source)) bySource.set(n.source, {found:0, kept:0, errors:0});
+    const c = bySource.get(n.source);
+    if (n.error || n.outcome==="parse_error" || n.outcome==="unknown_error") c.errors++;
+    else { c.found += n.found||0; c.kept += n.kept||0; }
+  });
+  return [...bySource.entries()].map(([src,c]) =>
+    c.errors && !c.found && !c.kept ? `${src}: search failed` : `${src}: ${c.kept} kept of ${c.found} found`).join(" · ");
+}
 function assetReviewBody(xs){
+  const sections = keywordSections(xs);
   return h("div",{},
     h("div",{class:"sub",style:"margin-bottom:10px"},
       `Showing ${xs.length} of ${job.assets.length}. Score = share of a keyword's words found in the item's own title/description/tags (docs/SCORING.md). `+
@@ -1456,7 +1640,15 @@ function assetReviewBody(xs){
     findMorePanel(),
     manualLinksPanel(),
     setAsidePanel(),
-    h("div",{class:"grid"}, xs.map(card)));
+    sections.map(sec => h("div",{class:"ksec"},
+      h("div",{class:"khead"},
+        h("div",{}, h("b",{}, sec.term||"(unlabeled)"),
+          sec.group ? h("span",{class:"chip",style:"margin-left:8px"}, GROUP_LABELS[sec.group]||sec.group) : null),
+        h("span",{class:"sub"}, `${sec.items.length} shown -- ${sectionSummary(sec.notes)}`)),
+      sec.items.length ? h("div",{class:"grid"}, sec.items.map(card))
+        : h("div",{class:"kempty"}, sec.notes.length
+            ? "Nothing from this keyword is showing right now (filtered out above, or nothing was kept)."
+            : "Not searched yet -- see \"Next batch\" below to search it."))));
 }
 function sceneReviewBody(){
   // Gate 3: the full script (live, from current scene narration -- not the frozen job.script) plus one

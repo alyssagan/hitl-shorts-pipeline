@@ -9,15 +9,48 @@
                                         (requested directly, 4 niche-tuned scriptwriter personas): one of
                                         "true_crime_mystery", "stem_science", "dtc_marketing", "math_cs" --
                                         optional, replaces the scriptwriter's own source-grounded prompt with
-                                        one of these voices at SCENES_RUNNING (see
-                                        pipeline/stages/scenes/script_styles.py). Independent of niche -- omit
-                                        either or both for a job unaffected by them.
-  POST /jobs/{id}/start                                          -> keywords_running
-  POST /jobs/{id}/keywords/review     {approved_ids, extra_terms?, reviewer}   GATE 1 approve
-  POST /jobs/{id}/keywords/reject     {feedback, reviewer}                     GATE 1 re-run
+                                        one of these voices at SCRIPT_RUNNING (Gate 1, since the 2026-09-25
+                                        reorder -- see pipeline/stages/scenes/script_styles.py). Independent
+                                        of niche -- omit either or both for a job unaffected by them.
+  POST /jobs/{id}/start                                          -> script_running
+  POST /jobs/{id}/script/approve     {reviewer, edited_script?}   GATE 1 approve (edited_script, if given and
+                                        different from job.script, replaces the narration and re-splits it
+                                        into fresh scenes before approving)
+  POST /jobs/{id}/script/reject      {feedback, reviewer}         GATE 1 re-run (clears job.script/job.scenes,
+                                        loops back to SCRIPT_RUNNING with the feedback appended)
+  POST /jobs/{id}/keywords/review     {approved_ids, extra_terms?, reviewer}   GATE 1½ approve -- only ever
+                                        needed if this job set providers.options.auto_approve_keywords: false;
+                                        otherwise keywords are approved automatically right after
+                                        KEYWORDS_RUNNING finishes (docs/PIPELINE_STAGES.md) and this state is
+                                        usually never visibly reached
+  POST /jobs/{id}/keywords/reject     {feedback, reviewer}                     GATE 1½ re-run (same caveat)
+  POST /jobs/{id}/keywords/suggest    {feedback?, count?, reviewer}   GATE 2 "Suggest more search terms"
+                                        (requested directly): re-runs the SAME LLM keyword-writing stage
+                                        Gate 1½ uses (config/query_groups.toml has the shared group
+                                        vocabulary), on demand, mid asset review -- new group-tagged
+                                        candidates are appended to job.keywords UNAPPROVED, nothing is
+                                        searched until POST .../keywords/approve-suggested below approves
+                                        some of them. `feedback` steers what's missing this round (e.g. "a
+                                        specific person's name"); `count` overrides how many to ask for
+                                        (defaults to config/pipeline.toml [keywords] count). Only available
+                                        during asset review, and only for jobs using the `llm` keyword
+                                        provider -- `manual` has no model to ask. Response is the normal job
+                                        JSON plus a top-level `suggested_ids` array naming which of
+                                        job.keywords this call just added.
+  POST /jobs/{id}/keywords/approve-suggested   {keyword_ids, reviewer}   approves specific keyword ids (from
+                                        keywords/suggest's `suggested_ids` above) WITHOUT Gate 1½'s state
+                                        transition -- the job stays in asset review. The next "Next batch"/
+                                        "Search again" round then searches them like any other approved
+                                        keyword, routed by their own group.
   POST /jobs/{id}/assets/review       {decisions:{asset_id:{decision,note,label?,label_reason?,label_note?,
                                         duplicate_of_asset_id?}}, reviewer}    GATE 2 per asset
-  POST /jobs/{id}/assets/approve      {reviewer, note?}                        GATE 2 done -> scenes
+  POST /jobs/{id}/assets/approve      {reviewer, note?}                        GATE 2 done -> scenes, UNLESS a
+                                        scene has no approved asset matching its own search query yet and has
+                                        an untried, broader shot-list query left (Keyword.alternatives) -- then
+                                        this instead auto-activates it and loops back to sourcing/vetting/GATE 2
+                                        again, same as /assets/reject's "search again" (docs/ROADMAP.md
+                                        "two-pass hybrid"), scoped to just that query. Your asset decisions are
+                                        untouched either way.
   POST /jobs/{id}/assets/reject       {feedback, extra_queries?, max_queries?, per_query?, videos_per_query?,
                                         extra_urls_text?, folder_files?, stock_limit?, defer_relevance?, reviewer}
                                         GATE 2 search again / next batch (max_queries alone, no feedback, just
@@ -249,6 +282,15 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         d = await body(r)
         return await orch.start(r.path_params["id"], reviewer=d.get("reviewer", ""))
 
+    async def script_approve(r: Request):
+        d = await body(r)
+        return await orch.approve_script(r.path_params["id"], reviewer=d.get("reviewer", ""),
+                                          edited_script=d.get("edited_script", ""))
+
+    async def script_reject(r: Request):
+        d = await body(r)
+        return await orch.reject_script(r.path_params["id"], d.get("feedback", ""), reviewer=d.get("reviewer", ""))
+
     async def kw_review(r: Request):
         d = await body(r)
         return await orch.review_keywords(r.path_params["id"], d.get("approved_ids", []), d.get("extra_terms"),
@@ -257,6 +299,24 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
     async def kw_reject(r: Request):
         d = await body(r)
         return await orch.reject_keywords(r.path_params["id"], d.get("feedback", ""), reviewer=d.get("reviewer", ""))
+
+    async def kw_suggest(r: Request):
+        """Gate 2's "Suggest more search terms". Returns the normal job JSON plus `suggested_ids`, so the
+        review page can tell which entries in the response's job.keywords are this call's new, unapproved
+        candidates -- distinct from any older unapproved leftovers already sitting in job.keywords."""
+        d = await body(r)
+        raw_count = d.get("count")
+        count = int(raw_count) if raw_count not in (None, "") else None
+        job, new_kws = await orch.suggest_keywords(r.path_params["id"], d.get("feedback", ""), count,
+                                                    reviewer=d.get("reviewer", ""))
+        data = _job_json(job)
+        data["suggested_ids"] = [k.id for k in new_kws]
+        return JSONResponse(data)
+
+    async def kw_approve_suggested(r: Request):
+        d = await body(r)
+        return await orch.approve_suggested_keywords(r.path_params["id"], d.get("keyword_ids", []),
+                                                      reviewer=d.get("reviewer", ""))
 
     async def scenes_edit(r: Request):
         d = await body(r)
@@ -702,8 +762,12 @@ def create_app(orch: Orchestrator | None = None, settings: dict[str, Any] | None
         Route("/jobs", wrap(create_job), methods=["POST"]),
         Route(P, wrap(get_job), methods=["GET"]),
         Route(f"{P}/start", wrap(start), methods=["POST"]),
+        Route(f"{P}/script/approve", wrap(script_approve), methods=["POST"]),
+        Route(f"{P}/script/reject", wrap(script_reject), methods=["POST"]),
         Route(f"{P}/keywords/review", wrap(kw_review), methods=["POST"]),
         Route(f"{P}/keywords/reject", wrap(kw_reject), methods=["POST"]),
+        Route(f"{P}/keywords/suggest", wrap(kw_suggest), methods=["POST"]),
+        Route(f"{P}/keywords/approve-suggested", wrap(kw_approve_suggested), methods=["POST"]),
         Route(f"{P}/assets/review", wrap(assets_review), methods=["POST"]),
         Route(f"{P}/assets/approve", wrap(assets_approve), methods=["POST"]),
         Route(f"{P}/assets/reject", wrap(assets_reject), methods=["POST"]),

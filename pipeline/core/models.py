@@ -24,13 +24,21 @@ def slugify(text: str, max_len: int = 40) -> str:
 
 
 class JobState(str, Enum):
+    """Reordered 2026-09-25 (docs/PIPELINE_STAGES.md): the script is now written FIRST, grounded in
+    research text pulled straight from the subject -- keywords are then derived FROM that script, one
+    search term per scene, instead of the other way around. KEYWORDS_REVIEW is still a real state (so
+    it stays trivial to require an explicit human decision here later) but is auto-passed-through by
+    default, folded into Gate 2 instead of its own screen -- see Orchestrator._auto_approve_keywords
+    and job.providers.options["auto_approve_keywords"]."""
     CREATED = "created"
-    KEYWORDS_RUNNING = "keywords_running"   # machine: keyword / SEO / ranking analysis
-    KEYWORDS_REVIEW = "keywords_review"     # HUMAN GATE 1: approve keywords
+    SCRIPT_RUNNING = "script_running"       # machine: pulls research text, writes the narration + splits into scenes
+    SCRIPT_REVIEW = "script_review"         # HUMAN GATE 1: approve (or edit/reject) the narration
+    KEYWORDS_RUNNING = "keywords_running"   # machine: one search term per scene, derived from that scene's narration
+    KEYWORDS_REVIEW = "keywords_review"     # auto-approved by default (folded into Gate 2); a real gate if you turn that off
     SOURCING_RUNNING = "sourcing_running"   # machine: pull assets from Wikipedia, Pexels, ...
     VETTING_RUNNING = "vetting_running"     # machine: license + content risk check, with reasons
     ASSETS_REVIEW = "assets_review"         # HUMAN GATE 2: approve each asset
-    SCENES_RUNNING = "scenes_running"       # machine: script + audio + scenes
+    SCENES_RUNNING = "scenes_running"       # machine: match a clip (+ audio) to each already-written scene
     SCENES_REVIEW = "scenes_review"         # HUMAN GATE 3: approve scenes
     RENDERING = "rendering"                 # machine: final render
     COMPLETED = "completed"
@@ -39,10 +47,10 @@ class JobState(str, Enum):
 
 
 RUNNING_STATES = {
-    JobState.KEYWORDS_RUNNING, JobState.SOURCING_RUNNING, JobState.VETTING_RUNNING,
+    JobState.SCRIPT_RUNNING, JobState.KEYWORDS_RUNNING, JobState.SOURCING_RUNNING, JobState.VETTING_RUNNING,
     JobState.SCENES_RUNNING, JobState.RENDERING,
 }
-REVIEW_STATES = {JobState.KEYWORDS_REVIEW, JobState.ASSETS_REVIEW, JobState.SCENES_REVIEW}
+REVIEW_STATES = {JobState.SCRIPT_REVIEW, JobState.KEYWORDS_REVIEW, JobState.ASSETS_REVIEW, JobState.SCENES_REVIEW}
 TERMINAL_STATES = {JobState.COMPLETED, JobState.CANCELLED}
 
 
@@ -77,7 +85,14 @@ class Keyword(BaseModel):
     # an asset found by it gets stamped with -- it is the single field the new sourcing routing reads.
     group: QueryGroup = "historical"
     visual_needed: str = ""                 # the actual visual this term is trying to find, in plain words
-    scene_ref: str = ""                     # which planned scene/beat this supports, if known
+    scene_ref: str = ""                     # which planned scene/beat this supports, if known (free text, never
+                                             # parsed by anything -- see scene_index below for the real link)
+    scene_index: int | None = None          # NEW 2026-09-25: the actual Scene.index this term was generated
+                                             # for, when it came from LLMKeywordStage.run_for_scenes() (the new
+                                             # keywords_running, which now runs AFTER the script exists -- docs/
+                                             # PIPELINE_STAGES.md). None for a subject-wide term (Gate 2's
+                                             # "Suggest more search terms", or the `manual` provider's fallback
+                                             # round-robin assignment, Orchestrator._assign_keywords_to_scenes).
     entity: str = ""                        # target person/place/object/event, if this is entity-specific
     aliases: list[str] = Field(default_factory=list)     # verified alternate names/spellings for `entity`
     dates: list[str] = Field(default_factory=list)
@@ -406,9 +421,16 @@ class Job(BaseModel):
     social_metadata: dict[str, Any] = Field(default_factory=dict)
 
     # Human feedback given when rejecting a gate; fed into the re-run.
+    script_feedback: list[str] = Field(default_factory=list)   # NEW 2026-09-25, Gate 1 (script_review) rejections --
+                                                                 # read by ScriptWriter (pipeline/stages/scenes/writer.py)
     keyword_feedback: list[str] = Field(default_factory=list)
     asset_feedback: list[str] = Field(default_factory=list)
-    scene_feedback: list[str] = Field(default_factory=list)
+    scene_feedback: list[str] = Field(default_factory=list)   # Gate 3 (scenes_review) rejections. Since the reorder
+                                                                 # (docs/PIPELINE_STAGES.md) this no longer feeds a
+                                                                 # script rewrite -- the script is already fixed by
+                                                                 # then -- it just re-runs clip/audio matching. Kept
+                                                                 # for the "reject scenes" API/UI to keep working;
+                                                                 # not read by anything yet.
 
     # Case ground truth (#6) -- edited only through Orchestrator's case-reference/visual-checklist API,
     # never written by sourcing/vetting/scoring. Available and editable at any point in the job's life,

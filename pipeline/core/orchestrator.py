@@ -41,8 +41,12 @@ from ..vetting.tfidf_relevance import VERSION as TFIDF_VERSION, tfidf_scores
 from ..vetting.llm_relevance import VERSION as LLM_SEMANTIC_VERSION
 from ..vetting.method_registry import METHOD_VERSIONS
 from ..vetting import niche as niche_eval
+from ..vetting.report import write_vetting_report
 from ..niches import NICHES
 from ..stages.scenes.script_styles import SCRIPT_STYLES
+from ..stages.scenes.report import write_script_md
+from ..stages.scenes.mpt import split_scenes
+from ..stages.scenes.clips import scene_has_shot_list_coverage
 
 VETTER = machine("vetting-rules", VETTING_VERSION)
 MATCHER = machine("clip-matcher", "1")
@@ -94,7 +98,7 @@ VISUAL_COVERAGE_REMEDIATION_OPTIONS = [
 RELEVANCE_FORMULA_BY_METHOD = {v: d.formula_or_prompt for v, d in METHOD_VERSIONS.items()}
 
 STAGE_CATEGORY = {
-    JobState.KEYWORDS_RUNNING: "keywords", JobState.SOURCING_RUNNING: "sourcing",
+    JobState.SCRIPT_RUNNING: "script", JobState.KEYWORDS_RUNNING: "keywords", JobState.SOURCING_RUNNING: "sourcing",
     JobState.VETTING_RUNNING: "vetting", JobState.SCENES_RUNNING: "scenes",
 }  # JobState.RENDERING (and anything else) falls back to "render" -- see run_pending()
 
@@ -143,12 +147,22 @@ class Orchestrator:
                      f"{action}: {kw.get('decision', '')}", by=getattr(actor, "name", ""), area=stage,
                      what=subj.get("title") or subj.get("source") or "", why=(kw.get("reason") or "")[:160])
 
+    def _write_derived_files(self, job: Job, project_dir: Path) -> None:
+        """Every readable, regenerated-in-full project-folder file that summarizes a stage's
+        current output, in one place -- SOURCES.md/manifests (sourcing), VETTING_REPORT.md
+        (risk/relevance), SCRIPT.md (narration + scene/clip assignment). Each writer no-ops
+        (returns None, writes nothing) until that stage has actually produced something, so
+        calling all three unconditionally after every mutation is cheap and always safe."""
+        write_manifests(job, project_dir)
+        write_vetting_report(job, project_dir)
+        write_script_md(job, project_dir)
+
     async def _mutate(self, job_id: str, fn: Callable[[Job], None]) -> Job:
         async with self._locks[job_id]:
             job = self.store.load(job_id)
             fn(job)
             self.store.save(job)
-            write_manifests(job, self.store.job_dir(job_id))
+            self._write_derived_files(job, self.store.job_dir(job_id))
         if job.state in RUNNING_STATES and self.on_running:
             self.on_running(job_id)
         return job
@@ -184,7 +198,41 @@ class Orchestrator:
             self._rec(job_id, "project", "started", self._who(reviewer), decision="start")
         return await self._mutate(job_id, fn)
 
-    # ------------------------------------------------------------------ gate 1: keywords
+    # ------------------------------------------------------------------ gate 1: script (2026-09-25 reorder,
+    # docs/PIPELINE_STAGES.md -- this replaces the old Gate 1 "approve keywords"; keywords are now derived
+    # FROM the approved script instead, and auto-approved by default -- see review_keywords() below and
+    # _auto_approve_keywords())
+    async def approve_script(self, job_id: str, *, reviewer: str = "", edited_script: str = "") -> Job:
+        """`edited_script`, if given and different from job.script, replaces the narration (re-splitting
+        into fresh scenes -- any clip/audio a scene had is impossible at this point anyway, since Gate 1
+        is before sourcing) before approving. Omit it to approve the machine's draft as-is."""
+        who = self._who(reviewer, require=True)
+
+        def fn(job: Job) -> None:
+            edited = edited_script.strip()
+            if edited and edited != job.script.strip():
+                job.script = edited
+                job.scenes = [Scene(index=i, narration=t) for i, t in enumerate(split_scenes(edited))]
+            sm.apply(job, "approve_script")
+            self._rec(job.id, "script", "approved_script", who, decision="approve",
+                      reason="Narration accepted." + (" Edited before approving." if edited else ""),
+                      outputs={"scenes": len(job.scenes), "words": len(job.script.split()), "edited": bool(edited)})
+        return await self._mutate(job_id, fn)
+
+    async def reject_script(self, job_id: str, feedback: str = "", *, reviewer: str = "") -> Job:
+        def fn(job: Job) -> None:
+            if feedback.strip():
+                job.script_feedback.append(feedback.strip())
+            self._rec(job.id, "script", "rejected_script", self._who(reviewer), decision="reject",
+                      reason=feedback or "(no reason given)")
+            sm.apply(job, "reject_script", note=feedback)
+            job.script = ""
+            job.scenes = []
+        return await self._mutate(job_id, fn)
+
+    # ------------------------------------------------------------------ keywords (auto-approved by default,
+    # folded into gate 2 below rather than a screen of its own -- decision 2026-09-25; still a real gate,
+    # usable exactly as before, if job.providers.options["auto_approve_keywords"] is set to False)
     async def review_keywords(
         self,
         job_id: str,
@@ -208,6 +256,7 @@ class Orchestrator:
                 if term:
                     job.keywords.append(Keyword(term=term, source="human", approved=True))
                     added.append(term)
+            self._apply_keyword_terms_to_scenes(job)
             sm.apply(job, "approve_keywords")
             who = self._who(reviewer)
             self._rec(job.id, "keywords", "approved_keywords", who, decision="approve",
@@ -219,8 +268,9 @@ class Orchestrator:
         return await self._mutate(job_id, fn)
 
     def _write_keywords_approved_file(self, job: Job, *, reviewer: str, note: str, added: list[str]) -> None:
-        """keywords_approved.json in the project folder: the final, human-approved list once Gate 1 closes --
-        what sourcing actually searches with (job.approved_keywords). Companion to keywords_proposed.json
+        """keywords_approved.json in the project folder: the final approved list (human, or auto -- Gate 1½,
+        see _auto_approve_keywords) once keyword approval closes -- what sourcing actually searches with
+        (job.approved_keywords). Companion to keywords_proposed.json
         above; see docs/RUNNING.md "Keyword files, always".
 
         Also copies that same list into `self.keywords_library_dir/<subject slug>/<job id>.json` when that's
@@ -233,6 +283,12 @@ class Orchestrator:
             "job_id": job.id, "subject": job.subject, "approved_at": _now(), "reviewer": reviewer, "note": note,
             "keywords": [k.term for k in job.approved_keywords], "added_by_human": added,
             "rejected_by_omission": [k.term for k in job.keywords if not k.approved],
+            # Shot-list fallbacks (docs/ROADMAP.md backlog item F): only present for a keyword that has
+            # any (a `manual`/reused-library term never does -- see below), so this file's "keywords" list
+            # stays exactly what it always was for anything that reads just that field (e.g. a later job's
+            # library reuse, scripts/poc.py's choose_library_set -- reused terms are re-approved fresh next
+            # time and never carry their old alternatives forward).
+            "shot_lists": {k.term: k.alternatives for k in job.approved_keywords if k.alternatives},
         }
         (d / "keywords_approved.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         if self.keywords_library_dir is not None:
@@ -510,10 +566,73 @@ class Orchestrator:
         job = self.get(job_id)
         return {"niche": job.niche, "evaluations": niche_eval.evaluate_job(job)}
 
+    def _next_fallback_query(self, job: Job, scene: Scene) -> str | None:
+        """The next untried, broader shot-list query for `scene`'s own keyword (docs/ROADMAP.md
+        "two-pass hybrid"), or None if there is no scene-specific keyword here, or every one of its
+        alternatives has already been activated in an earlier round -- job.providers.options
+        ["fallback_queries_tried"] is an append-only record of every fallback query ever activated for
+        this job, so a scene that's exhausted its whole shot list just falls through to
+        AssetClipSource's existing generic/reuse fallback instead of bouncing Gate 2 forever."""
+        tried = set(job.providers.options.get("fallback_queries_tried", []))
+        for k in job.approved_keywords:
+            if k.scene_index == scene.index:
+                for alt in k.alternatives:
+                    if alt not in tried:
+                        return alt
+        return None
+
+    def _scenes_needing_fallback(self, job: Job) -> list[tuple[Scene, str]]:
+        """Which scenes would fall through to AssetClipSource's generic/reuse fallback (no approved,
+        usable asset matches ANY of the scene's own shot-list queries yet) AND still have an untried,
+        broader query left to search -- paired with that query. Empty for a job with no asset sources
+        (nothing to search) or no scenes yet. This is Pass 2's trigger, checked right when a human tries
+        to close Gate 2 (approve_assets, below) -- see docs/ROADMAP.md "two-pass hybrid"."""
+        if not job.uses_sources or not job.scenes:
+            return []
+        out = []
+        for s in job.scenes:
+            if scene_has_shot_list_coverage(s, job.assets):
+                continue
+            nxt = self._next_fallback_query(job, s)
+            if nxt:
+                out.append((s, nxt))
+        return out
+
     async def approve_assets(self, job_id: str, *, reviewer: str = "", note: str = "") -> Job:
+        """Closes Gate 2 -- UNLESS some scene has no approved asset matching any of its own shot-list
+        queries yet and still has an untried, broader one to try (docs/ROADMAP.md "two-pass hybrid"):
+        in that case this instead activates just those scenes' next fallback query and sends the job
+        back to SOURCING_RUNNING for one more round -- the exact same transition/mechanism a human's own
+        "Search again" (reject_assets, below) already uses, just triggered automatically. The existing
+        approve/reject decisions on every current asset are untouched; the round comes back to
+        ASSETS_REVIEW with the new candidates pending, same as any other "search again" round, so a
+        human always still reviews them before Gate 3 can use them -- Pass 2 never auto-approves
+        anything on its own."""
         actor = self._who(reviewer, require=True)
 
         def fn(job: Job) -> None:
+            # Same guard "approve_assets" itself enforces (pipeline/core/state_machine.py) -- checked here
+            # too, explicitly, so it still applies even when the gaps branch below redirects to
+            # "reject_assets" instead of ever calling sm.apply(job, "approve_assets").
+            pending = [a for a in job.assets if a.status == "pending"]
+            if pending:
+                raise sm.TransitionError(f"{len(pending)} asset(s) still need a decision (approve or reject each one)")
+            if not job.approved_assets:
+                raise sm.TransitionError("approve at least one asset before continuing")
+            gaps = self._scenes_needing_fallback(job)
+            if gaps:
+                new_terms = [q for _, q in gaps]
+                job.providers.options["fallback_only_queries"] = new_terms
+                job.providers.options["fallback_queries_tried"] = list(dict.fromkeys(
+                    job.providers.options.get("fallback_queries_tried", []) + new_terms))
+                sm.apply(job, "reject_assets")
+                self._rec(job.id, "assets", "auto_fallback_sourcing", machine("orchestrator"), decision="reject",
+                          reason=f"{len(gaps)} scene(s) have no approved asset matching their own search query "
+                                 f"yet -- automatically searching a broader fallback query for just those "
+                                 f"scenes before asking you to review assets again (docs/ROADMAP.md "
+                                 f"\"two-pass hybrid\"). Your existing approve/reject decisions are unchanged.",
+                          subject={"scenes": [s.index for s, _ in gaps]}, outputs={"activated_queries": new_terms})
+                return
             sm.apply(job, "approve_assets")
             approved, rejected = job.approved_assets, [a for a in job.assets if a.status == "rejected"]
             self._rec(job.id, "assets", "approved_asset_pool", actor, decision="approve",
@@ -611,6 +730,76 @@ class Orchestrator:
                                "videos_per_query": videos_per_query, "extra_urls": [e["url"] for e in new_urls] or None,
                                "folder_files": [e["path"] for e in new_files] or None,
                                "stock_limit": stock_limit, "defer_relevance": defer_relevance})
+        return await self._mutate(job_id, fn)
+
+    async def suggest_keywords(self, job_id: str, feedback: str = "", count: int | None = None, *,
+                                reviewer: str = "") -> tuple[Job, list[Keyword]]:
+        """Gate 2's "Suggest more search terms": re-runs the SAME LLM keyword-writing stage the auto-approved
+        keyword step ("Gate 1½", between script and asset review) uses (config/query_groups.toml has the
+        group vocabulary both share, pipeline/stages/keywords/llm.py), on demand, mid asset review --
+        without reopening Gate 1½ or touching anything already approved or already searched. Unlike "Search
+        again"'s typed extra_queries (reject_assets above: no group of their own, so
+        pipeline/stages/sourcing.py's routing sends them to every configured source regardless of fit),
+        these come back with the model's own research/case/historical/stock classification, same as any
+        Gate-1½ keyword.
+
+        Appends the result to job.keywords as new, UNAPPROVED candidates -- nothing is searched until a
+        human approves some of them (approve_suggested_keywords below), same "propose, then a human
+        decides" shape as Gate 1½. `already_covered` is every term already in job.keywords at call time
+        (approved or not), so the model doesn't repeat a phrase already searched or already sitting
+        unreviewed from an earlier round.
+
+        Only available for jobs using the `llm` keyword provider (job.providers.keywords) -- `manual` has
+        no model to ask for more, and would just return the same subject-derived seeds every time."""
+        job = self.get(job_id)
+        if job.state is not JobState.ASSETS_REVIEW:
+            raise ValueError(f"keyword suggestions are only available during asset review (job is currently '{job.state.value}')")
+        if job.providers.keywords != "llm":
+            raise ValueError(f"keyword suggestions need the 'llm' keyword provider (this job uses '{job.providers.keywords}')")
+        stage = self.registry.keyword_stage(job.providers.keywords)
+        if count is not None:
+            stage.count = max(1, int(count))
+        ctx = StageContext(assets_dir=self.store.assets_dir(job_id), settings=self.settings, project_dir=self.store.job_dir(job_id))
+        already_covered = [k.term for k in job.keywords]
+        new_kws = await stage.run(job, ctx, already_covered=already_covered, extra_feedback=feedback)
+        trace = getattr(stage, "last_trace", {})
+
+        def fn(j: Job) -> None:
+            if j.state is not JobState.ASSETS_REVIEW:
+                raise ValueError(f"keyword suggestions are only available during asset review (job is currently '{j.state.value}')")
+            j.keywords.extend(new_kws)
+            self._rec(j.id, "keywords", "suggested_more_keywords", actor_from(stage, machine("keyword-stage")), decision="propose",
+                      reason=feedback or "Reviewer asked for more search term suggestions during asset review.",
+                      logic=trace,
+                      outputs={"count": len(new_kws), "keywords": [
+                          {"id": k.id, "term": k.term, "group": k.group, "why": k.meta.get("why", "")} for k in new_kws]})
+        result_job = await self._mutate(job_id, fn)
+        return result_job, new_kws
+
+    async def approve_suggested_keywords(self, job_id: str, keyword_ids: list[str], *, reviewer: str = "") -> Job:
+        """Approves specific keyword ids -- normally ones suggest_keywords() just proposed, though any
+        currently-unapproved entry in job.keywords works the same way -- WITHOUT a Gate-1½-style state
+        transition: the job stays exactly where it is (normally ASSETS_REVIEW). The next sourcing round
+        ("Next batch"/"Search again") then searches them like any other approved keyword, routed by their
+        own group same as ones approved at Gate 1½. Re-writes keywords_approved.json (same file Gate 1½
+        writes) so that on-disk snapshot stays the current full approved list, not just Gate 1½'s."""
+        who = self._who(reviewer, require=True)
+
+        def fn(job: Job) -> None:
+            ids = set(keyword_ids)
+            unknown = ids - {k.id for k in job.keywords}
+            if unknown:
+                raise ValueError(f"unknown keyword ids: {sorted(unknown)}")
+            newly = [k for k in job.keywords if k.id in ids and not k.approved]
+            for k in newly:
+                k.approved = True
+            self._rec(job.id, "keywords", "approved_more_keywords", who, decision="approve",
+                      reason="Approved keyword suggestion(s) offered during asset review.",
+                      subject={"approved": [k.term for k in newly]},
+                      outputs={"now_total_approved": len(job.approved_keywords)})
+            if newly:
+                self._write_keywords_approved_file(job, reviewer=who.name, note="Added during asset review (Gate 2 suggestion)",
+                                                    added=[k.term for k in newly])
         return await self._mutate(job_id, fn)
 
     # ------------------------------------------------------------------ gate 3: scenes
@@ -1125,11 +1314,28 @@ class Orchestrator:
             stage_category = STAGE_CATEGORY.get(state, "render")
             self._rec(job_id, stage_category, "stage_started", machine("orchestrator"), subject={"stage": state.value})
             try:
-                if state is JobState.KEYWORDS_RUNNING:
+                if state is JobState.SCRIPT_RUNNING:
+                    stage = self.registry.scene_stage(job.providers.scenes)
+                    res = await stage.write_script(job, ctx)
+                    result_job = await self._commit(job_id, state, "script_ready", lambda j: self._apply_script(j, stage, res))
+                elif state is JobState.KEYWORDS_RUNNING:
                     stage = self.registry.keyword_stage(job.providers.keywords)
-                    result = await stage.run(job, ctx)
+                    run_for_scenes = getattr(stage, "run_for_scenes", None)
+                    result = await run_for_scenes(job, ctx, job.scenes) if run_for_scenes else await stage.run(job, ctx)
+                    result = self._assign_keywords_to_scenes(job, result)
                     result_job = await self._commit(job_id, state, "keywords_ready",
                                                      lambda j: self._apply_keywords(j, stage, result))
+                    # Decision 2026-09-25: folded into Gate 2 rather than its own screen, by default --
+                    # see _auto_approve_keywords(). Flip job.providers.options["auto_approve_keywords"] to
+                    # False (per job) to require an explicit human decision here again; nothing else has
+                    # to change, the KEYWORDS_REVIEW state and review_keywords()/reject_keywords() above
+                    # still work. A deployment (or a test file wiring its own Orchestrator) can also flip
+                    # the default for every job at once via settings["keywords"]["auto_approve_keywords"] --
+                    # the per-job option, when a job actually sets it, always wins over that default.
+                    default_auto_approve = self.settings.get("keywords", {}).get("auto_approve_keywords", True)
+                    if result_job.state is JobState.KEYWORDS_REVIEW and bool(
+                            job.providers.options.get("auto_approve_keywords", default_auto_approve)):
+                        result_job = await self._auto_approve_keywords(job_id)
                 elif state is JobState.SOURCING_RUNNING:
                     stage = self.registry.sourcing_stage()
                     res = await stage.run(job, ctx)
@@ -1188,21 +1394,114 @@ class Orchestrator:
             self._running.discard(job_id)
 
     # ---- what each finished stage writes to the job and the decision log ----------
+    def _apply_script(self, job: Job, stage: Any, res: Any) -> None:
+        job.script = res.script
+        job.scenes = res.scenes
+        job.references.extend(res.references)
+        self._rec(job.id, "script", "wrote_script", actor_from(stage, ai("script-writer")), decision="propose",
+                  logic=getattr(stage, "last_trace", {}),
+                  outputs={"words": len(res.script.split()), "scenes": len(res.scenes),
+                           "grounded_on": [{"title": r.title, "url": r.url} for r in res.references]})
+        for r in res.references:
+            self._rec(job.id, "script", "research_text_kept", machine("wikipedia-research"), decision="keep",
+                      subject={"title": r.title, "source": r.source}, outputs={"file": r.rel_path, "url": r.url})
+
+    def _assign_keywords_to_scenes(self, job: Job, base: list[Keyword]) -> list[Keyword]:
+        """Every scene must end up with at least one Keyword whose `scene_index` points at it, so
+        pipeline/stages/scenes/mpt.py's (shrunk) clip-matching always has a search term to work with.
+        The `llm` keyword stage's run_for_scenes() already tags each Keyword this way, one per scene;
+        this only fills any gap it leaves (a scene the model skipped). It is ALSO the whole mechanism
+        for the `manual` keyword provider, which knows nothing about scenes at all.
+
+        Untagged keywords are claimed for a missing scene BY MUTATING scene_index IN PLACE, one each,
+        rather than appending a duplicate -- so a `manual` job with exactly one term per scene ends up
+        with the same job.keywords it always would have (no doubled sourcing searches on a repeated
+        term). Only once every untagged keyword has been claimed and scenes are still missing one does
+        this fall back to appending new, scene_index-tagged copies, cycling through the pool by scene
+        index (the same round-robin pipeline/stages/scenes/mpt.py itself used to do before this
+        feature, just expressed as data instead of index arithmetic in the clip-matching stage)."""
+        have = {k.scene_index for k in base if k.scene_index is not None}
+        scenes = job.scenes
+        missing = [s for s in scenes if s.index not in have]
+        if not missing:
+            return base
+        untagged = [k for k in base if k.scene_index is None]
+        pool = base or [Keyword(term=job.subject, group="historical", source="fallback")]
+        out = list(base)
+        for i, s in enumerate(missing):
+            if i < len(untagged):
+                untagged[i].scene_index = s.index
+                continue
+            src = pool[s.index % len(pool)]
+            out.append(Keyword(term=src.term, group=src.group, source=src.source, scene_index=s.index,
+                               meta={"why": src.meta.get("why", ""), "fallback_assignment": True}))
+        return out
+
+    async def _auto_approve_keywords(self, job_id: str) -> Job:
+        """Decision 2026-09-25: per-scene keywords are approved automatically, right after
+        KEYWORDS_RUNNING finishes, folded into Gate 2 (asset review) instead of a screen of their own.
+        Mirrors review_keywords()'s "approve everything" body below, but logs a machine actor (this was
+        never a human's decision) and needs no reviewer name. Set job.providers.options
+        ["auto_approve_keywords"] = False to require review_keywords() explicitly instead -- the state
+        and that method are completely unchanged, so this is the only line that has to move."""
+        def fn(job: Job) -> None:
+            for k in job.keywords:
+                k.approved = True
+            self._apply_keyword_terms_to_scenes(job)
+            sm.apply(job, "approve_keywords")
+            self._rec(job.id, "keywords", "approved_keywords", machine("orchestrator"), decision="approve",
+                      reason="Auto-approved: per-scene search terms are folded into Gate 2 (asset review) "
+                             "rather than their own screen (docs/PIPELINE_STAGES.md).",
+                      subject={"approved": [k.term for k in job.approved_keywords]},
+                      outputs={"next": "sourcing" if job.uses_sources else "scenes"})
+            self._write_keywords_approved_file(job, reviewer="(auto-approved)",
+                                               note="Folded into Gate 2 -- see docs/PIPELINE_STAGES.md.", added=[])
+        return await self._mutate(job_id, fn)
+
+    def _apply_keyword_terms_to_scenes(self, job: Job) -> None:
+        """Copies each approved keyword's term (and, since 2026-09-26, its shot-list alternatives --
+        docs/ROADMAP.md backlog item F) onto the scene(s) it was generated for (via Keyword.scene_index),
+        because pipeline/stages/scenes/clips.py's clip matching reads Scene.search_terms, not job.keywords
+        directly -- so approval (human, via review_keywords() above, or automatic, via
+        _auto_approve_keywords() above) is the point where that has to happen. _assign_keywords_to_scenes()
+        (called earlier, right after KEYWORDS_RUNNING) already guarantees every scene has at least one
+        scene_index-tagged keyword in job.keywords -- but a human can still narrow the approved set down
+        to none for a given scene (e.g. approving only extra_terms typed in by hand), so this still falls
+        back to every approved term for a scene that ends up with no scene-specific one, same as every
+        scene shared the same term pool before this reorder.
+
+        Scene.search_terms ends up ORDERED: each keyword's own most-specific term first, then its
+        broader alternatives, in the shot-list order the keyword stage returned them in (dict.fromkeys
+        dedups while preserving that order -- a term appearing twice, e.g. as both a scene-specific
+        keyword and a human-typed extra_terms entry, is kept only at its first, most-specific position).
+        pipeline/stages/scenes/clips.py's AssetClipSource.fetch() is what actually tries them in order."""
+        def shot_list(k: Keyword) -> list[str]:
+            return [k.term, *k.alternatives]
+        by_scene: dict[int, list[str]] = {}
+        for k in job.approved_keywords:
+            if k.scene_index is not None:
+                by_scene.setdefault(k.scene_index, []).extend(shot_list(k))
+        fallback = list(dict.fromkeys(t for k in job.approved_keywords for t in shot_list(k)))
+        for s in job.scenes:
+            terms = by_scene.get(s.index)
+            s.search_terms = list(dict.fromkeys(terms)) if terms else fallback
+
     def _apply_keywords(self, job: Job, stage: Any, result: list[Keyword]) -> None:
         job.keywords = result
         trace = getattr(stage, "last_trace", {})
         self._rec(job.id, "keywords", "proposed_keywords", actor_from(stage, machine("keyword-stage")), decision="propose",
                   logic=trace,
                   outputs={"count": len(result), "keywords": [
-                      {"id": k.id, "term": k.term, "rank": k.rank, "volume": k.search_volume, "difficulty": k.difficulty,
-                       "why": k.meta.get("why", "")} for k in result]})
+                      {"id": k.id, "term": k.term, "alternatives": k.alternatives, "rank": k.rank,
+                       "volume": k.search_volume, "difficulty": k.difficulty,
+                       "scene_index": k.scene_index, "why": k.meta.get("why", "")} for k in result]})
         self._write_keywords_proposed_file(job, trace, result)
 
     def _write_keywords_proposed_file(self, job: Job, trace: dict, result: list[Keyword]) -> None:
         """keywords_proposed.json in the project folder: the candidate list exactly as this round's keyword
         stage produced it -- an LLM's suggestions, seeds read from --keywords-file, a reused library set, or
-        whatever a human typed into an editable draft file (scripts/poc.py) -- BEFORE any human decision at
-        Gate 1 (docs/RUNNING.md "Keyword files, always"). Always written, for every provider, not just `llm`:
+        whatever a human typed into an editable draft file (scripts/poc.py) -- BEFORE keyword approval
+        (Gate 1½, docs/RUNNING.md "Keyword files, always"). Always written, for every provider, not just `llm`:
         this is what lets `manual` runs be reviewed/reused the same way `llm` ones are.
 
         Written every time this stage runs, so after a Gate-1 rejection and re-run it reflects the CURRENT
@@ -1211,12 +1510,19 @@ class Orchestrator:
         path = self.store.job_dir(job.id) / "keywords_proposed.json"
         data = {
             "generated_at": _now(), "provider": job.providers.keywords, "logic": trace,
-            "keywords": [{"id": k.id, "term": k.term, "rank": k.rank, "search_volume": k.search_volume,
-                          "difficulty": k.difficulty, "why": k.meta.get("why", "")} for k in result],
+            "keywords": [{"id": k.id, "term": k.term, "alternatives": k.alternatives, "rank": k.rank,
+                          "search_volume": k.search_volume, "difficulty": k.difficulty, "why": k.meta.get("why", "")}
+                         for k in result],
         }
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     def _apply_sourcing(self, job: Job, stage: Any, res: Any) -> None:
+        # Pass 2's scoping option (docs/ROADMAP.md "two-pass hybrid", sourcing.py's queries_for()) is
+        # only ever meant to narrow THIS one round -- clear it once the round actually ran, so a normal
+        # human-triggered "search again"/"next batch" afterward searches the job's full approved-keyword
+        # batch again, not whatever scenes happened to need a fallback last time. A no-op for a normal
+        # round, which never sets this option in the first place.
+        job.providers.options.pop("fallback_only_queries", None)
         job.assets.extend(res.assets)
         job.references.extend(res.references)
         job.source_notes.extend(res.trace)
@@ -1401,7 +1707,7 @@ class Orchestrator:
             apply(job)
             sm.apply(job, event)
             self.store.save(job)
-            write_manifests(job, self.store.job_dir(job_id))
+            self._write_derived_files(job, self.store.job_dir(job_id))
             joblog.write(self.store.job_dir(job_id), "INFO", "state", f"{expected.value} -> {job.state.value}", event=event)
             return job
 

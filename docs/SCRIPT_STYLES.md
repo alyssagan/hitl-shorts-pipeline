@@ -3,8 +3,10 @@
 Requested directly: 4 ready-made scriptwriter "personas," each a system prompt plus a word-count target,
 tuned for viral short-form retention mechanics (hooks, open loops, twists). This is a separate, independent
 feature from [content niches](NICHES.md) -- see "How this relates to niches" below for why they don't line
-up one-to-one, and "What this does NOT do" for the bigger script-first pipeline reorder this is a first step
-toward, not a replacement for.
+up one-to-one. This doc originally described a scriptwriter that ran at the END of the pipeline, after
+keywords and sourcing (`SCENES_RUNNING`); the 2026-09-25 script-first reorder (docs/PIPELINE_STAGES.md) has
+since moved script-writing to the very front (`SCRIPT_RUNNING`, Gate 1) -- see "What this does NOT do" below
+for what that reorder did and didn't change about styles specifically.
 
 ## Setting a script style
 
@@ -26,13 +28,13 @@ in `pipeline/stages/scenes/script_styles.py`.
 
 ## What it actually changes
 
-**Only `SCENES_RUNNING`** (Gate 3's machine stage, `pipeline/stages/scenes/writer.py`'s `ScriptWriter`).
-When `job.script_style` is set to a known style:
+**Only `SCRIPT_RUNNING`** (Gate 1's machine stage since the 2026-09-25 reorder, `pipeline/stages/scenes/writer.py`'s
+`ScriptWriter`). When `job.script_style` is set to a known style:
 
 - The chat call sends the style's system prompt as a `system` message (not folded into the user message the
   way the default prompt is) and a `user` message built from the style's task template with `job.subject`
   substituted in, plus reviewer notes from a rejected draft appended (the one thing every script path always
-  honors -- see `docs/RUNNING.md`, rejecting at Gate 3).
+  honors -- see `docs/RUNNING.md`, rejecting at Gate 1).
 - The word-count check that produces a `warning` in the decision log uses the style's own range (e.g.
   70-110 for `dtc_marketing`) instead of the config's single `target_words`.
 - Everything downstream of the script text itself is unaffected: `clean_script()`, scene-splitting
@@ -44,21 +46,23 @@ machine -- none of it reads `job.script_style`.
 ## Accuracy trade-off
 
 The default scriptwriter prompt is explicitly grounded: "use ONLY facts stated in the source text below,"
-reading up to `grounding_chars` of real Wikipedia/archive text pulled during sourcing. **The 4 styles above
-are not** -- as given, none of them reference source text at all; they're built to work from the topic name
-alone, using the model's own general knowledge, in service of a specific scriptwriting voice. That's a
-deliberate product trade-off in the spec as requested, not an oversight here, but it means:
+reading up to `grounding_chars` of real Wikipedia/archive text pulled straight from the subject during
+`SCRIPT_RUNNING` itself (since the 2026-09-25 reorder -- previously this was pulled later, during sourcing).
+**The 4 styles above are not** -- as given, none of them reference source text at all; they're built to work
+from the topic name alone, using the model's own general knowledge, in service of a specific scriptwriting
+voice. That's a deliberate product trade-off in the spec as requested, not an oversight here, but it means:
 
 - A styled script can state something a source wouldn't verify. This matters far more for
   `true_crime_mystery` (real people, real cases, specific claims that can be simply wrong) than for
   `stem_science` or `math_cs` (general, widely-known concepts) or `dtc_marketing` (your own product, which
   you already know).
-- `job.references` (Wikipedia articles pulled during `SOURCING_RUNNING`) are read by the default prompt but
+- `job.references` (Wikipedia articles pulled during `SCRIPT_RUNNING`) are read by the default prompt but
   deliberately ignored by every styled prompt -- confirmed by
   `tests/test_script_styles.py::ScriptWriterStyledPathTests::test_style_selection_ignores_the_grounded_default_prompt_entirely`.
-- Nothing here fact-checks a styled script against anything. Gate 3 (`SCENES_REVIEW`) is still where a human
-  reads it before it renders -- treat that review more carefully for `true_crime_mystery` jobs about real
-  people than you would for the others.
+- Nothing here fact-checks a styled script against anything. Gate 1 (`SCRIPT_REVIEW`) is where a human first
+  reads it, before keywords/sourcing/scenes are even built from it -- treat that review more carefully for
+  `true_crime_mystery` jobs about real people than you would for the others. (Gate 3's scene-by-scene editor
+  still shows the current narration too, in case something needs changing after scenes exist.)
 
 If you want a styled voice AND source grounding together, that's a real, separate feature (splice source
 text into the style's task message, defining exactly how "stay in this voice" and "only state sourced facts"
@@ -91,13 +95,14 @@ covers a deliberately mismatched pair working fine), since a mismatch might be e
 
 ## What this does NOT do
 
-- **It does not reorder the pipeline to write the script before keywords/sourcing.** This is a first,
-  additive step toward that larger idea (see `docs/NICHES.md`'s own "What this does NOT do" for why a full
-  reorder is a bigger architectural call): the script text still becomes available at `SCENES_RUNNING`,
-  after keywords and sourcing, exactly where it always has. Deriving a second, scene-targeted keyword pass
-  from the finished script (to search sources for exactly what's being narrated, per source-group phrasing
-  rules `pipeline/stages/keywords/llm.py`'s `_source_guidance()` already knows) is a natural next increment
-  on top of this, feeding into the existing "search again" mechanism at Gate 2 -- not built here.
+- **Styles themselves didn't change with the 2026-09-25 reorder** (docs/PIPELINE_STAGES.md) -- only *when*
+  the scriptwriter runs did. Before that reorder, this section used to say styles were a first, additive
+  step toward eventually writing the script before keywords/sourcing, with the script only becoming
+  available at `SCENES_RUNNING`, after keywords and sourcing. That reorder has since happened: the
+  scriptwriter (styled or not) now runs at `SCRIPT_RUNNING`, right at the front, and keywords are derived
+  FROM the finished script (a 2-4 query shot list per scene, most specific first -- 2026-09-26) rather
+  than the other way around. None of the
+  per-style prompt/word-count behavior described above changed -- only its position in the pipeline did.
 - **It does not fact-check or ground a styled script.** See "Accuracy trade-off" above.
 - **It does not change the scriptwriter's provider/model/fallback behavior.** A styled call goes through the
   exact same `post_chat()` retry (same-provider, up to 4x) + one-fallback-to-backup-provider path as every

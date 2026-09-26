@@ -1,8 +1,28 @@
 # Review web page
 
 Open **http://localhost:8000/review** (list of projects) or **http://localhost:8000/review/JOB_ID** any time a job is waiting at
-a human gate -- it shows the asset review at Gate 2 and the script/scene review at Gate 3, and refreshes on its own when the job
-moves from one to the other. The terminal prints the exact link. Served by the pipeline container itself; nothing to install.
+a human gate -- it shows the script review at Gate 1, the asset review at Gate 2, and the scene review at Gate 3, and refreshes
+on its own when the job moves from one to the other. The terminal prints the exact link. Served by the pipeline container
+itself; nothing to install.
+
+## Gate 1: script
+
+Reordered 2026-09-25 (docs/PIPELINE_STAGES.md): the script is now written FIRST -- before any keywords, sourcing, or scenes
+exist -- so this is the very first thing a fresh job stops at. Reopen `/review/JOB_ID` (or the link the terminal printed); the
+page switches to this panel as soon as the job reaches `script_review`.
+
+- **Script**, a plain editable text box holding the freshly-written narration, with a live word count and estimated seconds
+  spoken (words ÷ 2.6). Edit it directly if you want to change anything before approving -- keywords, sourcing, and every
+  scene downstream are all built from whatever's in this box the moment you approve.
+- **Approve script** accepts it (your edits included, if any) and moves on: keywords are derived from it next (one search term
+  per scene), auto-approved by default and folded straight into Gate 2 below (see "Gate 1½" under "Suggest more search terms"
+  in Gate 2) -- you won't normally see a separate keyword-approval screen at all.
+- **Ask for a rewrite instead** sends written feedback (what should change -- e.g. "wrong facts", "different tone", "too long")
+  back to the writer and starts over with a brand new draft; nothing you'd typed but not approved carries over.
+
+The terminal (`scripts/poc.py`) walks Gate 1 too: it prints the script, then asks whether to approve it as written, edit it
+(writes it to a plain file next to the job's other files, waits for you to save your changes, then reads it back), ask for a
+rewrite, or hand off to this browser page (type `web` once you've submitted here) -- either one works on the same job.
 
 ## Gate 2: assets
 
@@ -24,6 +44,15 @@ re-renders (`whyOpen`, per asset id) rather than silently popping back open the 
 identity/rights badges below (#13) are the other half of this: click "Case connection & rights" on a card for who's actually
 pictured and where the usage rights stand, beyond what the automated flags alone can tell you.
 
+- **Grouped by keyword.** The grid below is broken into one section per approved keyword (in the order you
+  approved them), each headed by the term, its group (research/case/historical/stock), and a per-source
+  summary line like `commons: 8 kept of 24 found`. A keyword that hasn't produced anything showing right
+  now still gets its own section -- either **"not searched yet"** (nothing has been sent to a source for it
+  at all) or **"nothing kept"** (searched, but everything was filtered out or none was kept) -- so a thin
+  keyword is a visible, specific section instead of just fewer cards scattered through one big grid. Any
+  term that isn't an approved keyword (a custom "Search again" term, say) still gets its own trailing
+  section rather than disappearing. Sits directly above "Get more" below, so an empty section and the tools
+  to fix it are next to each other.
 - **Use / Duplicate / Irrelevant** per card -- the three human review labels (docs/EVALUATION.md). Use = approve; Duplicate and
   Irrelevant both reject, since neither should end up in the video, but they're saved as different labels: Duplicate means "this is
   the same as another asset", which is a *separate* question from whether it's actually relevant to your topic -- a duplicate can
@@ -45,13 +74,26 @@ pictured and where the usage rights stand, beyond what the automated flags alone
   moves on to scenes. You only need to click Use on the ones you want. Anything left undecided (or hidden below the threshold) is
   recorded as rejected with a note saying it had no decision -- and is NOT counted as a label, since you didn't judge it. The button
   is disabled only if nothing is approved or a HIGH-risk item is missing its note.
-- **Get more** (bottom): three ways to pull more assets without leaving the page. **Next batch** and **Search again**
+- **Get more** (bottom): four ways to pull more assets without leaving the page. **Next batch** and **Search again**
   send you back to sourcing then straight back here when the round finishes. **Next batch** is the one-click option --
   pick a batch size (defaults to 10, or the job's current `max_queries`) and it searches that many of your
   already-approved keywords that haven't been searched yet; no feedback needed. It also sets that batch size as the
   job's `max_queries` for every round after this one (see "Many keywords: batches" in docs/RUNNING.md), so once you've
   picked a comfortable size you don't have to reset it each round. **Search again** is for steering it: add specific
-  new search terms and/or say what was wrong; fetches the next page of results without repeats.
+  new search terms and/or say what was wrong; fetches the next page of results without repeats -- but a typed term
+  has no group of its own, so it's sent to *every* configured source regardless of fit (pipeline/stages/sourcing.py).
+
+  **Suggest more search terms** (requested directly: "will this be implemented in the pipeline") asks the same
+  LLM keyword-writing stage the auto-approved keyword step ("Gate 1½", between script and asset review) used
+  for a fresh batch of phrases, on demand -- unlike Search again's typed terms, these come back with a real
+  research/case/historical/stock classification (config/query_groups.toml has the shared wording both Gate 1½
+  and this reuse), so they're routed to the right sources once approved. Type what's missing (optional -- e.g.
+  "a specific person's name") and click it; nothing is searched yet, you get a checklist of the model's
+  suggestions (term, group, its own "why") to check and **Add**, or **Dismiss** to drop them with no API call
+  at all (an unapproved suggestion sitting in `job.keywords` is already inert, exactly like a keyword rejected
+  by omission at Gate 1½). Adding immediately shows the new keyword as its own empty section
+  above (see "Grouped by keyword" above) -- **Next batch** is what actually searches it. Only offered for jobs
+  using the `llm` keyword provider; a `manual` job has no model to ask.
 
   **Stock photo budget & deferred scoring** (requested directly: "stop go limits depending how much we've pulled
   already" / "let's pull stock photos first and score relevance later"), right below the Next batch/Search again

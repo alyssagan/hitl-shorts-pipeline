@@ -65,10 +65,31 @@ class ScriptWriterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({g["title"] for g in trace["grounded_on"]}, {"Kraken", "Octopus"})
         self.assertIn("warning", trace)                     # 8 short paragraphs is far below 300 words
 
+    async def test_prompt_demands_a_cold_open_hook_not_chronological_order(self):
+        # Regression for docs/ROADMAP.md's long-open "Not done here" item: the default prompt used to just
+        # say "Open with a hook" with nothing telling the model what that means or how to find one in the
+        # source text -- easy to satisfy with a generic tease. The rewrite must actually instruct a cold
+        # open on the source's most surprising fact (wherever it falls chronologically), an open loop paid
+        # off at the end, and short sentences -- not just use the word "hook".
+        seen: list = []
+        with tempfile.TemporaryDirectory() as d:
+            job = job_with_sources(Path(d))
+            w = ScriptWriter("http://llm/v1", "k", "m", transport=chat(LONG, capture=seen))
+            await w.write(job, ["octopus"])
+        prompt = seen[0]["messages"][0]["content"]
+        self.assertIn("Cold open, not chronological order", prompt)
+        self.assertIn("surprising, unresolved, or contradictory fact", prompt)
+        self.assertIn("Open loop", prompt)
+        self.assertIn("Sentence economy", prompt)
+        # The facts/grounding rule this rewrite must not disturb (tests/test_script_writer.py's other test
+        # already checks it verbatim, but it's the exact rule the cold-open instruction above has to respect
+        # -- the hook still has to come FROM the source text, never invented).
+        self.assertIn("ONLY facts stated in the source text", prompt)
+
     async def test_reviewer_notes_reach_the_prompt(self):
         seen: list = []
         job = Job(subject="octopuses")
-        job.scene_feedback = ["longer please"]
+        job.script_feedback = ["longer please"]
         w = ScriptWriter("http://llm/v1", "k", "m", transport=chat(LONG, capture=seen))
         await w.write(job, [])
         self.assertIn("longer please", seen[0]["messages"][0]["content"])
@@ -91,7 +112,7 @@ class ScriptWriterTests(unittest.IsolatedAsyncioTestCase):
             writer = ScriptWriter("http://llm/v1", "k", "gemini-x", transport=chat(LONG))
             stage = MptSceneStage(MptClient("http://mpt", transport=httpx.MockTransport(mpt)),
                                   LocalFolderClipSource(lib), writer=writer)
-            res = await stage.run(job, StageContext(Path(assets)))
+            res = await stage.write_script(job, StageContext(Path(assets)))
         self.assertEqual(len(res.scenes), 8)
         self.assertNotIn("/api/v1/scripts", mpt_calls)
         self.assertEqual(stage.actor.model, "gemini-x")

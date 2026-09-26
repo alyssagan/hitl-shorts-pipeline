@@ -21,3 +21,6 @@ output/
 *.webm
 *.mp3
 *.wav
+
+# macOS Finder metadata
+.DS_Store

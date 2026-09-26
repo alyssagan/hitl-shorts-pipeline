@@ -252,9 +252,16 @@ class OrchestratorSkipsAlreadyScoredTests(unittest.IsolatedAsyncioTestCase):
             # reuse-across-rounds behavior (the borderline/cap selection itself is covered by
             # ScoreRelevanceSelectionTests above, with the TF-IDF math stubbed out for exactness).
             orch = Orchestrator(JobStore(d), reg, settings={"relevance": {"borderline_band": 1.0, "max_llm_per_round": 999}})
-            job = await orch.create_job("cats", ProviderChoice(keywords="fake", scenes="fake", render="fake", sources=["commons"]),
+            job = await orch.create_job("cats", ProviderChoice(keywords="fake", scenes="fake", render="fake", sources=["commons"],
+                                                                 options={"auto_approve_keywords": False}),
                                         reviewer="Aly")
             await orch.start(job.id, reviewer="Aly")
+            for _ in range(20):
+                j = orch.get(job.id)
+                if j.state.value in ("script_review", "failed"):
+                    break
+                await orch.run_pending(job.id)
+            await orch.approve_script(job.id, reviewer="Aly")
             for _ in range(20):
                 j = orch.get(job.id)
                 if j.state.value in ("keywords_review", "failed"):

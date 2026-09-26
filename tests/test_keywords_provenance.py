@@ -34,6 +34,8 @@ class KeywordsFileProvenanceLandsInDecisionLogTests(unittest.IsolatedAsyncioTest
             }
             orch.store.save(job)
             await orch.start(job.id, reviewer="Aly")
+            await orch.run_pending(job.id)                          # -> SCRIPT_REVIEW
+            await orch.approve_script(job.id, reviewer="Aly")     # -> KEYWORDS_RUNNING
             await orch.run_pending(job.id)
 
             entries = orch.store.decisions(job.id).entries()
@@ -54,6 +56,8 @@ class KeywordsFileProvenanceLandsInDecisionLogTests(unittest.IsolatedAsyncioTest
             job.providers.options["keywords_provenance"] = {"file": "library/keywords/hand-written.txt"}
             orch.store.save(job)
             await orch.start(job.id, reviewer="Aly")
+            await orch.run_pending(job.id)                          # -> SCRIPT_REVIEW
+            await orch.approve_script(job.id, reviewer="Aly")     # -> KEYWORDS_RUNNING
             await orch.run_pending(job.id)
 
             entries = orch.store.decisions(job.id).entries()
@@ -67,6 +71,8 @@ class KeywordsFileProvenanceLandsInDecisionLogTests(unittest.IsolatedAsyncioTest
             job = await orch.create_job("jack the ripper", ProviderChoice(keywords="manual", scenes="fake", render="fake", sources=[]),
                                         reviewer="Aly")
             await orch.start(job.id, reviewer="Aly")
+            await orch.run_pending(job.id)                          # -> SCRIPT_REVIEW
+            await orch.approve_script(job.id, reviewer="Aly")     # -> KEYWORDS_RUNNING
             await orch.run_pending(job.id)
 
             entries = orch.store.decisions(job.id).entries()

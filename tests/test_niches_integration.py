@@ -50,8 +50,11 @@ class Base(unittest.IsolatedAsyncioTestCase):
         job = await orch.create_job("Cute cats!", ProviderChoice(keywords="fake", scenes="fake", render="fake",
                                                                    sources=["pexels"]), niche=niche)
         await orch.start(job.id)
+        job = await orch.run_pending(job.id)                        # -> SCRIPT_REVIEW
+        job = await orch.approve_script(job.id, reviewer="Aly")     # -> KEYWORDS_RUNNING
+        # Keywords are auto-approved by default (docs/PIPELINE_STAGES.md), so this one run_pending
+        # call both generates them and carries the job straight through to sourcing.
         job = await orch.run_pending(job.id)
-        job = await orch.review_keywords(job.id, [job.keywords[0].id], reviewer="Aly")
         self.assertEqual(job.state, S.SOURCING_RUNNING)
         return await orch.run_pending(job.id)
 
@@ -105,8 +108,9 @@ class VettingRoundNicheEvaluationTests(Base):
                                                                    options={"defer_relevance": True}),
                                      niche="pet_product")
         await orch.start(job.id)
-        job = await orch.run_pending(job.id)
-        job = await orch.review_keywords(job.id, [job.keywords[0].id], reviewer="Aly")
+        job = await orch.run_pending(job.id)                        # -> SCRIPT_REVIEW
+        job = await orch.approve_script(job.id, reviewer="Aly")     # -> KEYWORDS_RUNNING
+        job = await orch.run_pending(job.id)                        # auto-approved keywords -> SOURCING_RUNNING
         job = await orch.run_pending(job.id)
         pending = [a for a in job.assets if a.status == "pending"]
         self.assertTrue(all(a.vetting.niche_evaluation.relevance_score is None for a in pending))

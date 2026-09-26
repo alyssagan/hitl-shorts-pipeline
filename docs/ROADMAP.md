@@ -39,6 +39,246 @@ are in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md); things to experiment with a
 > Update: the asset review web page (thumbnails, scores, Use/Reject, search again) is built, and so is the scene/script page
 > (live full-script view, editable per-scene narration and clip, reorder, approve/rewrite). See docs/REVIEW_UI.md.
 
+## Done: two-pass hybrid -- shot-list fallbacks only searched when a scene actually needs one (2026-09-26)
+Replaces the "sourcing also searches every shot-list alternative up front" behavior from the entry right
+below this one (same day, a few hours earlier) with the two-pass approach requested directly once real
+API rate-limit/cost constraints made searching every scene's broad fallback query up front unacceptable.
+Verified first, before changing anything, that this repo's stages are genuinely decoupled with a human
+gate between them (confirmed directly rather than assumed) -- so the two passes had to be wired through
+that gate, not around it:
+
+- **Pass 1 stays lean.** `pipeline/stages/sourcing.py::queries_for()` no longer appends every keyword's
+  `alternatives` to the batch -- only each keyword's own primary (most specific) term is searched, same
+  API load as before shot lists existed. `Keyword.term`/`.alternatives`, `SCENE_PROMPT`'s ranked
+  `"queries"` array, and `Scene.search_terms`' ordering (from the entry below) are all unchanged --
+  Pass 1 just doesn't search the broader ranks yet.
+- **Coverage check, right at Gate 2's close.** `pipeline/stages/scenes/clips.py` gained
+  `_best_match_for_term()` (extracted from `AssetClipSource.fetch()`'s own ordered-match loop, now
+  shared) and `scene_has_shot_list_coverage()`: does any of a scene's own shot-list queries, alone,
+  match an approved/usable asset -- the same question `fetch()` already asks per scene, asked here
+  ahead of time for every scene at once. `Orchestrator._scenes_needing_fallback()` calls it for every
+  scene when `approve_assets()` runs, paired with `_next_fallback_query()` (the next untried,
+  broader query for that scene's own keyword -- `job.providers.options["fallback_queries_tried"]` is
+  an append-only record of every fallback ever activated, so a scene that's exhausted its whole shot
+  list is left alone rather than bouncing Gate 2 forever).
+- **Pass 2 reuses "search again" exactly, not a new mechanism.** When `approve_assets()` finds scenes
+  needing fallback, it activates their next query via `job.providers.options["fallback_only_queries"]`
+  (a new option `queries_for()` checks first: when set, that round searches ONLY those queries, not the
+  job's full approved-keyword batch) and applies the SAME `reject_assets` state transition a human's own
+  "Search again" click already uses -- SOURCING_RUNNING -> VETTING_RUNNING -> ASSETS_REVIEW, logged as a
+  machine decision (`auto_fallback_sourcing`) distinct from a human rejection. `fallback_only_queries` is
+  cleared once the round commits (`_apply_sourcing`), so a later human "Next batch"/"Search again" goes
+  back to searching the full batch, not just whatever a scene happened to need last time.
+- **Every asset still goes to a human.** This was the deciding design question, settled directly rather
+  than assumed: Pass 2's fallback assets land back in a normal ASSETS_REVIEW round like any other "search
+  again" result -- a human approves or rejects them before Gate 3 can use them. Nothing here auto-approves
+  an asset; `approve_assets()` still enforces its original "no pending assets" guard even when it redirects
+  to Pass 2 instead of advancing to Gate 3.
+- New/updated tests: `tests/test_query_routing.py::ShotListQueryTests` (Pass 1 excludes alternatives;
+  `fallback_only_queries` scopes/dedups/limits a round) + a sourcing-integration pair (Pass 1 vs. a scoped
+  Pass 2 round, still routed by the parent keyword's group); `tests/test_orchestrator.py::
+  ScenesNeedingFallbackTests` (the coverage-gap/exhausted-shot-list logic, pure) + `ApproveAssetsFallbackTests`
+  (end-to-end: a gap redirects to SOURCING_RUNNING scoped to the right query; no gap, an exhausted shot
+  list, or a still-pending asset all behave exactly as before). Full suite: 747 passing (was 736).
+
+**Still open**: the coverage check only looks at whether a query matches something ALONE -- it doesn't
+also weigh asset quality/relevance score, so a scene could pass the check on a weak but nonzero word-overlap
+match. Also still open from the entry below: LLM-judged scene-to-asset matching instead of bag-of-words,
+and the two smaller item-F pieces (newspaper-archive era coverage; whether the 4 script-style personas get
+their own shot lists).
+
+**Testing note (2026-09-26, same day):** asked to test this end to end against real sources/keys. Built
+`scripts/real_e2e_driver.py` (a non-interactive CLI wrapping the real `Orchestrator`/`build_default_registry`,
+meant to be re-invoked across separate shell calls since job state persists via `JobStore`) to drive a real
+job through a linked Mac's shell. Two environment blockers surfaced, verified directly rather than assumed:
+(1) that shell's Python is 3.10 (this repo targets 3.11+ for `tomllib`; worked around with a shim in the
+driver script that replays a real tomllib's parse of `config/pipeline.toml`/`config/query_groups.toml`,
+cached by content hash in `scripts/_toml_shim_cache.json`, rather than reimplementing a TOML parser); (2)
+that shell has NO network egress at all (every host, including the real API providers, returns 403 from the
+proxy) -- not fixable from here, so a real end-to-end run against live Gemini/Pexels/Pixabay/Unsplash/
+Smithsonian was not possible this session. Given a choice, went with a deterministic dry run instead of
+troubleshooting the network further: `scripts/dry_run_demo.py` drives a job through the REAL Orchestrator/
+state machine/`vet_asset`/`AssetClipSource` end to end (script -> keywords -> sourcing -> vetting -> Gate 2
+-> **auto Pass 2 bounce** -> Gate 2 again -> Gate 3 clip assignment), with only the three genuinely-external
+calls (keyword LLM, script LLM, source HTTP fetch) swapped for small deterministic fakes local to the
+script. Confirmed live: Pass 1 searches only each scene's primary query; a scene with no match at Gate 2
+close gets exactly its next shot-list query activated (not every scene's); Pass 2's sourcing round is
+scoped to exactly that one query; the new candidate lands back in a normal pending asset-review round
+(never auto-approved); and Gate 3 correctly matches each scene to its own asset once coverage exists. Full
+suite still 747/747 passing after these two scripts were added (neither touches production code).
+
+## Done: per-scene shot list, 2-4 ordered fallback queries instead of one term (2026-09-26)
+Closes the "richer per-scene shot list" half of item F below ("Story-aware shot planning", added
+2026-09-23, not started) -- the other two pieces of that item (an LLM judging scene-to-asset fit instead
+of bag-of-words matching; whether newspaper-archive coverage reaches far enough for a given case) are
+still open. Item F's "stage ordering" open question was *also* already resolved as an unplanned side
+effect of the 2026-09-25 script-first reorder (docs/PIPELINE_STAGES.md) -- the script now exists before
+any keyword does, so a shot planner never needed its own second sourcing round after all; today's change
+builds directly on top of that.
+
+Requested directly ("2 to 4 queries, ranked from most specific to broadest fallback... iterate through
+these queries, returning the first one that successfully yields assets... if all queries fail, trigger
+the generic fallback"). Verified first that this repo's actual shape is two separate stages with a human
+gate between them, not one script-generation-plus-fetch loop (as initially described) -- so the request
+was split and placed where each part actually belongs, confirmed directly with Aly before implementing:
+
+- **Keyword generation** (`pipeline/stages/keywords/llm.py`): `SCENE_PROMPT` now asks for a `"queries"`
+  array (2-4 strings, most-specific-first) per scene instead of one `"term"`. `parse_scene_keywords()`
+  collapses that shot list onto ONE `Keyword` per scene exactly as before (every scene_index/routing/
+  approval invariant untouched) -- `queries[0]` becomes `Keyword.term`, `queries[1:]` becomes
+  `Keyword.alternatives` (a field that already existed for exactly this, unused until now). Tolerant of
+  a model that ignores the new field and still answers with the old single `"term"` (degrades to a
+  1-query shot list rather than dropping the scene).
+- **Scene.search_terms is now the ordered shot list itself**, not a single term:
+  `Orchestrator._apply_keyword_terms_to_scenes()` copies each approved keyword's `term` then its
+  `alternatives`, in order, deduped, onto the scene(s) it was generated for.
+- **Sourcing** (`pipeline/stages/sourcing.py`): `queries_for()` now searches every keyword's alternatives
+  too (after every keyword's own primary term, so a fresh round still prioritizes the specific queries),
+  and `_term_groups()` routes an alternative to the same source pool as its parent keyword -- so material
+  for the broader fallback queries actually exists in the reviewed pool, not just the specific one.
+  Sourcing still pools every query into one shared, human-reviewed asset pool exactly as before (#1:
+  preserve existing work) -- it does NOT search scene-by-scene or stop early; see "still open" below.
+- **Scene-to-asset matching** (`pipeline/stages/scenes/clips.py`): `AssetClipSource.fetch()` is where
+  "iterate the queries, stop at the first one that yields assets" actually happens -- for a scene with
+  more than one search term, it now tries each one ALONE, in order, against the approved pool, and picks
+  the first query with any match; only if none of them match anything alone does it fall through to the
+  original combined-words-plus-narration match, then the original next-unused/reused-asset fallback. A
+  scene with a single search term (any job whose keyword stage doesn't populate alternatives) computes
+  the identical result as before -- zero behavior change there.
+- New tests: `tests/test_stages.py::SceneShotListKeywordTests` (shot-list parsing + backward compat),
+  `tests/test_query_routing.py::ShotListQueryTests` + a sourcing-integration test (alternatives get
+  searched and routed), `tests/test_more_sources.py::ShotListMatchingTests` (ordered clip matching,
+  fallback-to-generic, single-term jobs unchanged), `tests/test_orchestrator.py::
+  ApplyKeywordTermsToScenesTests` (ordering/dedup onto Scene.search_terms). Full suite: 736 passing (was
+  720).
+
+**Still open, deliberately not done here** (discussed directly with Aly, deferred rather than bundled
+into this change): a *real* per-scene sourcing loop -- restructuring `pipeline/sources/base.py::
+HttpSource.fetch()` and `SourcingStage.run()` to search scene-by-scene and stop calling a source once a
+scene's specific query already found something, instead of always searching every query against every
+source. What's built today already gets the correctness goal (a scene prefers its own specific query's
+asset when one exists, and never comes up empty just because the specific query missed) -- a real
+per-scene sourcing loop would mainly buy lower API/cost usage and a smaller asset-review queue per scene,
+at the cost of reworking routing, the stock-photo budget, and the "search again" pagination logic to be
+scene-aware. Worth a fresh look once it's clear the added review-queue size/API cost from searching every
+alternative up front is actually a problem in practice, not before.
+
+## Done: default scriptwriter prompt rewritten for a real hook and story structure (2026-09-26)
+Closes the item flagged "Not done here, still open" in "Done: retention styling + platform post copy"
+below (2026-09-23): the default `ScriptWriter` prompt (`pipeline/stages/scenes/writer.py`, used whenever a
+job has no `script_style` set) only ever said "Open with a hook" -- one clause, no instruction on what a
+hook actually is or how to find one in the source text, and nothing about story shape after it. Prompted
+directly with research on what makes a Reels/Shorts hook and structure actually work (pattern-interrupt
+opens, open loops paid off at the end, short punchy sentences), cross-checked against what the 4 script-style
+personas (`script_styles.py`, built afterward as a first step toward this) already do well.
+
+- `PROMPT`'s "Length" paragraph is followed by a new "RETENTION MECHANICS" block, three rules: **cold open,
+  not chronological order** (read the whole source text first, open on its single most surprising,
+  unresolved, or contradictory fact -- wherever it falls in the timeline -- never a generic introduction);
+  **open loop** (the hook must raise a real question the source can answer; every paragraph after it adds
+  evidence rather than restating the hook; the heaviest fact lands in the final paragraph, not the first);
+  **sentence economy** (short, direct sentences, cut anything that doesn't add a fact or move the story).
+  Still fully source-grounded -- the existing "use ONLY facts stated in the source text" rule (unchanged,
+  every test asserting on it still passes) applies to the hook exactly like every other paragraph, so this
+  cannot invent a shocking claim the source doesn't support.
+- Deliberately left alone: the 4 script-style personas (`script_styles.py`) already have their own
+  hook/retention-mechanics instructions, and their docstring notes they're "reproduced verbatim from what
+  was requested" -- not touched here. Also left alone: an on-screen CTA. That already exists, just not in
+  the spoken narration -- `pipeline/stages/mpt_client.py`'s `social_metadata()` (added in the 2026-09-23
+  entry below) generates a platform-ready caption ending in a call to action separately, per platform, after
+  render; baking a second, spoken CTA into the narration itself risked being tonally wrong for the
+  case-sensitive true-crime material this pipeline was built around (docs/CASE_REFERENCE.md).
+- On-screen text overlays (the notes' "concise text under 12 words keeps eyes on the video while muted"):
+  this pipeline's captions are MoneyPrinterTurbo's auto-generated subtitles, word-for-word from the
+  narration (`subtitle_display_mode`/`subtitle_animation`, already wired in the 2026-09-23 entry below) --
+  there's no separate curated-overlay system to write short text into. The sentence-economy rule above keeps
+  narration (and so captions) short and punchy as a side effect, but a genuinely separate micro-text overlay
+  layer is a bigger feature, not scoped here.
+- Tests: `tests/test_script_writer.py::test_prompt_demands_a_cold_open_hook_not_chronological_order` (new)
+  asserts the actual instruction text is in the prompt, not just the word "hook". Full suite: 720 passing.
+
+## Done: docs/PIPELINE_STAGES.md + VETTING_REPORT.md/SCRIPT.md per-project outputs (2026-09-25)
+Requested directly: a stage-by-stage reference table, and a readable per-stage output file in every
+project folder -- not just `job.json`/`decisions.jsonl` and the stages that already had one
+(`keywords_proposed.json`, `SOURCES.md`, `CREDITS.md`). Vetting and the scene/script stage were the
+two gaps: their output only ever lived in `job.json` fields and scattered `decisions.jsonl` entries.
+
+- `docs/PIPELINE_STAGES.md` (new): every machine stage and human gate, in order, with its code
+  location, what it reads from/writes to the job, and exactly what lands in the project folder
+  because of it -- meant to be the one place that always matches the code, cross-referenced from
+  `README.md`.
+- `pipeline/vetting/report.py` (new): `write_vetting_report()` writes `VETTING_REPORT.md` -- risk +
+  relevance + every flag and why it fired, per asset, plus the human's decision so far. No-ops
+  (writes nothing) until at least one asset has actually been vetted.
+- `pipeline/stages/scenes/report.py` (new): `write_script_md()` writes `SCRIPT.md` -- the narration,
+  scene by scene, next to that scene's search term(s), matched clip, why, audio status and any
+  reviewer note. No-ops until the scene stage has actually run.
+- Both hooked into `Orchestrator._write_derived_files()` (new, replacing the old bare
+  `write_manifests()` call), called from the same two places `SOURCES.md` already was
+  (`_mutate`/`_commit`) -- so both stay current after every job change, same convention, same
+  cost (cheap no-op until there's something to show).
+- `README.md`'s "Where everything is saved" and "Project layout" sections updated to list both.
+- Tests: `tests/test_stage_reports.py` (writers' own edge cases -- nothing written before the stage
+  has run, unvetted assets left out of the table, etc.), plus `tests/test_sources_flow.py`'s existing
+  full-pipeline `FlowTests.test_full_flow_with_gate_rules_and_log` extended to assert both files
+  exist and are correct by the time a real job reaches `COMPLETED`.
+
+## Done: Gate 2 "Suggest more search terms" + config/query_groups.toml (2026-09-25)
+Requested directly: an in-review-page way to get more group-tagged search phrases without hand-typing them
+into "Search again" (which has no group of its own, so pipeline/stages/sourcing.py's routing sends those
+terms to every configured source regardless of fit) or running a separate outside prompt for the same
+purpose. Reuses the exact same LLM keyword-writing stage Gate 1 uses (pipeline/stages/keywords/llm.py),
+called again on demand, mid asset review.
+
+- `LLMKeywordStage.run()` gained two optional keyword-only args, both defaulting to Gate 1's exact original
+  behavior when omitted: `already_covered` (a list of terms to tell the model not to repeat -- everything
+  already in `job.keywords`, approved or not, at call time) and `extra_feedback` (what the reviewer typed
+  about what's specifically missing). Folded into the existing `feedback`/prompt text, not a parallel path.
+- **The four QueryGroup definitions (research/case/historical/stock) moved out of a hardcoded string in
+  `PROMPT` into `config/query_groups.toml`** -- description + example + why, per group. `pipeline/sources/
+  groups.py`'s new `load_group_definitions()`/`GROUP_DEFINITIONS` reads it (falling back to the original
+  wording if the file is missing/broken), and `llm.py`'s `_group_definitions_block()` builds the prompt's
+  bullet list from it. Bind-mounted read-only in `docker-compose.yml`, same as `config/pipeline.toml` --
+  edit the file, `docker compose restart pipeline` (no rebuild needed) picks it up. Does NOT change routing
+  itself (`GROUP_POOLS`, still tested Python) -- only the wording the LLM and a human both read.
+- `Orchestrator.suggest_keywords()` (new): only during `ASSETS_REVIEW`, only for jobs on the `llm` keyword
+  provider (`manual` has no model to ask). Appends the result to `job.keywords` as new, UNAPPROVED
+  candidates -- nothing is searched until `approve_suggested_keywords()` (new) approves some of them, which
+  flips `approved=True` WITHOUT a Gate-1-style state transition (the job stays in `ASSETS_REVIEW`) and
+  re-writes `keywords_approved.json` so that on-disk snapshot stays current. The next "Next batch"/"Search
+  again" round then searches them, correctly routed by their own group.
+- `POST /jobs/{id}/keywords/suggest` `{feedback?, count?, reviewer}` -> job JSON + `suggested_ids`.
+  `POST /jobs/{id}/keywords/approve-suggested` `{keyword_ids, reviewer}` -> job JSON.
+- Review page: a "Suggest more search terms" row in the existing "Not enough good ones? Get more" panel
+  (disabled with an explanatory tooltip for non-`llm` jobs), an optional "what's missing" text box, and a
+  checklist of the returned suggestions (term, group chip, the model's own "why") to approve or dismiss --
+  dismissing needs no API call, since an unapproved keyword sitting in `job.keywords` is already inert
+  (never searched, never its own section in the grid) exactly like a Gate-1 keyword rejected by omission.
+  Approved suggestions immediately show up as their own (empty, "not searched yet") section in the
+  per-keyword grouping below (docs/REVIEW_UI.md's keyword-sections feature) -- "Next batch" is what
+  actually searches them.
+- Tests: `tests/test_stages.py` (prompt/config-loading), `tests/test_suggest_keywords.py` (orchestrator,
+  full create_job->assets_review flow via a fake registry), `tests/test_keywords_suggest_api.py` (the two
+  HTTP routes).
+
+## Done: Gate 2 asset grid grouped by keyword (2026-09-25)
+Requested directly: "different keywords should have a different section, if not enough is pulled up, a
+next section should definitely be easy to do" -- in the web review page specifically, not `scripts/poc.py`.
+
+- `pipeline/api/review_page.py`'s `assetReviewBody()` groups `visible()`'s already-filtered/sorted asset
+  list by `Asset.query` (which approved keyword's search found it) into one section per approved keyword,
+  in approval order. Every approved keyword gets a section even with nothing currently showing for it --
+  either "not searched yet" or "nothing kept" (`job.source_notes`, `pipeline/stages/sourcing.py`'s
+  structured per-query trace, is what tells the two apart) -- so a thin keyword reads as a specific, visible
+  gap instead of just fewer cards in one big grid. A term that isn't an approved keyword (a custom "Search
+  again" term) still gets its own trailing section.
+- New `keywordSections(xs)`/`sectionSummary(notes)` functions; 10 new tests in `tests/
+  test_review_page_keyword_sections.py` (same "pull the real JS out of PAGE and run it in Node" approach
+  `tests/test_review_page_sort.py` uses).
+- No backend change was needed for this one -- `job.source_notes` already carried full per-query source/
+  query/found/kept/outcome data (an earlier read of `sourcing.py` that flagged a gap there turned out to be
+  wrong on re-verification against a real job's actual `source_notes`).
+
 ## Done: script-writing styles -- 4 retention-mechanics scriptwriter personas (2026-09-25)
 Requested directly: 4 system prompts (History/Conspiracy/True Crime, STEM, DTC/Pet/Food Marketing,
 Math/Stats/CS), each with its own retention-mechanics instructions and word-count target, for the Gate 3

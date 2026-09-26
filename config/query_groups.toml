@@ -1,0 +1,37 @@
+# The four QueryGroups every search phrase belongs to (pipeline/core/models.py's QueryGroup literal:
+# "research"/"case"/"historical"/"stock"). This is the one readable, editable place for what those groups
+# MEAN and what a good example phrase looks like -- both the LLM keyword-writing prompt
+# (pipeline/stages/keywords/llm.py, Gate 1's first batch) and Gate 2's "Suggest more search terms" feature
+# (same underlying stage, run on demand mid asset-review) build their prompt from this file, so editing a
+# description or example here changes what BOTH ask for, in one place, without touching Python.
+#
+# This file does NOT change which of a job's configured sources a group is actually sent to -- that
+# routing table is pipeline/sources/groups.py's GROUP_POOLS, kept as tested Python since it's real
+# behavior, not prose a person tunes by feel. Renaming a group here (or adding a new one) does nothing on
+# its own; pipeline/core/models.py's QueryGroup literal and pipeline/sources/groups.py's GROUP_POOLS would
+# both need a matching change for a new group to actually route anywhere.
+#
+# If this file is missing, unreadable, or a group's table is left out, pipeline/sources/groups.py falls
+# back to the same wording baked in there -- a broken or deleted copy of this file never stops a job from
+# running, it just means the wording can no longer be tuned without touching Python (see #1: preserve
+# existing behavior).
+
+[research]
+description = "background reading for the narration itself, not a visual search. Sent only to Wikipedia."
+example = "Corazon Amurao Dyatlov"
+example_why = "a real full name + event, so an article can be found -- not a generic topic phrase like \"the case explained\""
+
+[case]
+description = "names a SPECIFIC real, verifiable person, place, document or moment tied directly to this case: an actual name, a specific address, an interview, a court proceeding."
+example = "Corazon Amurao interview"
+example_why = "a specific person and moment -- not a guarantee a matching photo exists, just an honest, specific search"
+
+[historical]
+description = "the general era, place or everyday life the case happened in, WITHOUT claiming to show the specific people or event."
+example = "Chicago residential streets 1960s"
+example_why = "the era/place, not a specific person or moment"
+
+[stock]
+description = "a generic, timeless visual description with no connection to this specific case -- a shot that could illustrate many different stories."
+example = "empty hospital hallway"
+example_why = ""

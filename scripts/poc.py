@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -22,12 +23,27 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Where the pipeline copies an approved keyword set once it clears Gate 1 (config/pipeline.toml's [library]
+# Where the pipeline copies an approved keyword set once its keywords are approved -- "Gate 1½", human or
+# auto (config/pipeline.toml's [library]
 # keywords_dir, same value -- duplicated here since poc.py is deliberately standard-library only, same
 # reasoning as scripts/make_keywords.py's own duplicated constants), and where this script parks an
 # editable draft when --keywords manual has no --keywords-file to read. See docs/RUNNING.md "Keyword files,
 # always".
 LIBRARY_KEYWORDS_DIR = Path("library/keywords")
+
+# The job's states, in pipeline order (pipeline/core/models.py's JobState, docs/PIPELINE_STAGES.md) -- used
+# by main()'s at() to skip a gate the job (e.g. a --resume'd one) has already passed. Matches the 2026-09-25
+# reorder: script is written and approved first, keywords are derived from it and auto-approved by default
+# (so keywords_review is usually skipped right over -- at() still handles that fine, since by the time it
+# polls, the live state is already past it). A state missing from this list is treated by at() as "already
+# past everything" -- which is exactly how the reorder itself first shipped with a broken, pre-reorder copy
+# of this list: script_running/script_review were missing, so every gate below got silently skipped for a
+# job sitting at the new Gate 1, and main() ran straight to `wait_for(..., {"completed"}, ...)` and hung
+# forever waiting for a state the job would never reach without a human approving the script first. Keep
+# this in sync with pipeline/core/models.py's JobState order -- tests/test_poc_state_order.py checks it.
+JOB_STATE_ORDER = ["created", "script_running", "script_review", "keywords_running", "keywords_review",
+                    "sourcing_running", "vetting_running", "assets_review", "scenes_running", "scenes_review",
+                    "rendering", "completed"]
 
 
 def slug(text: str) -> str:
@@ -61,6 +77,49 @@ class Api:
 
 LOG = {"cursor": {}, "level": "INFO", "show": True}
 
+# Level -> ANSI color, for format_log_line below. Dim for DEBUG (least important), cyan for INFO (the
+# normal case, so it doesn't fight for attention), yellow/red for WARN/ERROR so those jump out of a long
+# stream without having to read every word. Never applied to what's written to logs/pipeline.log itself
+# (pipeline/core/joblog.py) or to the container's own stdout (`docker compose logs`) -- docs/LOGGING.md's
+# documented plain-text format (for grepping, tailing, etc.) is untouched; this only reformats what THIS
+# script echoes to your terminal while a job runs.
+_LEVEL_COLOR = {"DEBUG": "\033[2m", "INFO": "\033[36m", "WARN": "\033[33m", "ERROR": "\033[31m"}
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RESET = "\033[0m"
+
+
+def _use_color() -> bool:
+    # Standard conventions: no color when piped/redirected (isatty() is False), and NO_COLOR opts out
+    # even in a real terminal (https://no-color.org). FORCE_COLOR overrides both, for a terminal that
+    # reports isatty() wrong (some CI runners, some wrapped terminals).
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    if os.environ.get("NO_COLOR"):
+        return False
+    return sys.stdout.isatty()
+
+
+def format_log_line(raw: str, color: bool | None = None) -> str:
+    """One raw `logs/pipeline.log` line (docs/LOGGING.md's format: `TIMESTAMP LEVEL  STAGE  message  k=v ...`),
+    reformatted for a live terminal stream: drops the date off the timestamp (during a live run it's always
+    "now"), and -- unless piped or NO_COLOR -- colors the level and bolds the stage so a WARN or ERROR in a
+    long stream of INFO lines doesn't need to be read word-by-word to spot. A line that doesn't match the
+    expected shape (fewer than 4 whitespace-separated parts) is returned unchanged rather than mangled."""
+    if color is None:
+        color = _use_color()
+    parts = raw.split(maxsplit=3)
+    if len(parts) < 4:
+        return raw
+    ts, level, stage, rest = parts
+    if level not in _LEVEL_COLOR or not (len(ts) >= 20 and ts[10] == "T" and ts.endswith("Z")):
+        return raw          # doesn't look like one of our lines -- leave it exactly as-is
+    time_only = ts[11:19]
+    if not color:
+        return f"{time_only} {level:<5} {stage:<9} {rest}"
+    level_color = _LEVEL_COLOR.get(level, "")
+    return f"{_DIM}{time_only}{_RESET} {level_color}{level:<5}{_RESET} {_BOLD}{stage:<9}{_RESET} {rest}"
+
 
 def show_log(api: Api, job_id: str) -> None:
     """Print the new activity-log lines (what the pipeline is doing right now)."""
@@ -71,7 +130,7 @@ def show_log(api: Api, job_id: str) -> None:
     except SystemExit:
         return
     for ln in r.get("lines", []):
-        print("\r" + " " * 70 + "\r  | " + ln)
+        print("\r" + " " * 70 + "\r  | " + format_log_line(ln))
     LOG["cursor"][job_id] = r.get("next", 0)
 
 
@@ -160,7 +219,7 @@ def load_keywords_file(path: Path, max_queries: int | None) -> tuple[list[str], 
 
 def library_sets_for(subject: str) -> list[dict]:
     """Every approved-keywords set the pipeline has saved for this exact subject (library/keywords/<slug>/
-    <job id>.json -- written automatically once a job's keywords clear Gate 1, see docs/RUNNING.md "Keyword
+    <job id>.json -- written automatically once a job's keywords are approved (Gate 1½), see docs/RUNNING.md "Keyword
     files, always"), newest first. An unreadable entry is skipped with a note rather than crashing the run."""
     out = []
     for p in sorted((LIBRARY_KEYWORDS_DIR / slug(subject)).glob("*.json")):
@@ -175,7 +234,7 @@ def choose_library_set(subject: str) -> tuple[list[str], dict] | None:
     """Offers previously-approved keyword sets for this subject, if any, so a later video on the same topic
     doesn't need a fresh LLM call (or fresh typing) to get back to the same keywords. Only ever READS the
     saved file -- picking one just copies its terms into THIS job, which gets its own fresh
-    keywords_proposed.json/keywords_approved.json once it goes through Gate 1 again; nothing already saved
+    keywords_proposed.json/keywords_approved.json once it goes through keyword approval (Gate 1½) again; nothing already saved
     is modified. Returns None (generate fresh instead) if there's nothing to offer, or the person skips."""
     sets = library_sets_for(subject)
     if not sets:
@@ -197,7 +256,7 @@ def choose_library_set(subject: str) -> tuple[list[str], dict] | None:
     provenance = {"reused_from_job": chosen.get("job_id"),
                   "reused_from_file": str(LIBRARY_KEYWORDS_DIR / slug(subject) / f"{chosen.get('job_id')}.json"),
                   "originally_approved_at": chosen.get("approved_at")}
-    print(f"  Reusing {len(terms)} keyword(s) from job {chosen.get('job_id')} -- you can still add, drop or reject them at Gate 1.")
+    print(f"  Reusing {len(terms)} keyword(s) from job {chosen.get('job_id')} -- you can still add, drop or reject them at keyword approval (Gate 1½, if it's not auto-approved for this job).")
     return terms, provenance
 
 
@@ -240,9 +299,53 @@ def resolve_keywords_source(subject: str, keywords_arg: str) -> tuple[str, list[
     return keywords_arg, [], None
 
 
+def edit_script_draft(job: dict) -> str:
+    """Same idea as edit_keywords_draft() above: rather than trying to do a real multi-line editor in the
+    terminal, write the current script to a plain file next to the job's other files and let you edit it
+    in whatever editor you already have open. Returns whatever's in the file when you come back (which may
+    be unchanged, if you just want to approve as written)."""
+    path = Path("projects") / f"{job['slug']}-{job['id']}" / "script_draft.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(job["script"], encoding="utf-8")
+    print(f"\nOpen {path}, edit the narration, save it, then come back here.")
+    ask("Press Enter once you've saved your edits (or right away to approve it as written): ")
+    return path.read_text(encoding="utf-8")
+
+
+def script_gate(api: Api, job: dict, reviewer: str = "") -> dict:
+    """Gate 1 (docs/PIPELINE_STAGES.md, 2026-09-25 reorder): the freshly-written narration, before anything
+    else -- no keywords, no sourcing, no scenes with clips yet. Approving with an edited draft re-splits it
+    into fresh scenes (Orchestrator.approve_script); there's nothing scene-specific to lose at this point."""
+    while True:
+        print("\n=== GATE 1: script ===  (why: keywords, sourcing, and scenes are all built from this narration)\n")
+        print(job["script"])
+        words = len(job["script"].split())
+        print(f"\nLength: {words} words, about {round(words / 2.6)} seconds when spoken.")
+        print(f"\nPREFER CLICKING? Open {api.base}/review/{job['id']} in your browser (edit inline), submit there, then type 'web' here.")
+        ans = ask("\n'yes' to approve as written, 'edit' to rewrite it first, 'web' = I used the browser page, 'no' to ask for a rewrite: ").lower()
+        if ans == "web":
+            print("  Waiting for you to submit in the browser page...")
+            while api.call("GET", f"/jobs/{job['id']}")["state"] == "script_review":
+                time.sleep(3)
+            job = api.call("GET", f"/jobs/{job['id']}")
+            return script_gate(api, job, reviewer) if job["state"] == "script_review" else job
+        if ans == "no":
+            note = ask("What should change? (this guides the rewrite): ")
+            job = api.call("POST", f"/jobs/{job['id']}/script/reject", {"feedback": note, "reviewer": reviewer})
+            job = wait_for(api, job["id"], {"script_review"}, "rewriting the script")
+            continue
+        if ans == "edit":
+            edited = edit_script_draft(job)
+            return api.call("POST", f"/jobs/{job['id']}/script/approve", {"reviewer": reviewer, "edited_script": edited})
+        return api.call("POST", f"/jobs/{job['id']}/script/approve", {"reviewer": reviewer})
+
+
 def keyword_gate(api: Api, job: dict, reviewer: str = "", file_terms: list[str] | None = None) -> dict:
     while True:
-        print("\n=== GATE 1: keywords ===  (why: everything after this is built from what you pick)\n")
+        # Auto-approved by default since the 2026-09-25 reorder (docs/PIPELINE_STAGES.md) -- this only ever
+        # runs at all when the job set providers.options.auto_approve_keywords: false, restoring it as a
+        # real gate ("Gate 1½" in the docs, between script and asset review).
+        print("\n=== GATE 1½: keywords ===  (why: everything after this is built from what you pick)\n")
         kws = job["keywords"]
         for i, k in enumerate(kws, 1):
             extra = f"  vol~{k['search_volume']}" if k.get("search_volume") else ""
@@ -438,11 +541,15 @@ def main() -> None:
                     help="same as --per-query but for video clips (overrides [sources] videos_per_query, default 2)")
     ap.add_argument("--quiet", action="store_true", help="don't stream the pipeline's activity log while waiting")
     ap.add_argument("--debug", action="store_true", help="stream DEBUG detail too (every HTTP request); the full log is always in the project's logs/ folder")
+    ap.add_argument("--no-color", action="store_true", help="plain-text activity log, no ANSI colors (auto-off "
+                     "already when output isn't a terminal, e.g. piped to a file; same as setting NO_COLOR)")
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
 
     api = Api(args.api)
     LOG["show"], LOG["level"] = not args.quiet, "DEBUG" if args.debug else "INFO"
+    if args.no_color:
+        os.environ["NO_COLOR"] = "1"
     file_terms: list[str] = []
     keywords_provenance: dict | None = None
     keywords_provider = args.keywords
@@ -474,7 +581,7 @@ def main() -> None:
         if args.videos_per_query is not None:
             options["videos_per_query"] = args.videos_per_query
         if file_terms and keywords_provider == "manual":
-            options["seed_keywords"] = file_terms          # Gate 1 will show exactly these keywords
+            options["seed_keywords"] = file_terms          # keyword approval will show exactly these keywords
             if keywords_provenance:
                 options["keywords_provenance"] = keywords_provenance
         if args.urls:
@@ -513,11 +620,13 @@ def main() -> None:
         api.call("POST", f"/jobs/{job['id']}/start", {"reviewer": reviewer})
 
     # Each gate only runs if the job hasn't already passed it (matters when resuming).
-    order = ["created", "keywords_running", "keywords_review", "sourcing_running", "vetting_running",
-             "assets_review", "scenes_running", "scenes_review", "rendering", "completed"]
+    order = JOB_STATE_ORDER
     def at(name: str) -> bool:
         state = api.call("GET", f"/jobs/{job['id']}")["state"]
         return (order.index(state) if state in order else len(order)) <= order.index(name)
+    if at("script_review"):
+        job = wait_for(api, job["id"], {"script_review"}, "writing the script")
+        job = script_gate(api, job, reviewer)
     if at("keywords_review"):
         job = wait_for(api, job["id"], {"keywords_review"}, "researching keywords")
         job = keyword_gate(api, job, reviewer, [] if keywords_provider == "manual" else file_terms)

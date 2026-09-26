@@ -25,10 +25,45 @@ import httpx
 from ...core import joblog
 from ...core.decisions import ai
 from ..llm_http import post_chat
-from ...core.models import Job, Keyword
-from ...sources.groups import ARCHIVE_SOURCES, STOCK_SOURCES, useful_groups
+from ...core.models import Job, Keyword, Scene
+from ...sources.groups import ARCHIVE_SOURCES, GROUP_DEFINITIONS, STOCK_SOURCES, useful_groups
 from ...niches import NICHE_KEYWORD_GUIDANCE
 from ..base import StageContext
+
+# Same order the original hardcoded prompt always listed them in -- research (text-only) first, then the
+# three visual-search groups roughly narrowest-to-broadest (case -> historical -> stock).
+_GROUP_ORDER = ("research", "case", "historical", "stock")
+
+
+def _group_definitions_block() -> str:
+    """The "research"/"case"/"historical"/"stock" bullet list PROMPT shows the model, built from
+    pipeline/sources/groups.py's GROUP_DEFINITIONS (itself read from config/query_groups.toml) instead of
+    being hardcoded here -- so editing a group's wording in that one file changes this prompt (and Gate 2's
+    "Suggest more search terms", which reuses this same stage) without touching Python."""
+    label_width = max(len(f'"{n}"') for n in _GROUP_ORDER) + 1
+    lines = []
+    for name in _GROUP_ORDER:
+        d = GROUP_DEFINITIONS.get(name, {})
+        label = f'"{name}"'.ljust(label_width)
+        desc = (d.get("description") or "").strip()
+        example, why = (d.get("example") or "").strip(), (d.get("example_why") or "").strip()
+        tail = ""
+        if example:
+            tail = f' Example: "{example}"' + (f" ({why})." if why else ".")
+        lines.append(f"  {label}-- {desc}{tail}")
+    return "\n".join(lines)
+
+
+def _already_covered_guidance(already_covered: list[str] | None) -> str:
+    """Gate 2's "Suggest more search terms" (unlike Gate 1's first batch) runs against a job that may
+    already have keywords -- approved, or left unapproved from an earlier round -- so the model needs to
+    know what NOT to repeat. Empty string (no extra prompt text at all) when there's nothing to list, so a
+    Gate-1 run (which never passes this) gets byte-for-byte the same prompt as before this existed."""
+    terms = sorted({t.strip() for t in (already_covered or []) if t.strip()})
+    if not terms:
+        return ""
+    return ("\nThese search phrases already exist for this job, from an earlier round -- do not repeat any "
+            "of them or offer a near-duplicate of one: " + "; ".join(terms) + "\n")
 
 
 def _source_guidance(sources: list[str]) -> str:
@@ -88,18 +123,7 @@ Every phrase belongs to exactly one GROUP, which decides which libraries it is e
 wrong group for what it's asking for will search nothing useful). These are SEARCH EXAMPLES showing what a
 phrase in each group looks like -- not a claim that matching material exists or will be found; do not invent
 names, dates or addresses you are not confident are real just to fill a group:
-  "research"   -- background reading for the narration itself, not a visual search. Sent only to Wikipedia.
-                  Example: "Corazon Amurao Dyatlov" (a real full name + event, so an article can be found --
-                  not a generic topic phrase like "the case explained").
-  "case"       -- names a SPECIFIC real, verifiable person, place, document or moment tied directly to this
-                  case: an actual name, a specific address, an interview, a court proceeding. Example:
-                  "Corazon Amurao interview" (a specific person and moment -- not a guarantee a matching
-                  photo exists, just an honest, specific search).
-  "historical" -- the general era, place or everyday life the case happened in, WITHOUT claiming to show the
-                  specific people or event. Example: "Chicago residential streets 1960s" (the era/place, not
-                  a specific person or moment).
-  "stock"      -- a generic, timeless visual description with no connection to this specific case -- a shot
-                  that could illustrate many different stories. Example: "empty hospital hallway".
+{group_definitions}
 
 Rules for a good phrase:
 - 2 to 6 words, specific enough that a real photo or clip could actually match it. Never a single word (it
@@ -112,6 +136,7 @@ Rules for a good phrase:
   the topic, not a photo or clip OF something -- a photo/video library has nothing that will match them.
 {source_guidance}
 {niche_guidance}
+{already_covered}
 - Do not repeat yourself or offer near-duplicate phrases.
 
 Return ONLY a JSON array of {n} objects, best first, each with:
@@ -129,6 +154,63 @@ Return ONLY a JSON array of {n} objects, best first, each with:
 """
 
 
+# Reordered 2026-09-25 (docs/PIPELINE_STAGES.md): the script now exists BEFORE any keyword does, so instead
+# of N subject-wide phrases assigned to scenes arbitrarily (the old round-robin `keywords[i % len(keywords)]`,
+# pipeline/stages/scenes/mpt.py), this asks for a SHOT LIST per scene, anchored to that scene's own
+# narration. Kept as a separate prompt/method (run_for_scenes, below) rather than replacing PROMPT/run() above,
+# which Gate 2's "Suggest more search terms" still uses unchanged for subject-wide, scene-agnostic top-ups.
+#
+# NEW 2026-09-26 (docs/ROADMAP.md backlog item F, "richer per-scene shot list"): each scene now asks for 2-4
+# ordered queries instead of exactly one, so a scene isn't sunk by one overly-specific phrase finding nothing.
+# The queries still collapse onto ONE Keyword per scene (queries[0] -> Keyword.term, queries[1:] ->
+# Keyword.alternatives) rather than becoming separate Keywords -- see parse_scene_keywords() below for why:
+# it keeps every existing scene_index/routing/approval invariant (#F) intact instead of reopening them.
+SCENE_PROMPT = """You are building a SHOT LIST of real-photo/video SEARCH QUERIES for each scene of a short
+video's already-written narration, about: {subject}
+{feedback}
+These phrases are SEARCH QUERIES for photo/video and reference-text libraries -- not SEO keywords, and not a
+paraphrase of the narration itself. A person will never read them; only a search box will. Libraries being
+searched this round: {sources_line}
+
+Every scene's shot list belongs to exactly one GROUP, which decides which libraries it is even sent to (a
+phrase in the wrong group for what it's asking for will search nothing useful). These are SEARCH EXAMPLES
+showing what a phrase in each group looks like -- not a claim that matching material exists or will be
+found; do not invent names, dates or addresses you are not confident are real just to fill a group:
+{group_definitions}
+
+Rules for a good shot list:
+- For EACH scene, return 2 to 4 queries, ordered from the ideal, highly specific shot to a broad, reliable
+  fallback -- so if the specific query turns up nothing, the next one still has a real chance of matching
+  something. The FIRST query is the single most concrete, picturable subject actually named in that scene's
+  own narration below (a place, person, document, object, date or moment) -- not a summary or paraphrase of
+  the sentence. Each query after it should widen the visual ask a step at a time (drop a specific name/date
+  for the type of place or era it belongs to, then to the plainest generic visual that still fits the scene)
+  while staying true to what the scene is actually about -- never a random or unrelated fallback.
+- Every query: 2 to 6 words, specific enough that a real photo or clip could actually match it. Never a
+  single word (it matches too much random, unrelated material).
+- Think like someone browsing a photo archive, not a marketer: what could a camera literally show?
+- Never use search-engine or social-media framing in any query: no "explained", "documentary", "TikTok",
+  "2024 update", "facts", "top 10", or similar.
+{source_guidance}
+{niche_guidance}
+{already_covered}
+- Do not repeat yourself or offer near-duplicate phrases across different scenes.
+
+Here is each scene's narration, in order:
+{scenes_block}
+
+Return ONLY a JSON array with exactly one object per scene above, in the same order, each with:
+  "scene_index" (integer, matching the scene number shown above -- required, and must be unique across
+  the array),
+  "queries" (array of 2 to 4 strings, ordered specific-first then broadening -- everything above applies to
+  this field specifically),
+  "group" (one of "research"/"case"/"historical"/"stock", per the definitions above -- required; applies to
+  every query in this scene's list),
+  "why" (one short sentence on what the FIRST query would actually show on screen, tied to that scene's own
+  narration).
+"""
+
+
 class LLMKeywordStage:
     def __init__(self, base_url: str, api_key: str, model: str, count: int = 10, timeout: float = 120,
                  fallback: dict | None = None):
@@ -141,15 +223,26 @@ class LLMKeywordStage:
         self.actor = ai("keyword-llm", model=model)
         self.last_trace: dict = {}
 
-    async def run(self, job: Job, ctx: StageContext) -> list[Keyword]:
+    async def run(self, job: Job, ctx: StageContext, *, already_covered: list[str] | None = None,
+                  extra_feedback: str = "") -> list[Keyword]:
+        """`already_covered` and `extra_feedback` are both optional and both default to Gate 1's exact
+        original behavior when omitted -- Gate 2's "Suggest more search terms" (orchestrator.suggest_keywords)
+        is the only caller that passes them, asking for MORE phrases mid asset-review without reopening
+        Gate 1: `already_covered` (job.keywords' own terms at call time) stops the model repeating a phrase
+        already searched or already sitting unapproved from an earlier round; `extra_feedback` is whatever
+        the reviewer typed about what's specifically missing this time."""
         feedback = ""
         if job.keyword_feedback:
             notes = "\n".join(f"- {f}" for f in job.keyword_feedback)
             feedback = f"The reviewer rejected earlier suggestions. Their notes:\n{notes}\n"
+        if extra_feedback.strip():
+            feedback += f"The reviewer specifically asked for: {extra_feedback.strip()}\n"
         sources = list(job.providers.sources)
         sources_line = ", ".join(sources) if sources else "none -- your own library/clips/ folder only"
         prompt = PROMPT.format(subject=job.subject, feedback=feedback, n=self.count, sources_line=sources_line,
-                               source_guidance=_source_guidance(sources), niche_guidance=_niche_guidance(job.niche))
+                               source_guidance=_source_guidance(sources), niche_guidance=_niche_guidance(job.niche),
+                               group_definitions=_group_definitions_block(),
+                               already_covered=_already_covered_guidance(already_covered))
 
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         joblog.info("keywords", f"asking {self.model} for {self.count} keywords about '{job.subject}'")
@@ -163,7 +256,8 @@ class LLMKeywordStage:
         endpoint_used = self.fallback["base_url"] if getattr(resp, "pipeline_fell_back", False) and self.fallback else self.base_url
         self.last_trace = {"prompt": prompt, "model": model_used, "endpoint": endpoint_used,
                            "feedback_used": list(job.keyword_feedback), "sources_this_round": sources,
-                           "niche": job.niche,
+                           "niche": job.niche, "already_covered": sorted({t.strip() for t in (already_covered or []) if t.strip()}),
+                           "extra_feedback": extra_feedback.strip(),
                            "note": "phrases are aimed at photo/video archive search for these sources, not SEO; "
                                     "volume/difficulty are the model's estimates, not measured data"}
         if getattr(resp, "pipeline_fell_back", False):
@@ -174,6 +268,54 @@ class LLMKeywordStage:
         kws = parse_keywords(text, source=f"llm:{model_used}")
         joblog.info("keywords", f"got {len(kws)} keywords", terms=[k.term for k in kws])
         return kws
+
+    async def run_for_scenes(self, job: Job, ctx: StageContext, scenes: list[Scene], *,
+                              already_covered: list[str] | None = None, extra_feedback: str = "") -> list[Keyword]:
+        """The new keywords_running (docs/PIPELINE_STAGES.md): a shot list of 2-4 ordered search queries
+        per scene, anchored to that scene's own narration (Keyword.scene_index/.term/.alternatives),
+        instead of N subject-wide terms with no connection to any particular paragraph. `already_covered`/
+        `extra_feedback` mean the same as on run() above, though nothing currently passes them here (Gate 1
+        no longer reruns keyword generation directly -- it reruns write_script(), which reruns this after)."""
+        feedback = ""
+        if job.keyword_feedback:
+            notes = "\n".join(f"- {f}" for f in job.keyword_feedback)
+            feedback = f"The reviewer rejected earlier suggestions. Their notes:\n{notes}\n"
+        if extra_feedback.strip():
+            feedback += f"The reviewer specifically asked for: {extra_feedback.strip()}\n"
+        sources = list(job.providers.sources)
+        sources_line = ", ".join(sources) if sources else "none -- your own library/clips/ folder only"
+        prompt = SCENE_PROMPT.format(subject=job.subject, feedback=feedback, sources_line=sources_line,
+                                     source_guidance=_source_guidance(sources), niche_guidance=_niche_guidance(job.niche),
+                                     group_definitions=_group_definitions_block(),
+                                     already_covered=_already_covered_guidance(already_covered),
+                                     scenes_block=_scenes_block(scenes))
+
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        joblog.info("keywords", f"asking {self.model} for a per-scene shot list ({len(scenes)} scenes) about '{job.subject}'")
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await post_chat(client, f"{self.base_url}/chat/completions", headers,
+                                   {"model": self.model, "messages": [{"role": "user", "content": prompt}]},
+                                   what="keyword model", fallback=self.fallback)
+            resp.raise_for_status()
+        model_used = getattr(resp, "pipeline_model", self.model)
+        endpoint_used = self.fallback["base_url"] if getattr(resp, "pipeline_fell_back", False) and self.fallback else self.base_url
+        self.last_trace = {"prompt": prompt, "model": model_used, "endpoint": endpoint_used,
+                           "feedback_used": list(job.keyword_feedback), "sources_this_round": sources,
+                           "niche": job.niche, "already_covered": sorted({t.strip() for t in (already_covered or []) if t.strip()}),
+                           "extra_feedback": extra_feedback.strip(), "scenes": len(scenes),
+                           "note": "a 2-4 query shot list per scene (specific-first), anchored to that scene's own narration"}
+        if getattr(resp, "pipeline_fell_back", False):
+            self.last_trace["fell_back_from"] = {"model": self.model, "endpoint": self.base_url}
+            self.last_trace["provider"] = getattr(resp, "pipeline_provider", "backup")
+            self.actor = ai("keyword-llm", model=model_used)
+        text = resp.json()["choices"][0]["message"]["content"]
+        kws = parse_scene_keywords(text, source=f"llm:{model_used}", scenes=scenes)
+        joblog.info("keywords", f"got {len(kws)} scene keyword(s)", terms=[k.term for k in kws])
+        return kws
+
+
+def _scenes_block(scenes: list[Scene]) -> str:
+    return "\n".join(f"Scene {s.index}: {s.narration}" for s in scenes)
 
 
 _VALID_GROUPS = {"research", "case", "historical", "stock"}
@@ -249,6 +391,55 @@ def parse_keywords(text: str, source: str) -> list[Keyword]:
         )
     if not out:
         raise ValueError("keyword model returned no usable keywords")
+    return out
+
+
+def _shot_list_queries(item: dict) -> list[str]:
+    """The 2-4 ordered queries for one scene item -- SCENE_PROMPT's "queries" array normally, but
+    tolerant of a model that ignores the new field and still answers with the old single "term"
+    (a stale cached response, a weaker fallback model, or a non-conforming replay) so a format slip
+    degrades to a 1-query shot list instead of dropping the scene's keyword entirely."""
+    raw = item.get("queries")
+    if not isinstance(raw, list) or not raw:
+        raw = [item.get("term")] if item.get("term") else []
+    # Dedup while preserving the model's own specific-to-broad order; blank/non-string entries dropped.
+    return list(dict.fromkeys(str(q).strip() for q in raw if str(q or "").strip()))
+
+
+def parse_scene_keywords(text: str, source: str, scenes: list[Scene]) -> list[Keyword]:
+    """Like parse_keywords() above, but each item must carry a valid, unique `scene_index` matching
+    one of `scenes` -- a malformed/duplicate/out-of-range one is skipped rather than failing the whole
+    batch (Orchestrator._assign_keywords_to_scenes fills any scene this leaves uncovered).
+
+    NEW 2026-09-26 (docs/ROADMAP.md backlog item F): each scene item now carries a "queries" shot list
+    (2-4 strings, most-specific-first) instead of one "term". This still produces exactly ONE Keyword
+    per scene -- queries[0] becomes Keyword.term (everything that already reads .term, e.g. sourcing's
+    queries_for(), routing, the decision log, keeps working unchanged) and queries[1:] become
+    Keyword.alternatives (a field that already existed for exactly this: "other phrasings to try if
+    this one comes up empty"). Orchestrator._apply_keyword_terms_to_scenes() is what turns that back
+    into Scene.search_terms' own ordered list for pipeline/stages/scenes/clips.py to try in order."""
+    array_text = _extract_json_array(text)
+    if not array_text:
+        raise ValueError("keyword model did not return a JSON array")
+    items = json.loads(array_text)
+    valid_indices = {s.index for s in scenes}
+    seen: set[int] = set()
+    out = []
+    for rank, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        queries = _shot_list_queries(item)
+        if not queries:
+            continue
+        idx = _int(item.get("scene_index"))
+        if idx is None or idx not in valid_indices or idx in seen:
+            continue
+        seen.add(idx)
+        out.append(Keyword(term=queries[0], alternatives=queries[1:], source=source, rank=rank,
+                           meta={"why": item.get("why", ""), "estimated": True, "shot_list": queries},
+                           group=_group(item.get("group")), scene_index=idx))
+    if not out:
+        raise ValueError("keyword model returned no usable scene keywords")
     return out
 
 

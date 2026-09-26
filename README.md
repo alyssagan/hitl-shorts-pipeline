@@ -4,7 +4,7 @@
 
 **Make faceless short videos with an AI doing the legwork and you making the calls.**
 
-Keyword research → *you approve* → script, voice and scenes → *you approve* → final render
+Script, grounded in research → *you approve* → keywords, assets and scenes → *you approve* → final render
 
 `Python 3.11` · `Docker` · `Runs locally` · `Bring your own APIs`
 
@@ -15,16 +15,17 @@ Keyword research → *you approve* → script, voice and scenes → *you approve
 ## What it does
 
 Most video generators run start to finish and hand you whatever comes out. This one **stops three
-times and asks you first**, so bad keywords, risky images, or a weak script never reach the render.
+times and asks you first**, so a weak script, bad keywords, or risky images never reach the render.
 
 | Step | Who works | What happens |
 |:---:|---|---|
-| 1 | Machine | Analyzes your topic and proposes ranked keywords |
-| **Gate 1** | **You** | Approve, add, or reject keywords (rejections come with notes the next run uses) |
-| 2 | Machine | Pulls text and images for those keywords from **Wikipedia, Wikimedia Commons, Pexels, Pixabay, Unsplash, NASA, Internet Archive, Library of Congress, Chronicling America, Smithsonian, Openverse, DPLA, Flickr, Europeana, your own list of URLs** (or your own scraper's folder). Pick any combination with `--sources`. Each source gets its own folder in the project, with a log of every request |
+| 1 | Machine | Writes the narration first, grounded on your subject (research pulled straight from Wikipedia, no keyword needed for that) |
+| **Gate 1** | **You** | Approve the script as written, or edit it first |
+| 1b | Machine | Derives a 2-4 query shot list per scene (most specific first, then broader fallbacks) from the approved narration -- auto-approved by default, folded into Gate 2 below (can be turned back into its own gate, see [docs/PIPELINE_STAGES.md](docs/PIPELINE_STAGES.md)) |
+| 2 | Machine | Pulls text and images for those terms from **Wikipedia, Wikimedia Commons, Pexels, Pixabay, Unsplash, NASA, Internet Archive, Library of Congress, Chronicling America, Smithsonian, Openverse, DPLA, Flickr, Europeana, your own list of URLs** (or your own scraper's folder). Pick any combination with `--sources`. Each source gets its own folder in the project, with a log of every request |
 | 2b | Machine | **Vets** every file with plain, readable rules: license, people, sensitive content, size. It flags and explains. It never deletes anything |
 | **Gate 2** | **You** | Approve or reject each asset, seeing the risk and *why* it was flagged. High-risk approvals need a written reason |
-| 3 | Machine | [MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo) writes the script (grounded in the Wikipedia text) and picks a clip per scene from **approved assets only** |
+| 3 | Machine | Matches a clip to each scene from **approved assets only**, using that scene's own search term, and (optionally) renders narration audio via [MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo) |
 | **Gate 3** | **You** | Reorder scenes, edit narration, swap clips, approve |
 | 4 | Machine | Renders using **your exact scene order** and writes `CREDITS.md` |
 
@@ -36,10 +37,13 @@ Every decision, by you, by an AI model, or by a rule, is written to the project'
 ```mermaid
 stateDiagram-v2
     [*] --> CREATED
-    CREATED --> KEYWORDS_RUNNING: start
+    CREATED --> SCRIPT_RUNNING: start
+    SCRIPT_RUNNING --> SCRIPT_REVIEW: script ready
+    SCRIPT_REVIEW --> KEYWORDS_RUNNING: approve script
+    SCRIPT_REVIEW --> SCRIPT_RUNNING: reject + feedback
     KEYWORDS_RUNNING --> KEYWORDS_REVIEW: keywords ready
-    KEYWORDS_REVIEW --> SOURCING_RUNNING: approve keywords (job uses sources)
-    KEYWORDS_REVIEW --> SCENES_RUNNING: approve keywords (no sources)
+    KEYWORDS_REVIEW --> SOURCING_RUNNING: approve keywords (job uses sources, auto by default)
+    KEYWORDS_REVIEW --> SCENES_RUNNING: approve keywords (no sources, auto by default)
     KEYWORDS_REVIEW --> KEYWORDS_RUNNING: reject + feedback
     SOURCING_RUNNING --> VETTING_RUNNING: files pulled
     VETTING_RUNNING --> ASSETS_REVIEW: risks flagged
@@ -53,6 +57,10 @@ stateDiagram-v2
     RENDERING --> COMPLETED: render done
     COMPLETED --> [*]
 ```
+
+`KEYWORDS_REVIEW` is auto-approved by default (`job.providers.options["auto_approve_keywords"]`,
+default `True`), so a normal run passes through it without stopping -- see
+[docs/PIPELINE_STAGES.md](docs/PIPELINE_STAGES.md) for how to turn it back into a real gate.
 
 Any running step can move to **FAILED** and be retried from the same step. Any unfinished job can be
 **CANCELLED**. State is saved to disk after every change, so a restart picks up where it stopped.
@@ -136,8 +144,10 @@ that are legal right now, so buttons can enable and disable themselves.
 |---|---|
 | Create a job | `POST /jobs` `{subject, providers?}` |
 | Start analysis | `POST /jobs/{id}/start` |
-| **Gate 1** approve | `POST /jobs/{id}/keywords/review` `{approved_ids, extra_terms?}` |
-| **Gate 1** reject | `POST /jobs/{id}/keywords/reject` `{feedback}` |
+| **Gate 1** approve | `POST /jobs/{id}/script/approve` `{edited_script?}` |
+| **Gate 1** reject | `POST /jobs/{id}/script/reject` `{feedback}` |
+| **Gate 1½** approve (only if auto-approve is off) | `POST /jobs/{id}/keywords/review` `{approved_ids, extra_terms?}` |
+| **Gate 1½** reject (only if auto-approve is off) | `POST /jobs/{id}/keywords/reject` `{feedback}` |
 | **Gate 2** decide per asset | `POST /jobs/{id}/assets/review` `{decisions: {asset_id: {decision, note}}, reviewer}` |
 | **Gate 2** done | `POST /jobs/{id}/assets/approve` `{reviewer}` |
 | **Gate 2** search again | `POST /jobs/{id}/assets/reject` `{feedback, extra_queries?, reviewer}` |
@@ -162,10 +172,10 @@ hitl-shorts-pipeline/
 ├── pipeline/
 │   ├── core/        The brain: state machine, models, storage, orchestrator, decision log
 │   ├── sources/     Where data is pulled from: wikipedia.py, commons.py, pexels.py, pixabay.py, unsplash.py, nasa.py, internet_archive.py, loc.py, smithsonian.py, urls.py, folder.py
-│   ├── vetting/     rules.py: the explainable risk rules
+│   ├── vetting/     rules.py: the explainable risk rules. report.py: writes VETTING_REPORT.md
 │   ├── stages/      Swappable steps
 │   │   ├── keywords/    manual.py, llm.py        <- add SEO providers here
-│   │   ├── scenes/      mpt.py, clips.py         <- add clip sources here
+│   │   ├── scenes/      mpt.py, clips.py, writer.py, report.py (writes SCRIPT.md)  <- add clip sources here
 │   │   └── render/      mpt.py
 │   └── api/         HTTP API for your UI
 ├── config/          pipeline.toml, mpt-presets/
@@ -188,6 +198,8 @@ projects/cute-cats-294eb679f060/
 ├── decisions.jsonl       every decision, append-only and hash-chained (tamper-evident)
 ├── DECISIONS.md          the same log, readable
 ├── SOURCES.md            every photo, clip and text pulled, with its link, license and status (updated as you go)
+├── VETTING_REPORT.md     risk + relevance for every vetted asset, with every flag and why it fired (updated as you go)
+├── SCRIPT.md             the narration, scene by scene, with each scene's search term, matched clip and why (updated as you go)
 ├── CREDITS.md            attribution for every approved asset (written at render)
 ├── sources/
 │   ├── wikipedia/  requests.jsonl  manifest.json  files/   (article text)
@@ -199,13 +211,14 @@ projects/cute-cats-294eb679f060/
 - `requests.jsonl`: every web request, with URL, purpose and result, so you can see exactly where data came from.
 - `manifest.json`: every kept file with its source URL, license, author, hash, the machine's risk flags, and your decision.
 - `decisions.jsonl`: who decided what, when, why, and by what logic. Actors are `human` (your name), `ai` (model recorded), or `machine` (a rule, with its version).
+- `VETTING_REPORT.md` and `SCRIPT.md` are regenerated in full every time the job changes, same as `SOURCES.md` -- neither exists until its stage has actually run. Every stage's inputs/outputs, in order: [docs/PIPELINE_STAGES.md](docs/PIPELINE_STAGES.md).
 
 How risk is judged, rule by rule: [docs/VETTING.md](docs/VETTING.md). How relevance is scored: [docs/SCORING.md](docs/SCORING.md).
 Checking whether a scoring method/version is actually any good: [docs/EVALUATION.md](docs/EVALUATION.md). Adding another scraping
 source: [docs/ADD_A_SOURCE.md](docs/ADD_A_SOURCE.md). Trade-offs we chose on purpose and may improve: [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md). Voices, models and sources to try, with results: [docs/OPTIONS_TO_TRY.md](docs/OPTIONS_TO_TRY.md).
 Optional content niches (True Crime, Conspiracy, Science, Pet Product, Food/Bakery) that bias keyword phrasing and add a
 per-asset aesthetic/relevance evaluation at Gate 2: [docs/NICHES.md](docs/NICHES.md).
-Optional script-writing styles (4 retention-mechanics scriptwriter personas, independent of niches) for the Gate 3
+Optional script-writing styles (4 retention-mechanics scriptwriter personas, independent of niches) for the Gate 1
 scriptwriter: [docs/SCRIPT_STYLES.md](docs/SCRIPT_STYLES.md).
 
 ## Adding your own provider

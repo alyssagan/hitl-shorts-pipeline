@@ -44,6 +44,11 @@ services:
       - ./library/scraped:/app/library/scraped
       - ./library/clips:/app/library/clips
       - ./config/pipeline.toml:/app/config/pipeline.toml:ro
+      # The four search-query groups' wording (pipeline/sources/groups.py, pipeline/stages/keywords/llm.py) --
+      # mounted read-only the same way pipeline.toml above is, so editing an example/description here only
+      # needs `docker compose restart pipeline` (it's read once at process start, same as pipeline.toml),
+      # never a full `--build`.
+      - ./config/query_groups.toml:/app/config/query_groups.toml:ro
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on: [mpt]
     restart: unless-stopped

@@ -97,8 +97,9 @@ exactly as before.
 
 ## Script-writing styles (4 scriptwriter personas)
 Set `--script-style` (or `"script_style"` in `POST /jobs`) to one of `true_crime_mystery`, `stem_science`,
-`dtc_marketing`, `math_cs` and the Gate 3 scriptwriter uses that persona's system prompt and word-count target
-instead of its default source-grounded prompt. Independent of `--niche` -- set either, neither, or both. See
+`dtc_marketing`, `math_cs` and the scriptwriter (Gate 1, since the 2026-09-25 reorder -- docs/PIPELINE_STAGES.md)
+uses that persona's system prompt and word-count target instead of its default source-grounded prompt.
+Independent of `--niche` -- set either, neither, or both. See
 **docs/SCRIPT_STYLES.md**, especially "Accuracy trade-off": unlike the default prompt, none of these 4 ground
 the script in sourced text. Optional; omit it and a job behaves exactly as before.
 
@@ -185,9 +186,10 @@ version of this at Gate 3, for adding footage to one specific scene once scenes 
 
 ## Keyword files, always
 Every job writes its own `keywords_proposed.json` (what the keyword stage came up with, before you decide
-anything) and, once you approve at Gate 1, `keywords_approved.json` (the final list, in
-`projects/<name>-<id>/`) -- for **every** `--keywords` provider, not just `llm`. This is what those two files
-look like:
+anything) and, once its keywords are approved -- "Gate 1½" (docs/PIPELINE_STAGES.md), auto-approved by
+default and folded into Gate 2, or a real human decision if you turn that off --
+`keywords_approved.json` (the final list, in `projects/<name>-<id>/`) -- for **every** `--keywords` provider,
+not just `llm`. This is what those two files look like:
 
 ```json
 // keywords_proposed.json
@@ -215,7 +217,7 @@ Open it in any editor, add one phrase per line, save, press Enter in the termina
 Enter right away) falls back to the old subject-derived guess, exactly like before this existed -- nothing is
 worse off, you just get a real file to work from if you want one.
 
-**Reusing a subject's keywords**: once a job's keywords clear Gate 1, they're also copied into
+**Reusing a subject's keywords**: once a job's keywords are approved (Gate 1½), they're also copied into
 `library/keywords/<subject slug>/<job id>.json` -- a small per-subject library (config/pipeline.toml's
 `[library] keywords_dir`; blank to turn this off). The next time you run `poc.py` with the same subject (and no
 `--keywords-file`), it offers what's there before doing anything else:
@@ -228,9 +230,10 @@ Reuse one of these (1-2), or press Enter to generate fresh keywords instead:
 ```
 
 Picking one only *reads* that saved file -- your new job gets its own `keywords_proposed.json`/
-`keywords_approved.json` and still goes through Gate 1 for you to add, drop or reject terms; nothing already
-saved is ever modified or overwritten (every job's copy is named by its own job id). Pressing Enter falls
-through to whatever `--keywords` you passed, same as if nothing had been saved yet.
+`keywords_approved.json`; nothing already saved is ever modified or overwritten (every job's copy is named by
+its own job id). These terms still go through keyword approval (Gate 1½) like any other job's, so they're
+auto-approved by default -- add, drop, or reject them yourself only if you've turned that off for this job.
+Pressing Enter falls through to whatever `--keywords` you passed, same as if nothing had been saved yet.
 
 An explicit `--keywords-file FILE` always wins over both of these -- it skips the reuse prompt and the draft
 file entirely and loads exactly that file, same as it always has.
@@ -238,3 +241,8 @@ file entirely and loads exactly that file, same as it always has.
 ## See what's happening
 The terminal now streams the pipeline's activity log while it works (`--quiet` to hide, `--debug` for more). Every project has its own
 `logs/pipeline.log`, and the review page has an Activity log panel. Details and a debugging checklist: docs/LOGGING.md.
+
+In a real terminal, that stream is colored automatically (dim timestamp, colored level, bold stage --
+WARN/ERROR in a long run of INFO lines jump out without reading every word) and shows just the time, not the
+full date. Piped to a file or a non-terminal, it's plain text with no color codes, same as always. `--no-color`
+(or `NO_COLOR=1`) turns it off in a real terminal too; `FORCE_COLOR=1` turns it on even when piped.

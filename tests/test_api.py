@@ -38,11 +38,14 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(r.json()["allowed_events"], ["cancel", "start"])
 
         self.client.post(f"/jobs/{jid}/start")
-        job = self.wait_for(jid, "keywords_review")
+        job = self.wait_for(jid, "script_review")
         self.assertNotIn("approve_keywords", job["allowed_events"])   # guard visible to the UI
+        self.assertTrue(job["script"])
 
-        r = self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [job["keywords"][0]["id"]]})
-        self.assertEqual(r.json()["state"], "scenes_running")
+        r = self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "tester"})
+        self.assertEqual(r.json()["state"], "keywords_running")
+        # Keywords are auto-approved by default (docs/PIPELINE_STAGES.md), folded into gate 2 --
+        # no keywords/review call needed here, unlike the old flow.
         job = self.wait_for(jid, "scenes_review")
 
         ids = [s["id"] for s in job["scenes"]]

@@ -23,7 +23,12 @@ class ApiSourcesTests(unittest.TestCase):
         reg, _ = fake_registry()
         reg.source_transport = httpx.MockTransport(handler)
         reg.register_source("commons", lambda: CommonsSource(per_query=5))
-        self.client = TestClient(create_app(Orchestrator(JobStore(self.tmp.name), reg), settings={}))
+        # Keywords are auto-approved by default since the 2026-09-25 reorder (docs/PIPELINE_STAGES.md);
+        # this test file exercises keywords_review as a real, human-facing gate throughout (timing,
+        # decision-log assertions, "Generate from approved keywords"), so it turns auto-approval back off
+        # for every job it creates.
+        settings = {"keywords": {"auto_approve_keywords": False}}
+        self.client = TestClient(create_app(Orchestrator(JobStore(self.tmp.name), reg, settings), settings=settings))
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)
 
@@ -43,6 +48,8 @@ class ApiSourcesTests(unittest.TestCase):
                                             "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
         j = self.wait(jid, "keywords_review")
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
         j = self.wait(jid, "assets_review")
@@ -82,6 +89,8 @@ class LabelTests(ApiSourcesTests):
                                             "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
         j = self.wait(jid, "keywords_review")
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
         j = self.wait(jid, "assets_review")
@@ -112,6 +121,8 @@ class AssetsAddUrlEndpointTests(ApiSourcesTests):
                                             "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
         j = self.wait(jid, "keywords_review")
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
         j = self.wait(jid, "assets_review")
@@ -177,6 +188,8 @@ class YoutubeSearchEndpointTests(ApiSourcesTests):
                                             "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
         j = self.wait(jid, "keywords_review")
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
         j = self.wait(jid, "assets_review")
@@ -296,6 +309,8 @@ class RejectAssetsStockAndDeferEndpointTests(ApiSourcesTests):
                                             "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
         j = self.wait(jid, "keywords_review")
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
         j = self.wait(jid, "assets_review")
@@ -383,6 +398,8 @@ class AssetIdentityRightsCategoryReportEndpointTests(ApiSourcesTests):
                                             "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
         j = self.wait(jid, "keywords_review")
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
         j = self.wait(jid, "assets_review")
@@ -437,6 +454,8 @@ class VisualCoverageEndpointTests(ApiSourcesTests):
                                             "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
         j = self.wait(jid, "keywords_review")
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
         j = self.wait(jid, "assets_review")
@@ -460,6 +479,8 @@ class VisualCoverageEndpointTests(ApiSourcesTests):
                                             "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
         j = self.wait(jid, "keywords_review")
         term = j["keywords"][0]["term"]
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
@@ -502,6 +523,8 @@ class SceneCropEndpointTests(ApiSourcesTests):
                                             "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
         j = self.wait(jid, "keywords_review")
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
         j = self.wait(jid, "assets_review")
@@ -570,6 +593,8 @@ class LogEndpointTests(ApiSourcesTests):
                                             "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
         j = self.wait(jid, "keywords_review")
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
         self.wait(jid, "assets_review")
@@ -589,6 +614,8 @@ class TimingEndpointTests(ApiSourcesTests):
                                             "providers": {"keywords": "fake", "scenes": "fake", "render": "fake", "sources": ["commons"]}})
         jid = r.json()["id"]
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
         j = self.wait(jid, "keywords_review")
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
         self.wait(jid, "assets_review")
@@ -597,8 +624,9 @@ class TimingEndpointTests(ApiSourcesTests):
         self.assertIn("keywords_running", out["time_per_stage_seconds"])
         self.assertIn("sourcing_running", out["time_per_stage_seconds"])
         self.assertGreaterEqual(out["total_wall_seconds"], 0.0)
-        # time waiting on Aly to approve keywords should show up as exactly one wait
-        self.assertEqual(len(out["waits"]), 1)
+        # time waiting on Aly to approve the script, then the keywords -- two separate human gates now
+        # (docs/PIPELINE_STAGES.md), so two waits.
+        self.assertEqual(len(out["waits"]), 2)
 
         decisions = self.client.get(f"/jobs/{jid}/decisions").json()["entries"]
         self.assertTrue(any(e["action"] == "stage_started" and e["subject"].get("stage") == "keywords_running" for e in decisions))
@@ -634,10 +662,11 @@ class RelevanceScorerWiringTests(unittest.TestCase):
                 jid = r.json()["id"]
                 client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
                 end = time.time() + 5
-                while time.time() < end and client.get(f"/jobs/{jid}").json()["state"] != "keywords_review":
+                while time.time() < end and client.get(f"/jobs/{jid}").json()["state"] != "script_review":
                     time.sleep(0.02)
-                j = client.get(f"/jobs/{jid}").json()
-                client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
+                client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
+                # Keywords are auto-approved by default (docs/PIPELINE_STAGES.md) -- no keywords/review
+                # call needed here, the job runs straight through to sourcing/vetting on its own.
                 end = time.time() + 5
                 while time.time() < end and client.get(f"/jobs/{jid}").json()["state"] != "assets_review":
                     time.sleep(0.02)
@@ -673,6 +702,8 @@ class NicheEndpointTests(ApiSourcesTests):
         jid = r.json()["id"]
         self.assertEqual(r.json()["niche"], "science")
         self.client.post(f"/jobs/{jid}/start", json={"reviewer": "Aly"})
+        self.wait(jid, "script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
         j = self.wait(jid, "keywords_review")
         self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [j["keywords"][0]["id"]], "reviewer": "Aly"})
         j = self.wait(jid, "assets_review")

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from ..core.models import Job, Keyword, Scene
+from ..core.models import Job, Keyword, Scene, TextRef
 
 
 @dataclass
@@ -22,6 +22,10 @@ class StageContext:
 class SceneResult:
     script: str
     scenes: list[Scene]
+    # NEW 2026-09-25: research text write_script() (SCRIPT_RUNNING) fetched this round, for
+    # Orchestrator._apply_script to persist onto job.references -- empty for run() (SCENES_RUNNING),
+    # which never fetches anything new.
+    references: list[TextRef] = field(default_factory=list)
 
 
 @dataclass
@@ -42,9 +46,15 @@ class KeywordStage(Protocol):
 
 @runtime_checkable
 class SceneStage(Protocol):
+    async def write_script(self, job: Job, ctx: StageContext) -> SceneResult:
+        """SCRIPT_RUNNING (front of the pipeline): write the narration and split it into scenes.
+        No clip_path/asset_id/audio yet -- run() below fills those in later, once keywords/assets
+        exist. `job.script_feedback` holds a Gate-1 (script_review) rejection's reviewer notes."""
+
     async def run(self, job: Job, ctx: StageContext) -> SceneResult:
-        """Build script, narration audio and scene assets from
-        `job.approved_keywords`. `job.scene_feedback` holds reviewer notes."""
+        """SCENES_RUNNING (back of the pipeline, after Gate 2): job.script/job.scenes already exist
+        by now -- match a clip (+ optionally audio) to each one, using the per-scene search term(s)
+        KEYWORDS_RUNNING generated. Never rewrites job.script or a scene's narration."""
 
 
 @runtime_checkable

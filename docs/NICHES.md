@@ -22,7 +22,7 @@ nothing here changes any existing job. Five values, from the spec:
 
 ## What it actually changes
 
-**Keyword phrasing (Stage 2 / Gate 1, `pipeline/stages/keywords/llm.py`).** One extra line is appended to
+**Keyword phrasing (`KEYWORDS_RUNNING` / Gate 1½, `pipeline/stages/keywords/llm.py`).** One extra line is appended to
 the keyword-writing prompt, per niche (`pipeline/niches.py`'s `NICHE_KEYWORD_GUIDANCE`) -- e.g. True Crime's
 line asks for "gritty, dark, historical, atmospheric" phrasing and to penalize anything that reads as bright
 modern stock; Pet Product's asks for "vibrant, warm, macro" phrasing built around texture and emotion. This

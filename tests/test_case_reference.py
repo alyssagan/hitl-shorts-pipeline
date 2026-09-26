@@ -288,20 +288,30 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(r.json()["visual_checklist"], [])
 
     def test_visual_checklist_generate_over_http(self):
-        job = self.client.post(f"/jobs/{self.jid}/start").json()
-        # fake registry's keyword stage proposes one keyword -- approve it so generate has something to draft from.
-        job = self.client.get(f"/jobs/{self.jid}").json()
-        # Poll briefly for keywords_review since start() runs the keyword stage asynchronously.
+        # Keywords are auto-approved by default (docs/PIPELINE_STAGES.md) -- turn that off for this job so
+        # there's a real keywords_review stop with something to manually approve before generate runs.
+        jid = self.client.post("/jobs", json={"subject": "cats", "providers": {
+            "keywords": "fake", "scenes": "fake", "render": "fake",
+            "options": {"auto_approve_keywords": False}}}).json()["id"]
+        self.client.post(f"/jobs/{jid}/start")
         import time
-        end = time.time() + 5
-        while job["state"] != "keywords_review" and time.time() < end:
-            time.sleep(0.02)
-            job = self.client.get(f"/jobs/{self.jid}").json()
-        self.assertEqual(job["state"], "keywords_review")
-        kw_id = job["keywords"][0]["id"]
-        self.client.post(f"/jobs/{self.jid}/keywords/review", json={"approved_ids": [kw_id]})
 
-        r = self.client.post(f"/jobs/{self.jid}/visual-checklist/generate", json={"reviewer": "Aly"})
+        def wait_for(state):
+            end = time.time() + 5
+            job = self.client.get(f"/jobs/{jid}").json()
+            while job["state"] != state and time.time() < end:
+                time.sleep(0.02)
+                job = self.client.get(f"/jobs/{jid}").json()
+            self.assertEqual(job["state"], state)
+            return job
+
+        wait_for("script_review")
+        self.client.post(f"/jobs/{jid}/script/approve", json={"reviewer": "Aly"})
+        job = wait_for("keywords_review")
+        kw_id = job["keywords"][0]["id"]
+        self.client.post(f"/jobs/{jid}/keywords/review", json={"approved_ids": [kw_id]})
+
+        r = self.client.post(f"/jobs/{jid}/visual-checklist/generate", json={"reviewer": "Aly"})
         self.assertEqual(r.status_code, 200)
         self.assertGreaterEqual(len(r.json()["visual_checklist"]), 1)
 

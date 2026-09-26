@@ -66,11 +66,14 @@ class CheckVisualCoverageTests(Base):
     async def test_cross_references_scenes_by_shared_search_term(self):
         orch = self.make()
         job = await self.to_scenes_review(orch)
-        term = job.approved_keywords[0].term
+        # Since the 2026-09-25 reorder, keywords are tagged one-per-scene (Keyword.scene_index) rather
+        # than every scene sharing the whole approved pool -- so a linked term now cross-references
+        # exactly the one scene it was generated for.
+        scene = job.scenes[0]
+        term = scene.search_terms[0]
         job = await orch.add_checklist_item(job.id, "x", linked_keyword_term=term, reviewer="Aly")
         report = orch.check_visual_coverage(job.id)
-        # FakeScenes gives every one of its 3 scenes the same first approved keyword as its search_terms.
-        self.assertEqual(len(report["unresolved"][0]["linked_scene_ids"]), 3)
+        self.assertEqual(report["unresolved"][0]["linked_scene_ids"], [scene.id])
 
     async def test_fulfilled_case_item_with_a_non_case_asset_is_a_category_mismatch(self):
         # #12: "fulfilled" isn't automatically the end of the story -- pointing a case-group need at

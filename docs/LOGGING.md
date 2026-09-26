@@ -228,7 +228,7 @@ way, "which API, which model, tokens, where the keywords came from" is answered 
 decision log, not by remembering which terminal session generated the file weeks earlier.
 
 The same `logic` this section records is now also written to its own file, `keywords_proposed.json`, in every
-job's project folder -- not just the decision log -- and once Gate 1 closes, `keywords_approved.json` records
+job's project folder -- not just the decision log -- and once keywords are approved (Gate 1½), `keywords_approved.json` records
 the final approved list the same way. Every keyword provider writes these, not just `llm`: a `manual` run's
 editable-draft file (`scripts/poc.py`'s `edit_keywords_draft` -- no LLM call, an actual file to edit instead of
 guessing from the subject) and a reused library set (`choose_library_set`, `"reused_from_job"`/

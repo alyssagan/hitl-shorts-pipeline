@@ -107,10 +107,15 @@ class StageTimingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             job = await orch.create_job("cats", ProviderChoice(keywords="fake", scenes="fake", render="fake", sources=[]),
                                         reviewer="Aly")
             await orch.start(job.id, reviewer="Aly")
-            await orch.run_pending(job.id)                          # keywords_running -> keywords_review
+            await orch.run_pending(job.id)                          # script_running -> script_review
             job = orch.get(job.id)
-            self.assertEqual(job.state.value, "keywords_review")
-            job = await orch.review_keywords(job.id, [job.keywords[0].id], reviewer="Aly")
+            self.assertEqual(job.state.value, "script_review")
+            job = await orch.approve_script(job.id, reviewer="Aly")
+            self.assertEqual(job.state.value, "keywords_running")
+            # Keywords are auto-approved by default (docs/PIPELINE_STAGES.md), so this one run_pending
+            # call both generates them and carries the job straight through to scenes.
+            await orch.run_pending(job.id)
+            job = orch.get(job.id)
             self.assertEqual(job.state.value, "scenes_running")
             await orch.run_pending(job.id)                          # scenes_running -> scenes_review
             job = orch.get(job.id)
@@ -124,8 +129,9 @@ class StageTimingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             entries = orch.store.decisions(job.id).entries()
             started = [e for e in entries if e["action"] == "stage_started"]
             finished = [e for e in entries if e["action"] == "stage_finished"]
-            self.assertEqual({e["subject"]["stage"] for e in started}, {"keywords_running", "scenes_running", "rendering"})
-            self.assertEqual({e["subject"]["stage"] for e in finished}, {"keywords_running", "scenes_running", "rendering"})
+            expected_stages = {"script_running", "keywords_running", "scenes_running", "rendering"}
+            self.assertEqual({e["subject"]["stage"] for e in started}, expected_stages)
+            self.assertEqual({e["subject"]["stage"] for e in finished}, expected_stages)
             for e in finished:
                 self.assertIsInstance(e["outputs"]["duration_seconds"], (int, float))
                 self.assertGreaterEqual(e["outputs"]["duration_seconds"], 0.0)
@@ -133,7 +139,7 @@ class StageTimingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             summaries = [e for e in entries if e["action"] == "job_summary"]
             self.assertEqual(len(summaries), 1)                     # written exactly once, on reaching COMPLETED
             out = summaries[0]["outputs"]
-            self.assertEqual(set(out["time_per_stage_seconds"]), {"keywords_running", "scenes_running", "rendering"})
+            self.assertEqual(set(out["time_per_stage_seconds"]), expected_stages)
             self.assertEqual(out, orch.timing_summary(job.id))       # matches what a fresh computation would give
 
     async def test_failed_stage_records_duration_and_a_summary_too(self):
@@ -143,6 +149,9 @@ class StageTimingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             job = await orch.create_job("cats", ProviderChoice(keywords="fake", scenes="fake", render="fake", sources=[]),
                                         reviewer="Aly")
             await orch.start(job.id, reviewer="Aly")
+            await orch.run_pending(job.id)                          # script_running -> script_review
+            job = await orch.approve_script(job.id, reviewer="Aly")  # -> keywords_running
+            self.assertEqual(job.state.value, "keywords_running")
             await orch.run_pending(job.id)
             job = orch.get(job.id)
             self.assertEqual(job.state.value, "failed")

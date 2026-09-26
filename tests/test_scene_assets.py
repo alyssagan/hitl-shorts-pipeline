@@ -51,8 +51,11 @@ class Base(unittest.IsolatedAsyncioTestCase):
     async def to_assets_review(self, orch, sources=("commons",)):
         job = await orch.create_job("Cute cats!", ProviderChoice(keywords="fake", scenes="fake", render="fake", sources=list(sources)))
         await orch.start(job.id)
+        job = await orch.run_pending(job.id)                        # -> SCRIPT_REVIEW
+        job = await orch.approve_script(job.id, reviewer="Aly")     # -> KEYWORDS_RUNNING
+        # Keywords are auto-approved by default (docs/PIPELINE_STAGES.md), so one run_pending call
+        # here both generates them and carries the job straight through to sourcing.
         job = await orch.run_pending(job.id)
-        job = await orch.review_keywords(job.id, [job.keywords[0].id], reviewer="Aly")
         self.assertEqual(job.state, S.SOURCING_RUNNING)
         return await orch.run_pending(job.id)
 
@@ -61,8 +64,9 @@ class Base(unittest.IsolatedAsyncioTestCase):
         shortest path tests/test_orchestrator.py uses."""
         job = await orch.create_job("cats", FAKE_NO_SOURCES)
         await orch.start(job.id)
-        job = await orch.run_pending(job.id)
-        job = await orch.review_keywords(job.id, [job.keywords[0].id])
+        job = await orch.run_pending(job.id)                        # -> SCRIPT_REVIEW
+        job = await orch.approve_script(job.id, reviewer="Aly")     # -> KEYWORDS_RUNNING
+        job = await orch.run_pending(job.id)                        # auto-approved keywords -> SCENES_RUNNING
         self.assertEqual(job.state, S.SCENES_RUNNING)
         return await orch.run_pending(job.id)
 

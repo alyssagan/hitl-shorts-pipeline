@@ -1,10 +1,22 @@
 """Pure state machine for the job lifecycle. No I/O, no side effects beyond
 mutating the Job passed in, so it is trivial to test and reason about.
 
+Reordered 2026-09-25 (docs/PIPELINE_STAGES.md): the script is written and approved FIRST; keywords
+(one search term per scene) are derived from it, then auto-approved by default straight through
+KEYWORDS_REVIEW -- folded into Gate 2 rather than their own screen (job.providers.options
+["auto_approve_keywords"], default True; Orchestrator._auto_approve_keywords). The state and the
+approve_keywords/reject_keywords events are unchanged and still fully work as a real human gate --
+turning auto-approval off is enough to require one again, no other rewiring needed.
+
     CREATED
       | start
       v
-    KEYWORDS_RUNNING --keywords_ready--> KEYWORDS_REVIEW  (human gate 1)
+    SCRIPT_RUNNING --script_ready--> SCRIPT_REVIEW  (human gate 1)
+      ^                                  |  approve_script (script + scenes exist)
+      |  reject_script (+feedback)       |
+      +----------------------------------+
+                                         v
+    KEYWORDS_RUNNING --keywords_ready--> KEYWORDS_REVIEW  (auto-approved by default)
       ^                                     |  approve_keywords (>=1 approved)
       |  reject_keywords (+feedback)        |
       +-------------------------------------+
@@ -32,10 +44,12 @@ from .models import Job, JobState, RUNNING_STATES, TERMINAL_STATES
 
 S = JobState
 
-# (from_state, event) -> to_state.  `approve_keywords`, `fail`, `retry` and
-# `cancel` are handled separately because their targets depend on the job.
+# (from_state, event) -> to_state.  `approve_keywords`, `approve_script`, `fail`, `retry` and `cancel`
+# are handled separately because their targets depend on the job.
 TRANSITIONS: dict[tuple[JobState, str], JobState] = {
-    (S.CREATED, "start"): S.KEYWORDS_RUNNING,
+    (S.CREATED, "start"): S.SCRIPT_RUNNING,
+    (S.SCRIPT_RUNNING, "script_ready"): S.SCRIPT_REVIEW,
+    (S.SCRIPT_REVIEW, "reject_script"): S.SCRIPT_RUNNING,
     (S.KEYWORDS_RUNNING, "keywords_ready"): S.KEYWORDS_REVIEW,
     (S.KEYWORDS_REVIEW, "reject_keywords"): S.KEYWORDS_RUNNING,
     (S.SOURCING_RUNNING, "sourcing_done"): S.VETTING_RUNNING,
@@ -52,7 +66,7 @@ TRANSITIONS: dict[tuple[JobState, str], JobState] = {
     (S.RENDERING, "render_done"): S.COMPLETED,
 }
 
-EVENTS = {e for _, e in TRANSITIONS} | {"approve_keywords", "fail", "retry", "cancel"}
+EVENTS = {e for _, e in TRANSITIONS} | {"approve_keywords", "approve_script", "fail", "retry", "cancel"}
 
 
 class TransitionError(Exception):
@@ -85,6 +99,12 @@ def _target(job: Job, event: str) -> JobState:
         if state in TERMINAL_STATES:
             raise TransitionError(f"job is already {state.value}")
         return S.CANCELLED
+    if event == "approve_script":
+        if state is not S.SCRIPT_REVIEW:
+            raise TransitionError(f"event 'approve_script' not allowed in state '{state.value}'")
+        if not job.scenes or not job.script.strip():
+            raise TransitionError("there is no script to approve yet")
+        return S.KEYWORDS_RUNNING
     if event == "approve_keywords":
         if state is not S.KEYWORDS_REVIEW:
             raise TransitionError(f"event 'approve_keywords' not allowed in state '{state.value}'")
@@ -125,7 +145,7 @@ def apply(job: Job, event: str, note: str = "") -> Job:
     elif event == "retry":
         job.error = None
         job.failed_from = None
-    elif event in ("keywords_ready", "sourcing_done", "vetting_done", "scenes_ready"):
+    elif event in ("script_ready", "keywords_ready", "sourcing_done", "vetting_done", "scenes_ready"):
         job.error = None
 
     job.state = target

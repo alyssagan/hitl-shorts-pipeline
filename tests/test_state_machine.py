@@ -13,7 +13,11 @@ def job_in(state, **kw):
 class StateMachineTests(unittest.TestCase):
     def test_happy_path(self):
         j = Job(subject="x")
-        sm.apply(j, "start");            self.assertEqual(j.state, S.KEYWORDS_RUNNING)
+        sm.apply(j, "start");            self.assertEqual(j.state, S.SCRIPT_RUNNING)
+        sm.apply(j, "script_ready");     self.assertEqual(j.state, S.SCRIPT_REVIEW)
+        j.script = "n"
+        j.scenes = [Scene(index=0, narration="n")]
+        sm.apply(j, "approve_script");   self.assertEqual(j.state, S.KEYWORDS_RUNNING)
         sm.apply(j, "keywords_ready");   self.assertEqual(j.state, S.KEYWORDS_REVIEW)
         j.keywords = [Keyword(term="a", approved=True)]
         sm.apply(j, "approve_keywords"); self.assertEqual(j.state, S.SCENES_RUNNING)
@@ -23,6 +27,9 @@ class StateMachineTests(unittest.TestCase):
         sm.apply(j, "render_done");      self.assertEqual(j.state, S.COMPLETED)
 
     def test_cannot_skip_a_human_gate(self):
+        j = job_in(S.SCRIPT_RUNNING)
+        with self.assertRaises(sm.TransitionError):
+            sm.apply(j, "approve_script")
         j = job_in(S.KEYWORDS_RUNNING)
         with self.assertRaises(sm.TransitionError):
             sm.apply(j, "approve_keywords")
@@ -32,6 +39,16 @@ class StateMachineTests(unittest.TestCase):
         j = job_in(S.KEYWORDS_REVIEW)
         with self.assertRaises(sm.TransitionError):
             sm.apply(j, "render_done")
+
+    def test_script_gate_needs_a_script_and_scenes(self):
+        j = job_in(S.SCRIPT_REVIEW)
+        with self.assertRaises(sm.TransitionError):
+            sm.apply(j, "approve_script")
+        self.assertEqual(j.state, S.SCRIPT_REVIEW)     # unchanged on failure
+        j.script = "hello there"
+        j.scenes = [Scene(index=0, narration="hello there")]
+        sm.apply(j, "approve_script")
+        self.assertEqual(j.state, S.KEYWORDS_RUNNING)
 
     def test_keyword_gate_needs_an_approved_keyword(self):
         j = job_in(S.KEYWORDS_REVIEW)
@@ -50,12 +67,13 @@ class StateMachineTests(unittest.TestCase):
             sm.apply(j, "approve_scenes")
 
     def test_reject_loops_back(self):
+        self.assertEqual(sm.apply(job_in(S.SCRIPT_REVIEW), "reject_script").state, S.SCRIPT_RUNNING)
         self.assertEqual(sm.apply(job_in(S.KEYWORDS_REVIEW), "reject_keywords").state, S.KEYWORDS_RUNNING)
         self.assertEqual(sm.apply(job_in(S.SCENES_REVIEW), "reject_scenes").state, S.SCENES_RUNNING)
         self.assertEqual(sm.apply(job_in(S.SCENES_REVIEW), "back_to_keywords").state, S.KEYWORDS_REVIEW)
 
     def test_fail_and_retry_resume_the_same_stage(self):
-        for running in (S.KEYWORDS_RUNNING, S.SCENES_RUNNING, S.RENDERING):
+        for running in (S.SCRIPT_RUNNING, S.KEYWORDS_RUNNING, S.SCENES_RUNNING, S.RENDERING):
             j = job_in(running)
             sm.apply(j, "fail")
             self.assertEqual((j.state, j.failed_from), (S.FAILED, running))
@@ -63,7 +81,7 @@ class StateMachineTests(unittest.TestCase):
             self.assertEqual((j.state, j.failed_from), (running, None))
 
     def test_fail_only_from_running_states(self):
-        for s in (S.CREATED, S.KEYWORDS_REVIEW, S.SCENES_REVIEW, S.COMPLETED):
+        for s in (S.CREATED, S.SCRIPT_REVIEW, S.KEYWORDS_REVIEW, S.SCENES_REVIEW, S.COMPLETED):
             with self.assertRaises(sm.TransitionError):
                 sm.apply(job_in(s), "fail")
 

@@ -38,6 +38,21 @@ class SourcingResult:
 
 
 def queries_for(job: Job, limit: int = 5) -> list[str]:
+    # Shot-list Pass 2 (docs/ROADMAP.md, "two-pass hybrid"): when Orchestrator auto-triggers one more
+    # sourcing round to search JUST the broader fallback queries for scenes that came up empty, it sets
+    # this so THAT round searches exactly those queries and nothing else -- not the job's whole approved-
+    # keyword batch again -- which is the entire cost point of doing this in two passes instead of
+    # searching every scene's fallback queries up front (Pass 1, deliberately not done: too expensive
+    # under real API rate limits/cost constraints). Orchestrator clears this option right after the
+    # round commits, so a normal "Next batch"/"Search again" round afterward goes back to the full batch
+    # below, same as always.
+    fallback_only = job.providers.options.get("fallback_only_queries")
+    if fallback_only:
+        return list(dict.fromkeys(fallback_only))[:limit]
+    # Pass 1 stays lean on purpose: only every keyword's own primary (most specific) term is searched by
+    # default. A keyword's shot-list alternatives (Keyword.alternatives) are NOT searched here -- they
+    # only get searched in a scoped Pass 2 round (above), and only for the specific scenes that actually
+    # came up empty (Orchestrator._scenes_needing_fallback / approve_assets).
     terms = [k.term for k in job.approved_keywords]
     terms += [q for q in job.providers.options.get("extra_queries", []) if q not in terms]
     # Batching: terms that were never searched go first, so with more terms than `limit` each "search again"
@@ -50,9 +65,18 @@ def queries_for(job: Job, limit: int = 5) -> list[str]:
 
 
 def _term_groups(job: Job) -> dict[str, str]:
-    """term -> the approved keyword's QueryGroup that produced it. A term missing here (an `extra_queries`
-    entry a reviewer typed in at Gate 2, or a legacy term for some other reason) has no group of its own."""
-    return {k.term: k.group for k in job.approved_keywords}
+    """term -> the approved keyword's QueryGroup that produced it. Covers a keyword's shot-list
+    alternatives too (they share their parent keyword's group -- SCENE_PROMPT asks for one group per
+    scene, covering every query in that scene's shot list) even though Pass 1 never searches them --
+    this is what lets a Pass 2 fallback round (queries_for()'s `fallback_only_queries`, above) route an
+    activated alternative correctly the one time it IS searched. A term missing here (an `extra_queries`
+    entry a reviewer typed in at Gate 2, or a legacy term for some other reason) has no group of its
+    own -- route_queries() sends it to every configured source rather than silently dropping it."""
+    out: dict[str, str] = {}
+    for k in job.approved_keywords:
+        for t in (k.term, *k.alternatives):
+            out.setdefault(t, k.group)
+    return out
 
 
 def _routing_is_informative(job: Job) -> bool:

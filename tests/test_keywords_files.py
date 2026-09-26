@@ -14,7 +14,8 @@ from pipeline.core.orchestrator import Orchestrator
 from pipeline.core.store import JobStore
 from tests.fakes import fake_registry
 
-FAKE = ProviderChoice(keywords="fake", scenes="fake", render="fake")
+FAKE = ProviderChoice(keywords="fake", scenes="fake", render="fake",
+                       options={"auto_approve_keywords": False})
 
 
 class Base(unittest.IsolatedAsyncioTestCase):
@@ -32,6 +33,9 @@ class Base(unittest.IsolatedAsyncioTestCase):
     async def to_keywords_review(self, orch):
         job = await orch.create_job("cats", FAKE, reviewer="Aly")
         await orch.start(job.id)
+        job = await orch.run_pending(job.id)                          # -> SCRIPT_REVIEW
+        job = await orch.approve_script(job.id, reviewer="Aly")       # -> KEYWORDS_RUNNING
+        # auto_approve_keywords is off for this job's providers, so this stays a real gate.
         return await orch.run_pending(job.id)
 
 
@@ -114,6 +118,8 @@ class KeywordsLibraryCopyTests(Base):
 
         job2 = await orch.create_job("cats", FAKE, reviewer="Aly")     # same subject/slug as job1
         await orch.start(job2.id)
+        job2 = await orch.run_pending(job2.id)
+        job2 = await orch.approve_script(job2.id, reviewer="Aly")
         job2 = await orch.run_pending(job2.id)
         job2 = await orch.review_keywords(job2.id, [job2.keywords[1].id], reviewer="Aly")
 

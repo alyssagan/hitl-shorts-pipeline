@@ -232,6 +232,14 @@ def build_default_registry(settings: dict[str, Any]) -> Registry:
         generate_audio=bool(mpt_cfg.get("generate_scene_audio", False)),
         paragraphs=int(mpt_cfg.get("paragraphs", 3)),
         writer=script_writer(),
+        # write_script() (SCRIPT_RUNNING, now near the front) fetches its own research text straight
+        # from job.subject, before any keyword exists to route a normal sourcing round -- reuses
+        # whichever "wikipedia" source factory was already registered above, resolved fresh each round
+        # exactly like SourcingStage's own adapters are (Registry.source()). None (skips research
+        # entirely) if this deployment never registered "wikipedia" as a source at all.
+        research_source=reg._sources.get("wikipedia"),
+        user_agent=reg.user_agent,
+        research_transport=reg.source_transport,
     ))
     reg.register_render("mpt", lambda: MptRenderStage(
         client=mpt(),

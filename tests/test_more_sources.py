@@ -440,5 +440,48 @@ class ClipMatchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(src.last_pick)
 
 
+class ShotListMatchingTests(unittest.IsolatedAsyncioTestCase):
+    """docs/ROADMAP.md backlog item F: Scene.search_terms is now an ordered shot list (most specific
+    query first, then broader fallbacks -- Orchestrator._apply_keyword_terms_to_scenes, from
+    Keyword.term/.alternatives). AssetClipSource.fetch() must try each one alone, in order, preferring
+    a specific-query match over one that only turns up via a broader fallback term."""
+
+    async def test_prefers_the_asset_matching_the_most_specific_query(self):
+        specific = Asset(source="x", path="/p/specific", title="Corazon Amurao Interview 1966", description="", status="approved")
+        broad = Asset(source="x", path="/p/broad", title="1960s hospital ward", description="", status="approved")
+        src = AssetClipSource([broad, specific])
+        scene = Scene(index=0, narration="The sole survivor gave an interview.",
+                     search_terms=["corazon amurao interview", "1960s hospital ward"])
+        pick = await src.fetch(scene, Path("."), set())
+        self.assertEqual(pick, "/p/specific")
+        self.assertIn("most specific query", src.last_pick.reason)
+
+    async def test_falls_back_to_the_next_query_when_the_specific_one_matches_nothing(self):
+        broad = Asset(source="x", path="/p/broad", title="1960s hospital ward", description="", status="approved")
+        src = AssetClipSource([broad])
+        scene = Scene(index=0, narration="The sole survivor gave an interview.",
+                     search_terms=["corazon amurao interview", "1960s hospital ward"])
+        pick = await src.fetch(scene, Path("."), set())
+        self.assertEqual(pick, "/p/broad")
+        self.assertIn("fallback query 2 of 2", src.last_pick.reason)
+
+    async def test_falls_back_to_generic_word_overlap_when_no_single_query_matches(self):
+        # Neither shot-list term alone hits anything, but the combination of narration + every term
+        # still overlaps with this asset (the original, pre-shot-list matching behavior).
+        a = Asset(source="x", path="/p/a", title="Whitechapel street scene", description="", status="approved")
+        src = AssetClipSource([a])
+        scene = Scene(index=0, narration="A look at whitechapel street.", search_terms=["nonmatching one", "nonmatching two"])
+        pick = await src.fetch(scene, Path("."), set())
+        self.assertEqual(pick, "/p/a")
+        self.assertIn("shares words with the scene", src.last_pick.reason)
+
+    async def test_single_term_scene_behaves_exactly_as_before(self):
+        a = Asset(source="x", path="/p/a", title="Whitechapel street, 1888", description="", status="approved")
+        src = AssetClipSource([a])
+        scene = Scene(index=0, narration="A look at the case.", search_terms=["whitechapel"])
+        pick = await src.fetch(scene, Path("."), set())
+        self.assertEqual(pick, "/p/a")
+
+
 if __name__ == "__main__":
     unittest.main()

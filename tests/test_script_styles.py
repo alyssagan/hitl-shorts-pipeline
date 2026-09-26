@@ -94,7 +94,7 @@ class ScriptWriterStyledPathTests(unittest.IsolatedAsyncioTestCase):
     async def test_reviewer_feedback_still_reaches_a_styled_prompt(self):
         seen: list = []
         job = Job(subject="P vs NP", script_style="math_cs")
-        job.scene_feedback = ["too slow to get to the twist"]
+        job.script_feedback = ["too slow to get to the twist"]
         w = ScriptWriter("http://llm/v1", "k", "m", transport=chat(TRUE_CRIME_REPLY, capture=seen))
         await w.write(job, [])
         self.assertIn("too slow to get to the twist", seen[0]["messages"][1]["content"])
